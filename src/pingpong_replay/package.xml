@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>pingpong_replay</name>
+  <version>0.0.0</version>
+  <description>Replay a recorded RL right-arm trajectory (stage4g_action_trace.csv)
+    on the real robot via /mx_mix_command. Supports four input modes:
+    action, angular acceleration (qdd), angular velocity (qvel), and angle (q).</description>
+  <maintainer email="yjk2261123518@163.com">jacky</maintainer>
+  <license>TODO: License declaration</license>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>mc_core_interface</depend>
+  <depend>python3-numpy</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -1,0 +1,13 @@
+task: segment
+name: yolo_real
+description: ''
+bytes: 37810992
+url: https://platform.ultralytics.com/jinke-yao/datasets/yoloreal
+version: latest
+created_at: '2026-05-01T05:08:37.800Z'
+updated_at: '2026-05-01T05:30:25.371Z'
+names:
+  0: pingpong ball
+train: images/train
+val: images/val
+hash: 87c9b4bf

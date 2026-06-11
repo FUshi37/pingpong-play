@@ -1,0 +1,28 @@
+# Python dependencies for pingpong_controller.
+#
+# ROS 2 packages are intentionally not listed here. Install/source your ROS 2
+# distribution separately so rclpy, sensor_msgs, builtin_interfaces, etc. are
+# available from the ROS environment.
+#
+# CUDA + PyTorch:
+# Install the CUDA build of torch that matches the target machine first, using
+# the official PyTorch selector for that machine. The current development env
+# has torch 2.11.0+cu130, but other devices may need a different CUDA wheel.
+
+numpy>=2.0,<3
+opencv-python>=4.10
+pyrealsense2>=2.55
+ultralytics>=8.3,<9
+matplotlib>=3.7
+
+# YOLO inference and the future RL policy/action network are expected to use
+# PyTorch. Keep torch/torchvision/torchaudio CUDA-compatible on deployment.
+torch>=2.3
+torchvision>=0.18
+torchaudio>=2.3
+
+# Optional but commonly useful for RL policy checkpoints and wrappers. If the
+# final policy is a plain torch .pt/.pth module, torch alone is enough; if it is
+# an SB3 .zip policy, keep stable-baselines3 installed.
+gymnasium>=0.29,<2
+stable-baselines3>=2.3,<3

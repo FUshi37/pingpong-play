@@ -1,0 +1,24 @@
+[0.413s] Invoking command in '/home/yangzhe/Project/pingpong_controller/build/pingpong_controller': CONDA_PROMPT_MODIFIER=(pingpong) DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/yangzhe/Project/pingpong_controller/build/pingpong_controller/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/yangzhe/Project/pingpong_controller/build/pingpong_controller/build --no-deps symlink_data
+[0.545s] running develop
+[0.616s] running egg_info
+[0.616s] creating pingpong_controller.egg-info
+[0.623s] writing pingpong_controller.egg-info/PKG-INFO
+[0.623s] writing dependency_links to pingpong_controller.egg-info/dependency_links.txt
+[0.623s] writing entry points to pingpong_controller.egg-info/entry_points.txt
+[0.623s] writing requirements to pingpong_controller.egg-info/requires.txt
+[0.623s] writing top-level names to pingpong_controller.egg-info/top_level.txt
+[0.623s] writing manifest file 'pingpong_controller.egg-info/SOURCES.txt'
+[0.637s] reading manifest file 'pingpong_controller.egg-info/SOURCES.txt'
+[0.637s] writing manifest file 'pingpong_controller.egg-info/SOURCES.txt'
+[0.644s] running build_ext
+[0.645s] Creating /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/python3.12/site-packages/pingpong-controller.egg-link (link to .)
+[0.645s] Installing pingpong_node script to /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/pingpong_controller
+[0.645s] 
+[0.645s] Installed /home/yangzhe/Project/pingpong_controller/build/pingpong_controller
+[0.645s] running symlink_data
+[0.645s] creating /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/ament_index
+[0.645s] creating /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/ament_index/resource_index
+[0.645s] creating /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/ament_index/resource_index/packages
+[0.645s] symbolically linking /home/yangzhe/Project/pingpong_controller/build/pingpong_controller/resource/pingpong_controller -> /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/ament_index/resource_index/packages
+[0.645s] symbolically linking /home/yangzhe/Project/pingpong_controller/build/pingpong_controller/package.xml -> /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/pingpong_controller
+[0.657s] Invoked command in '/home/yangzhe/Project/pingpong_controller/build/pingpong_controller' returned '0': CONDA_PROMPT_MODIFIER=(pingpong) DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/yangzhe/Project/pingpong_controller/build/pingpong_controller/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/yangzhe/Project/pingpong_controller/build/pingpong_controller/build --no-deps symlink_data

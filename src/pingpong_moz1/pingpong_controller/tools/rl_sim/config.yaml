@@ -1,0 +1,44 @@
+common:
+  seed: 1
+  horizon_sec: 6.0
+  frame_skip: 5
+  action_scale_arm_rad: 0.025
+  action_scale_base_xy: 0.020
+  action_scale_base_yaw: 0.030
+  ball_launch_height: 0.32
+  target_height: 0.42
+  posture_weight: 0.60
+  torque_penalty_weight: 0.0005
+
+train_juggle_rl:
+  xml: /home/jacky/pingpong_ws/src/pingpong_controller/pingpong_controller/tools/rl_sim/moz1_pd.xml
+  total_steps: 10000000
+  n_envs: 16
+  save_dir: /home/jacky/pingpong_ws/src/pingpong_controller/pingpong_controller/outputs/rl_sim
+  eval_freq: 20000
+  checkpoint_freq: 50000
+  device: cuda
+  resume_from: null
+  reset_num_timesteps: false
+
+validate_juggle_rl:
+  xml: /home/jacky/pingpong_ws/src/pingpong_controller/pingpong_controller/tools/rl_sim/moz1_pd.xml
+  checkpoint: /home/jacky/pingpong_ws/src/pingpong_controller/pingpong_controller/outputs/rl_sim/best/best_model.zip
+  episodes: 5
+  deterministic: true
+  realtime: false
+  slowmo: 1.0
+  print_every: 20
+  log_hit_events: true
+  hit_freeze_sec: 0.12
+  plot_trajectory: false
+  plot_height: false
+  save_trajectory_dir: null
+  no_show_plot: false
+  record_video: false
+  video_dir: null
+  video_fps: 30
+  video_width: 640
+  video_height: 480
+  headless: false
+  device: cpu

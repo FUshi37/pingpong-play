@@ -1,0 +1,17 @@
+[0.321s] Invoking command in '/home/yangzhe/Project/pingpong_controller/build/pingpong_controller': CONDA_PROMPT_MODIFIER=(pingpong) DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/yangzhe/Project/pingpong_controller/build/pingpong_controller/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/yangzhe/Project/pingpong_controller/build/pingpong_controller/build --no-deps symlink_data
+[0.449s] running develop
+[0.520s] running egg_info
+[0.527s] writing pingpong_controller.egg-info/PKG-INFO
+[0.527s] writing dependency_links to pingpong_controller.egg-info/dependency_links.txt
+[0.527s] writing entry points to pingpong_controller.egg-info/entry_points.txt
+[0.527s] writing requirements to pingpong_controller.egg-info/requires.txt
+[0.527s] writing top-level names to pingpong_controller.egg-info/top_level.txt
+[0.541s] reading manifest file 'pingpong_controller.egg-info/SOURCES.txt'
+[0.542s] writing manifest file 'pingpong_controller.egg-info/SOURCES.txt'
+[0.549s] running build_ext
+[0.549s] Creating /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/python3.12/site-packages/pingpong-controller.egg-link (link to .)
+[0.549s] Installing pingpong_node script to /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/pingpong_controller
+[0.549s] 
+[0.549s] Installed /home/yangzhe/Project/pingpong_controller/build/pingpong_controller
+[0.550s] running symlink_data
+[0.563s] Invoked command in '/home/yangzhe/Project/pingpong_controller/build/pingpong_controller' returned '0': CONDA_PROMPT_MODIFIER=(pingpong) DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/yangzhe/Project/pingpong_controller/build/pingpong_controller/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/yangzhe/Project/pingpong_controller/build/pingpong_controller/build --no-deps symlink_data

@@ -1,0 +1,2 @@
+[console_scripts]
+pingpong_node = pingpong_controller.pingpong_node:main

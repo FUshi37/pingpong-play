@@ -1,0 +1,22 @@
+running develop
+running egg_info
+creating pingpong_controller.egg-info
+writing pingpong_controller.egg-info/PKG-INFO
+writing dependency_links to pingpong_controller.egg-info/dependency_links.txt
+writing entry points to pingpong_controller.egg-info/entry_points.txt
+writing requirements to pingpong_controller.egg-info/requires.txt
+writing top-level names to pingpong_controller.egg-info/top_level.txt
+writing manifest file 'pingpong_controller.egg-info/SOURCES.txt'
+reading manifest file 'pingpong_controller.egg-info/SOURCES.txt'
+writing manifest file 'pingpong_controller.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/python3.12/site-packages/pingpong-controller.egg-link (link to .)
+Installing pingpong_node script to /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/lib/pingpong_controller
+
+Installed /home/yangzhe/Project/pingpong_controller/build/pingpong_controller
+running symlink_data
+creating /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/ament_index
+creating /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/ament_index/resource_index
+creating /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/ament_index/resource_index/packages
+symbolically linking /home/yangzhe/Project/pingpong_controller/build/pingpong_controller/resource/pingpong_controller -> /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/ament_index/resource_index/packages
+symbolically linking /home/yangzhe/Project/pingpong_controller/build/pingpong_controller/package.xml -> /home/yangzhe/Project/pingpong_controller/install/pingpong_controller/share/pingpong_controller

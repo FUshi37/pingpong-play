@@ -1,0 +1,9 @@
+source;share/pingpong_controller/hook/pythonpath.ps1
+source;share/pingpong_controller/hook/pythonpath.dsv
+source;share/pingpong_controller/hook/pythonpath.sh
+source;share/pingpong_controller/hook/ament_prefix_path.ps1
+source;share/pingpong_controller/hook/ament_prefix_path.dsv
+source;share/pingpong_controller/hook/ament_prefix_path.sh
+source;../../build/pingpong_controller/share/pingpong_controller/hook/pythonpath_develop.ps1
+source;../../build/pingpong_controller/share/pingpong_controller/hook/pythonpath_develop.dsv
+source;../../build/pingpong_controller/share/pingpong_controller/hook/pythonpath_develop.sh

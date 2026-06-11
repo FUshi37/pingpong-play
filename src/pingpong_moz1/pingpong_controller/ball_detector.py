@@ -22,15 +22,28 @@ class KalmanFilter:
     用于平滑球的位置并估计速度
     """
 
-    def __init__(self, dt=1 / 60.0, camera_tilt_deg=0.0):
+    def __init__(self, dt=1 / 60.0, camera_tilt_deg=0.0, use_gravity=True,
+                 q_pos=500.0, q_vel_mult=100.0, r_meas_mm=25.0):
         """
         Args:
             dt: 时间步长（秒），默认60Hz
             camera_tilt_deg: 相机绕X轴旋转角度（度）
                            正值=向下俯视，负值=向上仰视
+            use_gravity: 是否在运动模型中加入重力项。
+                         仅当卡尔曼运行在 camera 坐标系下才正确；
+                         base_link 等其他坐标系应关闭（重力方向不一致）。
+            q_pos: 位置过程噪声。
+            q_vel_mult: 速度过程噪声相对位置的倍数（Q_vel = q_pos * q_vel_mult）。
+                        值越大速度跟踪越快但越抖。中等档默认 100，
+                        对乒乓球这种快速运动可在 ~0.3s 内收敛速度。
+            r_meas_mm: 测量噪声标准差（mm）。
         """
         self.dt = dt
         self.camera_tilt_deg = camera_tilt_deg
+        self.use_gravity = use_gravity
+        self.q_pos = float(q_pos)
+        self.q_vel_mult = float(q_vel_mult)
+        self.r_meas_mm = float(r_meas_mm)
         self.initialized = False
 
         # 状态向量 [x, y, z, vx, vy, vz]
@@ -50,9 +63,10 @@ class KalmanFilter:
         ])
 
         # 过程噪声协方差（球运动的不确定性）
-        q = 100  # 调整这个值来平衡平滑度和响应速度
-        self.Q = np.eye(6) * q
-        self.Q[3:, 3:] *= 10  # 速度的不确定性更大
+        # q_pos 控制位置，速度项额外乘 q_vel_mult。中等档默认让速度
+        # 在乒乓球飞行的零点几秒内就能跟上，避免估计严重滞后。
+        self.Q = np.eye(6) * self.q_pos
+        self.Q[3:, 3:] *= self.q_vel_mult  # 速度的不确定性更大
 
         # 测量矩阵（只测量位置）
         self.H = np.array([
@@ -62,26 +76,31 @@ class KalmanFilter:
         ])
 
         # 测量噪声协方差
-        r = 25  # 测量噪声（mm）
-        self.R = np.eye(3) * (r ** 2)
+        self.R = np.eye(3) * (self.r_meas_mm ** 2)
 
-        # 计算重力在相机坐标系中的分量
-        # 重力加速度 9800 mm/s^2
-        g = 9800
-        tilt_rad = np.radians(camera_tilt_deg)
+        # 计算每帧的重力速度增量（仅在 camera 坐标系下有效）。
+        self.gravity = self._compute_gravity(dt)
+        self.last_innovation = None
 
-        # 相机坐标系：X右，Y下，Z前
-        # 相机绕X轴旋转（正值=向下俯视）
-        # 重力向下，在旋转后相机系中的分量：
-        # - X分量：0（重力不沿X方向）
-        # - Y分量：g * cos(tilt)（Y轴与重力夹角）
-        # - Z分量：g * sin(tilt)（Z轴向前下倾斜时，重力有正Z分量）
-        self.gravity = np.array([
+    def _compute_gravity(self, dt):
+        """计算单帧重力对速度的增量（mm/s），单位已乘 dt。
+
+        仅当 use_gravity=True 且卡尔曼运行在 camera 坐标系下才物理正确。
+        相机坐标系：X右，Y下，Z前；相机绕X轴 tilt（正值=向下俯视）。
+        - X分量：0
+        - Y分量：g * cos(tilt)
+        - Z分量：g * sin(tilt)
+        其他坐标系（如 base_link）重力方向不同，应关闭重力项返回零向量。
+        """
+        if not self.use_gravity:
+            return np.zeros(3)
+        g = 9800  # 重力加速度 9800 mm/s^2
+        tilt_rad = np.radians(self.camera_tilt_deg)
+        return np.array([
             0,
             g * np.cos(tilt_rad) * dt,
             g * np.sin(tilt_rad) * dt
         ])
-        self.last_innovation = None
 
     def _update_motion_model(self, dt):
         """根据真实时间间隔更新运动模型。"""
@@ -95,14 +114,7 @@ class KalmanFilter:
             [0, 0, 0, 0, 1, 0],
             [0, 0, 0, 0, 0, 1]
         ])
-
-        g = 9800
-        tilt_rad = np.radians(self.camera_tilt_deg)
-        self.gravity = np.array([
-            0,
-            g * np.cos(tilt_rad) * dt,
-            g * np.sin(tilt_rad) * dt
-        ])
+        self.gravity = self._compute_gravity(dt)
 
     def predict(self, dt=None):
         """预测下一状态"""
@@ -123,20 +135,29 @@ class KalmanFilter:
     def innovation(self, measurement, dt=None):
         """
         计算当前测量相对于预测状态的残差，但不更新滤波器。
+        本方法无副作用：不修改 self.F / self.gravity / self.state / self.P。
         """
         z = np.array(measurement, dtype=float)
         predicted_state = self.state.copy()
         predicted_P = self.P.copy()
 
         if self.initialized:
-            if dt is not None:
-                self._update_motion_model(dt)
-            predicted_state = self.F @ predicted_state
-            predicted_state[3:6] += self.gravity
-            predicted_P = self.F @ predicted_P @ self.F.T + self.Q
+            # 用临时的运动模型做预测，不写回 self.F / self.gravity
+            step_dt = self.dt if dt is None else max(float(dt), 1e-3)
+            F = np.array([
+                [1, 0, 0, step_dt, 0, 0],
+                [0, 1, 0, 0, step_dt, 0],
+                [0, 0, 1, 0, 0, step_dt],
+                [0, 0, 0, 1, 0, 0],
+                [0, 0, 0, 0, 1, 0],
+                [0, 0, 0, 0, 0, 1]
+            ])
+            gravity = self._compute_gravity(step_dt)
+            predicted_state = F @ predicted_state
+            predicted_state[3:6] += gravity
+            predicted_P = F @ predicted_P @ F.T + self.Q
 
         innovation = z - self.H @ predicted_state
-        self.last_innovation = innovation.copy()
         return innovation, predicted_state, predicted_P
 
     def update(self, measurement, dt=None, measurement_noise_mm=None):
@@ -511,9 +532,17 @@ class PingPongBallDetector:
 
         # 初始化卡尔曼滤波器（默认不使用，--kalman 可开启）
         if self.use_kalman:
+            # 重力项只有当卡尔曼运行在 camera 坐标系下才物理正确。
+            # 输出 base_link 时，pos_raw 已转换坐标系，重力方向不再是
+            # camera 系的 (0, cos, sin)，因此关闭重力项退回纯匀速模型，
+            # 避免给速度叠加一个错误方向的恒定偏置。
+            kalman_use_gravity = (self.output_frame == 'camera')
             self.kalman = KalmanFilter(
-                dt=1.0 / fps, camera_tilt_deg=camera_tilt_deg)
-            print("卡尔曼滤波器已初始化")
+                dt=1.0 / fps, camera_tilt_deg=camera_tilt_deg,
+                use_gravity=kalman_use_gravity)
+            print(
+                f"卡尔曼滤波器已初始化 (use_gravity={kalman_use_gravity}, "
+                f"output_frame={self.output_frame})")
         else:
             self.kalman = None
             print("源头 One Euro Filter 平滑已启用")
@@ -1347,19 +1376,23 @@ class PingPongBallDetector:
 
         # 观测可信：平滑位置
         if self.use_kalman and self.kalman is not None:
-            # 使用卡尔曼仅做平滑（不做预测）
+            # 卡尔曼同时输出平滑位置和速度估计
             state = self.kalman.update(
                 pos_raw, dt=dt, measurement_noise_mm=30.0)
             pos_smoothed = state[:3].tolist()
+            # 直接使用卡尔曼状态中的速度估计 state[3:6]，
+            # 而不是再对位置历史做差分/拟合（那样会丢弃卡尔曼的速度，
+            # 并因过度平滑产生看似固定的速度值）。
+            velocity = state[3:6].tolist()
+            # 仍然维护干净历史，供卡尔曼未初始化等 fallback 场景使用。
+            self.position_history.append((now, pos_smoothed))
         else:
             # 使用简单 EMA 平滑
             pos_smoothed = self._smooth_position(pos_raw).tolist()
-
-        # 更新干净的位置历史
-        self.position_history.append((now, pos_smoothed))
-
-        # 从干净历史计算速度
-        velocity = self._calculate_velocity_from_clean_history()
+            # 更新干净的位置历史
+            self.position_history.append((now, pos_smoothed))
+            # 从干净历史计算速度
+            velocity = self._calculate_velocity_from_clean_history()
 
         return {
             'position': pos_smoothed,

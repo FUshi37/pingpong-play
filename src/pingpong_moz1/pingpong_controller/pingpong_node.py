@@ -159,6 +159,20 @@ class PingPongControllerNode(Node):
             self.source_module_dir, 'outputs', 'pingpong_base_trajectory.csv')
         default_trajectory_json_path = os.path.join(
             self.source_module_dir, 'outputs', 'pingpong_base_trajectory.json')
+        default_safe_init_pose_csv = os.path.join(
+            self.source_module_dir, 'outputs', 'rl_sim',
+            'stage4g_action_trace.csv')
+
+        # Ball-lost failsafe: after the ball has gone undetected for longer
+        # than the timeout, stop running the RL policy and smoothly drive the
+        # right arm back to a fixed safe init posture (the right-arm angles in
+        # frame 0 of the recorded action trace below). The safety limiter
+        # ramps toward that posture under the normal vel/acc limits, so the
+        # move stays smooth. RL resumes as soon as the ball is reacquired.
+        self.declare_parameter('enable_ball_lost_failsafe', True)
+        self.declare_parameter('ball_lost_failsafe_timeout_s', 1.0)
+        self.declare_parameter(
+            'safe_init_pose_csv_path', default_safe_init_pose_csv)
 
         self.declare_parameter('yolo_model_path', default_model_path)
         self.declare_parameter(
@@ -307,6 +321,19 @@ class PingPongControllerNode(Node):
         self.rl_ball_obs_age_clip = float(
             self.get_parameter('rl_ball_obs_age_clip').value)
 
+        # Ball-lost failsafe parameters.
+        self.enable_ball_lost_failsafe = bool(
+            self.get_parameter('enable_ball_lost_failsafe').value)
+        self.ball_lost_failsafe_timeout_s = float(
+            self.get_parameter('ball_lost_failsafe_timeout_s').value)
+        self.safe_init_pose_csv_path = self.get_parameter(
+            'safe_init_pose_csv_path').value
+        # Resolved length-7 safe init posture (rad); built after RL setup so we
+        # can fall back to the policy's training initial posture if the CSV is
+        # unreadable. _failsafe_active tracks whether we are currently parked.
+        self.safe_init_pose_q = None
+        self._failsafe_active = False
+
         # Robot XML for FK (default to models/moz1_pd.xml in same directory).
         default_robot_xml = os.path.join(
             os.path.dirname(os.path.abspath(__file__)),
@@ -381,6 +408,19 @@ class PingPongControllerNode(Node):
             f'(control_rate_hz={self.control_rate_hz:.1f})')
         self._safety_log_period_s = 1.0
         self._safety_log_last_wall = time.time()
+
+        # Resolve the ball-lost failsafe target posture now that the RL
+        # initial posture (used as fallback) is available.
+        self.safe_init_pose_q = self._load_safe_init_pose()
+        if self.enable_ball_lost_failsafe:
+            self.get_logger().info(
+                'Ball-lost failsafe enabled: after '
+                f'{self.ball_lost_failsafe_timeout_s:.2f}s without a valid '
+                'detection, RL is paused and the right arm ramps to safe pose '
+                f'(deg={np.rad2deg(self.safe_init_pose_q).round(2).tolist()})')
+        else:
+            self.get_logger().info(
+                'Ball-lost failsafe disabled (enable_ball_lost_failsafe=False)')
 
         # Init pose state (whole-body drive to TARGET_DEGREES before RL runs).
         self.enable_init_pose = bool(
@@ -614,6 +654,43 @@ class PingPongControllerNode(Node):
     # ------------------------------------------------------------------
     # Detector initialization helpers
     # ------------------------------------------------------------------
+
+    def _load_safe_init_pose(self) -> np.ndarray:
+        """Resolve the ball-lost failsafe right-arm posture (rad, length 7).
+
+        Reads the right-arm ``arm_cmd_q/RightArm-{0..6}`` columns from frame 0
+        (first data row) of the action-trace CSV. Falls back to the RL policy's
+        training initial posture if the CSV is missing, malformed, or lacks the
+        expected columns, so the failsafe always has a usable target.
+        """
+        fallback = np.asarray(
+            target_right_arm_q_rad(), dtype=np.float64).reshape(-1)
+        path = self.safe_init_pose_csv_path
+        if not path or not os.path.exists(path):
+            self.get_logger().warn(
+                f'Safe init pose CSV not found ({path}); '
+                'using RL training initial posture as failsafe target')
+            return fallback
+        try:
+            with open(path, newline='') as csvfile:
+                reader = csv.DictReader(csvfile)
+                first_row = next(reader)
+            cols = [f'arm_cmd_q/{name}' for name in RIGHT_ARM_JOINTS]
+            pose = np.array(
+                [float(first_row[col]) for col in cols], dtype=np.float64)
+        except (StopIteration, KeyError, ValueError, OSError) as exc:
+            self.get_logger().warn(
+                f'Failed to read safe init pose from {path}: {exc}; '
+                'using RL training initial posture as failsafe target')
+            return fallback
+        if pose.shape != (7,) or not np.all(np.isfinite(pose)):
+            self.get_logger().warn(
+                f'Safe init pose from {path} is invalid; '
+                'using RL training initial posture as failsafe target')
+            return fallback
+        self.get_logger().info(
+            f'Loaded safe init pose from frame 0 of: {path}')
+        return pose
 
     def _resolve_calibration_json_path(
             self, requested_path, module_dir, image_width=None, image_height=None):
@@ -1363,6 +1440,15 @@ class PingPongControllerNode(Node):
         # the safety limiter to the first real /joint_states so the first
         # RL tick does not jump.
         self._maybe_sync_safety_limiter_to_joint_state()
+
+        # Ball-lost failsafe: if the ball has been undetected for longer than
+        # the timeout, stop running the RL policy and command the fixed safe
+        # init posture instead. The safety limiter ramps the right arm toward
+        # it under the normal vel/acc limits. RL resumes on reacquisition.
+        if self._should_engage_ball_lost_failsafe(ball_state, now_wall):
+            self._run_ball_lost_failsafe(ball_state.stamp)
+            return
+
         raw_cmd = self.compute_action(ball_state)
         self._last_raw_joint_positions = np.asarray(
             raw_cmd, dtype=np.float64).reshape(-1).copy()
@@ -1370,6 +1456,56 @@ class PingPongControllerNode(Node):
         self._publish_rl_joint_cmd_debug()
         self._publish_right_arm_command(
             self._last_raw_joint_positions, ball_state.stamp)
+
+    def _should_engage_ball_lost_failsafe(
+            self, ball_state: BallState, now_wall: float) -> bool:
+        """True when the ball has been lost long enough to park the arm.
+
+        A valid detection clears the failsafe immediately so RL resumes on the
+        next tick. With no detection, we compare the age since the last valid
+        ball against the timeout. Before any ball has ever been seen we do NOT
+        engage — the arm holds its RL initial posture until the first juggle.
+        """
+        if not self.enable_ball_lost_failsafe:
+            return False
+        if ball_state.valid:
+            if self._failsafe_active:
+                self.get_logger().info(
+                    'Ball reacquired; exiting failsafe, resuming RL control')
+            self._failsafe_active = False
+            return False
+        if self._last_valid_ball_wall_time is None:
+            return False
+        lost_for = now_wall - self._last_valid_ball_wall_time
+        return lost_for >= self.ball_lost_failsafe_timeout_s
+
+    def _run_ball_lost_failsafe(self, stamp: Time) -> None:
+        """Pause RL and drive the right arm toward the safe init posture.
+
+        We feed the fixed target straight to the safety limiter every tick;
+        the limiter's velocity/acceleration clamps turn it into a smooth ramp.
+        We then pin the RL controller's internal command integrator to the
+        actual post-limiter command (zero velocity) so that when RL resumes it
+        integrates from where the arm really is, not from a stale pre-loss
+        command nor from the not-yet-reached final target.
+        """
+        if not self._failsafe_active:
+            self._failsafe_active = True
+            self.get_logger().warn(
+                'Ball lost beyond '
+                f'{self.ball_lost_failsafe_timeout_s:.2f}s; pausing RL and '
+                'moving right arm to safe init posture')
+        target = self.safe_init_pose_q
+        self._last_raw_joint_positions = target.copy()
+        self._publish_right_arm_command(target, stamp)
+        if self.rl_controller is not None:
+            # Sync the policy integrator to what was actually commanded this
+            # tick (the ramp position) with zero velocity, so a resume does
+            # not snap from a stale state.
+            self.rl_controller.arm_cmd_q = \
+                self._last_safe_joint_positions.astype(np.float32).copy()
+            self.rl_controller.arm_cmd_qvel = np.zeros(
+                self._rl_expected_joint_count, dtype=np.float32)
 
     def _joint_state_callback(self, msg: JointState):
         """Cache the latest JointState; values are looked up by name.

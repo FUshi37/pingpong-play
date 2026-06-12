@@ -38,6 +38,12 @@ from nav_msgs.msg import Odometry
 
 from pingpong_controller.ball_detector import PingPongBallDetector
 from pingpong_controller.calibration_loader import load_calibration
+from pingpong_controller.fov_loss_compensator import (
+    FovLossCompensator,
+    FovLossCompensatorConfig,
+    gravity_for_base_link,
+    gravity_for_camera_frame,
+)
 from pingpong_controller.rl_policy import (
     HEAD_JOINTS,
     LEFT_ARM_JOINTS,
@@ -173,6 +179,19 @@ class PingPongControllerNode(Node):
         self.declare_parameter('print_every', 1)
         self.declare_parameter('realsense_fps', 60)
 
+        # FOV-loss compensator: when the ball flies above the camera's
+        # field of view during a juggle, propagate a ballistic prediction
+        # forward instead of letting detection drop to invalid. Default
+        # OFF — controllers fall back to RL hold-last just like before.
+        self.declare_parameter('enable_fov_loss_compensation', False)
+        self.declare_parameter('fov_loss_max_predict_duration_s', 0.8)
+        self.declare_parameter('fov_loss_miss_frames_to_predict', 2)
+        self.declare_parameter('fov_loss_min_upward_velocity_mm_s', 200.0)
+        self.declare_parameter('fov_loss_history_window_s', 0.15)
+        self.declare_parameter('fov_loss_drag_coeff_per_s', 0.0)
+        self.declare_parameter('fov_loss_gate_max_mahalanobis', 4.0)
+        self.declare_parameter('fov_loss_log_period_s', 1.0)
+
         # Camera intrinsics (optional override, default from CameraInfo)
         self.declare_parameter('camera_fx', 0.0)
         self.declare_parameter('camera_fy', 0.0)
@@ -235,6 +254,30 @@ class PingPongControllerNode(Node):
         self.use_undistort = self.get_parameter('use_undistort').value
         self.print_every = self.get_parameter('print_every').value
         self.realsense_fps = self.get_parameter('realsense_fps').value
+
+        # FOV-loss compensator parameters (read once; the compensator
+        # itself is built lazily on first detector frame so it can match
+        # the detector's actual output_frame).
+        self.enable_fov_loss_compensation = bool(
+            self.get_parameter('enable_fov_loss_compensation').value)
+        self.fov_loss_max_predict_duration_s = float(
+            self.get_parameter('fov_loss_max_predict_duration_s').value)
+        self.fov_loss_miss_frames_to_predict = int(
+            self.get_parameter('fov_loss_miss_frames_to_predict').value)
+        self.fov_loss_min_upward_velocity_mm_s = float(
+            self.get_parameter('fov_loss_min_upward_velocity_mm_s').value)
+        self.fov_loss_history_window_s = float(
+            self.get_parameter('fov_loss_history_window_s').value)
+        self.fov_loss_drag_coeff_per_s = float(
+            self.get_parameter('fov_loss_drag_coeff_per_s').value)
+        self.fov_loss_gate_max_mahalanobis = float(
+            self.get_parameter('fov_loss_gate_max_mahalanobis').value)
+        self.fov_loss_log_period_s = float(
+            self.get_parameter('fov_loss_log_period_s').value)
+        self._fov_loss_compensator: Optional[FovLossCompensator] = None
+        self._fov_loss_log_last_wall = 0.0
+        self._fov_loss_last_predicts_emitted = 0
+        self._fov_loss_last_state: Optional[str] = None
 
         self.override_fx = self.get_parameter('camera_fx').value
         self.override_fy = self.get_parameter('camera_fy').value
@@ -967,16 +1010,32 @@ class PingPongControllerNode(Node):
         observation = self.detector.get_observation(
             image, observation_time=stamp_sec)
 
+        # Optional FOV-loss compensation. Switch is default OFF; when on,
+        # this swaps the detector's invalid output for a ballistic
+        # prediction during the upward phase of a juggle so the controller
+        # keeps a usable ball state through the apex. The function lives
+        # in fov_loss_compensator.py and is treated as a black-box wrap.
+        if self.enable_fov_loss_compensation:
+            observation = self._apply_fov_loss_compensation(
+                observation, stamp_sec)
+
         self.frame_count += 1
 
         if observation['detected']:
-            self.detection_count += 1
+            # Predicted frames are usable for control but should not be
+            # counted as YOLO detections or saved into the recorded
+            # trajectory — keep those stats honest. raw_measurement still
+            # carries `fov_predicted=True` for downstream debugging.
+            is_predicted = bool(observation.get('predicted', False))
+            if not is_predicted:
+                self.detection_count += 1
             ball_state = BallState(
                 position=np.array(observation['position']),
                 velocity=np.array(observation['velocity']),
                 stamp=stamp, valid=True,
                 raw_measurement=observation.get('raw_measurement'))
-            self._record_base_trajectory(stamp_sec, ball_state)
+            if not is_predicted:
+                self._record_base_trajectory(stamp_sec, ball_state)
         else:
             ball_state = BallState(
                 position=np.zeros(3), velocity=np.zeros(3),
@@ -1006,6 +1065,85 @@ class PingPongControllerNode(Node):
     # ------------------------------------------------------------------
     # Logging / control helpers
     # ------------------------------------------------------------------
+
+    def _ensure_fov_loss_compensator(self) -> Optional[FovLossCompensator]:
+        """Lazily build the FOV-loss compensator using detector outputs.
+
+        We wait until the detector exists and has settled on an
+        ``output_frame`` so the gravity vector matches whatever space
+        position/velocity arrive in. Returns the compensator (cached), or
+        ``None`` if the detector is not ready yet.
+        """
+        if self._fov_loss_compensator is not None:
+            return self._fov_loss_compensator
+        if self.detector is None:
+            return None
+
+        output_frame = getattr(self.detector, 'output_frame', 'camera')
+        if output_frame == 'base_link':
+            gravity = gravity_for_base_link()
+        else:
+            gravity = gravity_for_camera_frame(self.camera_tilt_deg)
+
+        config = FovLossCompensatorConfig(
+            gravity_mm_s2=gravity,
+            miss_frames_to_predict=self.fov_loss_miss_frames_to_predict,
+            max_predict_duration_s=self.fov_loss_max_predict_duration_s,
+            min_upward_velocity_mm_s=self.fov_loss_min_upward_velocity_mm_s,
+            history_window_s=self.fov_loss_history_window_s,
+            drag_coeff_per_s=self.fov_loss_drag_coeff_per_s,
+            gate_max_mahalanobis=self.fov_loss_gate_max_mahalanobis,
+        )
+        self._fov_loss_compensator = FovLossCompensator(config)
+        self.get_logger().info(
+            'FOV-loss compensation enabled: '
+            f'frame={output_frame}, gravity_mm_s2={gravity}, '
+            f'max_predict={self.fov_loss_max_predict_duration_s:.2f}s, '
+            f'min_upward_v={self.fov_loss_min_upward_velocity_mm_s:.0f}mm/s')
+        return self._fov_loss_compensator
+
+    def _apply_fov_loss_compensation(self, observation: dict,
+                                     stamp_sec: float) -> dict:
+        """Run the compensator on a detector observation and log activity.
+
+        The compensator is a thin pure-Python wrapper, so any exception
+        here is a bug — we catch it once and disable the path for the
+        rest of the run rather than killing the detection callback.
+        """
+        comp = self._ensure_fov_loss_compensator()
+        if comp is None:
+            return observation
+        try:
+            wrapped = comp.update(observation, observation_time=stamp_sec)
+        except Exception as exc:  # noqa: BLE001 - keep callback alive
+            self.get_logger().error(
+                f'FOV-loss compensator failed: {exc}; disabling for run')
+            self.enable_fov_loss_compensation = False
+            self._fov_loss_compensator = None
+            return observation
+        self._maybe_log_fov_loss_status(comp)
+        return wrapped
+
+    def _maybe_log_fov_loss_status(self, comp: FovLossCompensator) -> None:
+        """Throttled visibility into the compensator state machine."""
+        now_wall = time.time()
+        state_changed = comp.state != self._fov_loss_last_state
+        period_elapsed = (
+            now_wall - self._fov_loss_log_last_wall
+            >= max(self.fov_loss_log_period_s, 0.1))
+        if not (state_changed or period_elapsed):
+            return
+        delta_predicts = comp.predicts_emitted - self._fov_loss_last_predicts_emitted
+        if delta_predicts > 0 or state_changed:
+            self.get_logger().info(
+                f'FOV-loss: state={comp.state} '
+                f'last_event={comp.last_event} '
+                f'predicts(+{delta_predicts}, total={comp.predicts_emitted}) '
+                f'reacq_ok={comp.reacquire_accepted} '
+                f'reacq_rej={comp.reacquire_rejected}')
+        self._fov_loss_log_last_wall = now_wall
+        self._fov_loss_last_predicts_emitted = comp.predicts_emitted
+        self._fov_loss_last_state = comp.state
 
     def _record_base_trajectory(self, stamp_sec, ball_state: BallState):
         """Record valid ball states only when detector output is base_link."""

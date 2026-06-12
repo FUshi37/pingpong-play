@@ -33,7 +33,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import CompressedImage, CameraInfo, JointState
 from builtin_interfaces.msg import Time
-from mc_core_interface.msg import MechUnitCmd
+from mc_core_interface.msg import MechUnitCmd, MechUnitCmdArray
 from nav_msgs.msg import Odometry
 
 from pingpong_controller.ball_detector import PingPongBallDetector
@@ -467,7 +467,7 @@ class PingPongControllerNode(Node):
             self.get_parameter('leg_waist_mu_idx').value)
         self.head_mu_idx = int(self.get_parameter('head_mu_idx').value)
         self.get_logger().info(
-            f'MechUnitCmd -> "{command_topic}" '
+            f'MechUnitCmdArray -> "{command_topic}" '
             f'(right={self.right_arm_mu_idx}, left={self.left_arm_mu_idx}, '
             f'leg_waist={self.leg_waist_mu_idx}, head={self.head_mu_idx}); '
             'set mu_idx params to real unit ids before deployment')
@@ -571,11 +571,14 @@ class PingPongControllerNode(Node):
         self._warned_non_base_trajectory = False
 
         # --- Publisher (created before any thread starts) ---
-        # Single MechUnitCmd publisher on command_topic (default
-        # /mx_mix_command). Used by both the init-pose phase (all four
-        # mechanical units) and the RL phase (right arm only).
+        # MechUnitCmdArray publisher on command_topic (default
+        # /mx_mix_command). The real downstream (MCControlNode) subscribes to
+        # MechUnitCmdArray — a header plus a list of per-unit MechUnitCmd — so
+        # a bare MechUnitCmd is never received. We wrap every command (RL phase:
+        # right arm only; init phase: all four mechanical units) in an array.
+        # This mirrors the on-hardware-verified pingpong_replay publisher.
         self.cmd_pub = self.create_publisher(
-            MechUnitCmd, command_topic, 10)
+            MechUnitCmdArray, command_topic, 10)
 
         # Debug/monitoring publishers under /pingpong namespace.
         self.ball_state_pub = self.create_publisher(
@@ -1417,10 +1420,11 @@ class PingPongControllerNode(Node):
     def _control_timer_callback(self):
         """Fixed-rate (control_rate_hz) control loop.
 
-        Phase 1 (init pose, if enabled): publish whole-body TARGET_DEGREES as
-        individual MechUnitCmd messages on the shared command_topic. The
-        right-arm entry passes through the safety limiter; the other units
-        (left arm, leg+waist, head) are sent directly.
+        Phase 1 (init pose, if enabled): publish right-arm TARGET_DEGREES as
+        a single-element MechUnitCmdArray (mu_idx=0 only) on command_topic,
+        matching the hardware setup where only the right arm is powered
+        during juggling experiments. The command passes through the safety
+        limiter.
 
         Phase 2 (RL control): every tick we call compute_action() regardless
         of detection validity so the RL policy's internal hold-last / dropout
@@ -1453,8 +1457,9 @@ class PingPongControllerNode(Node):
                 else np.asarray(target_right_arm_q_rad(), dtype=np.float64)
             )
             self._last_raw_joint_positions = raw_cmd.copy()
-            # Publish all four units (right arm goes through safety limiter).
-            self._publish_whole_body_init_pose(raw_cmd, ball_state.stamp)
+            # Publish only right arm (matching hardware setup where only the
+            # right arm is powered during juggling experiments).
+            self._publish_right_arm_init_pose(raw_cmd, ball_state.stamp)
             time_up = elapsed >= self.init_pose_duration_s
             pose_reached = self._init_pose_reached()
             if time_up or pose_reached:
@@ -1750,15 +1755,39 @@ class PingPongControllerNode(Node):
 
         return joint_cmd
 
+    def _make_unit_cmd(self, mu_idx: int, joint_positions_rad) -> MechUnitCmd:
+        """Build a single per-unit MechUnitCmd (joint control only)."""
+        cmd = MechUnitCmd()
+        cmd.mu_idx = int(mu_idx)
+        cmd.jnt_pos = [float(x) for x in joint_positions_rad]
+        cmd.use_jnt = True
+        cmd.psi = 0.0
+        # cmd.end_pose left at the default identity Pose; joint control only.
+        return cmd
+
+    def _publish_cmd_array(self, cmds, stamp: Time) -> None:
+        """Wrap one or more MechUnitCmd in a MechUnitCmdArray and publish.
+
+        The downstream MCControlNode subscribes to MechUnitCmdArray (header +
+        a list of per-unit commands), matching the on-hardware-verified
+        pingpong_replay publisher. All publish paths funnel through here.
+        """
+        msg = MechUnitCmdArray()
+        msg.header.stamp = stamp if stamp is not None else \
+            self.get_clock().now().to_msg()
+        msg.header.frame_id = ''
+        msg.cmds = list(cmds)
+        self.cmd_pub.publish(msg)
+
     def _publish_right_arm_command(
             self, joint_positions: np.ndarray, stamp: Time):
-        """Safety-limit + publish a right-arm MechUnitCmd on command_topic.
+        """Safety-limit + publish a right-arm command on command_topic.
 
         This is the ONLY path that may send right-arm joint commands: every
         raw right-arm target (RL or init-pose) must come through here so it
-        passes `RightArmCommandSafetyLimiter` first.
+        passes `RightArmCommandSafetyLimiter` first. The safe command is
+        wrapped in a single-element MechUnitCmdArray.
         """
-        del stamp  # MechUnitCmd has no header; kept for caller compatibility.
         if len(self.joint_names) != self.safety_limiter.N_JOINTS:
             self.get_logger().error(
                 'joint_names length does not match safety limiter '
@@ -1772,47 +1801,64 @@ class PingPongControllerNode(Node):
         self._last_safe_joint_positions = safe_cmd.copy()
         self._maybe_log_safety_counts()
 
-        msg = MechUnitCmd()
-        msg.mu_idx = self.right_arm_mu_idx
-        msg.jnt_pos = safe_cmd.tolist()
-        msg.use_jnt = True
-        msg.psi = 0.0
-        # msg.end_pose left at the default identity Pose; joint control only.
-        self.cmd_pub.publish(msg)
+        cmd = self._make_unit_cmd(self.right_arm_mu_idx, safe_cmd.tolist())
+        self._publish_cmd_array([cmd], stamp)
 
     # Backward-compatible alias: the old internal name is kept in case
     # external code/tests still reference it.
     _publish_joint_command = _publish_right_arm_command
 
-    def _publish_unit_cmd(self, mu_idx: int, joint_positions_rad) -> None:
-        """Publish a non-right-arm MechUnitCmd (no safety limiter needed).
+    def _publish_right_arm_init_pose(self, right_arm_raw_q: np.ndarray,
+                                     stamp: Time) -> None:
+        """Drive only the right arm toward its TARGET_DEGREES during init.
 
-        Used during init pose for left arm, leg+waist, and head. All four
-        units share command_topic (default /mx_mix_command).
+        This is the default init-pose behavior: only the right arm is
+        controlled by this juggling controller (matching the
+        on-hardware-verified pingpong_replay). Other mechanical units (left
+        arm, leg+waist, head) are maintained by their own controllers or
+        teleop. The right-arm command is safety-limited and wrapped in a
+        single-element MechUnitCmdArray, keeping the init phase at the same
+        topic rate and message structure as the RL phase (one right-arm cmd
+        per tick, mu_idx=0 only).
+
+        Use this when only the right arm is powered during experiments.
         """
-        msg = MechUnitCmd()
-        msg.mu_idx = int(mu_idx)
-        msg.jnt_pos = [float(x) for x in joint_positions_rad]
-        msg.use_jnt = True
-        msg.psi = 0.0
-        # msg.end_pose left at the default identity Pose; joint control only.
-        self.cmd_pub.publish(msg)
+        # Exactly the same path as _publish_right_arm_command — init and RL
+        # phases now publish identically (one right-arm cmd per tick).
+        self._publish_right_arm_command(right_arm_raw_q, stamp)
 
     def _publish_whole_body_init_pose(self, right_arm_raw_q: np.ndarray,
                                       stamp: Time) -> None:
         """Drive every mechanical unit toward TARGET_DEGREES during init.
 
-        Right arm goes through `_publish_right_arm_command` (so the safety
-        limiter runs). Left arm, leg+waist, and head are sent their
-        TARGET_DEGREES setpoints directly — they do not share the right-arm
-        limits, and publishing the same setpoint every tick is fine because
-        the downstream controller tracks at its own cadence.
+        The right arm is safety-limited; the other three units (left arm,
+        leg+waist, head) are sent their TARGET_DEGREES setpoints directly.
+        All four are packed into ONE MechUnitCmdArray and published in a
+        single message, so the init phase publishes at the same topic rate
+        as the RL phase (one array per control tick) rather than four
+        separate messages.
         """
-        self._publish_right_arm_command(right_arm_raw_q, stamp)
-        self._publish_unit_cmd(self.left_arm_mu_idx, target_left_arm_q_rad())
-        self._publish_unit_cmd(
-            self.leg_waist_mu_idx, target_leg_waist_q_rad())
-        self._publish_unit_cmd(self.head_mu_idx, target_head_q_rad())
+        if len(self.joint_names) != self.safety_limiter.N_JOINTS:
+            self.get_logger().error(
+                'joint_names length does not match safety limiter '
+                f'({len(self.joint_names)} vs '
+                f'{self.safety_limiter.N_JOINTS})',
+                throttle_duration_sec=1.0)
+            return
+
+        raw = np.asarray(right_arm_raw_q, dtype=np.float64).reshape(-1)
+        safe_cmd = self.safety_limiter.filter(raw)
+        self._last_safe_joint_positions = safe_cmd.copy()
+        self._maybe_log_safety_counts()
+
+        cmds = [
+            self._make_unit_cmd(self.right_arm_mu_idx, safe_cmd.tolist()),
+            self._make_unit_cmd(self.left_arm_mu_idx, target_left_arm_q_rad()),
+            self._make_unit_cmd(
+                self.leg_waist_mu_idx, target_leg_waist_q_rad()),
+            self._make_unit_cmd(self.head_mu_idx, target_head_q_rad()),
+        ]
+        self._publish_cmd_array(cmds, stamp)
 
     def _publish_visualization_frame(self, raw_bgr: np.ndarray,
                                      observation: dict) -> None:

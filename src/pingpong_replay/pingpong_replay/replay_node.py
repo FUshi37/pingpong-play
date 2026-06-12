@@ -45,10 +45,11 @@ real hardware.
 """
 
 import csv
+import json
 import os
 import sys
 import threading
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 
 import numpy as np
 
@@ -132,6 +133,15 @@ class ReplayNode(Node):
         self.declare_parameter('end_index', -1)   # -1 -> last row
         self.declare_parameter('loop', False)
 
+        # Data recording for analysis.
+        self.declare_parameter('record_data', True)
+        self.declare_parameter('output_dir', '')
+        # Use velocity/acceleration from JointState feedback instead of numerical
+        # differentiation. JointState.velocity is standard; JointState.effort is
+        # repurposed as acceleration (rad/s²) in this system (see pingpong_node.py).
+        self.declare_parameter('use_feedback_velocity', True)
+        self.declare_parameter('use_feedback_acceleration', True)
+
         # Move-to-start ramp from the measured arm pose to trajectory[0].
         self.declare_parameter('move_to_start', True)
         self.declare_parameter('move_to_start_duration', 5.0)
@@ -185,6 +195,12 @@ class ReplayNode(Node):
         self.require_enter_confirm = bool(
             self.get_parameter('require_enter_confirm').value)
 
+        self.record_data = bool(self.get_parameter('record_data').value)
+        self.use_feedback_velocity = bool(
+            self.get_parameter('use_feedback_velocity').value)
+        self.use_feedback_acceleration = bool(
+            self.get_parameter('use_feedback_acceleration').value)
+
         # Action->joint mapping (mirrors mjx_juggle_env.MjxJuggleEnv.step):
         #   desired_qdd_raw = action * arm_acc_limit_rad_s2 * action_acc_scale
         # arm_acc_limit_rad_s2 and arm_vel_limit_rad_s come from deg configs.
@@ -216,9 +232,21 @@ class ReplayNode(Node):
         csv_path = self._resolve_csv_path(
             str(self.get_parameter('csv_path').value))
 
+        # Resolve output directory after csv_path is known
+        self.output_dir = str(self.get_parameter('output_dir').value)
+        if not self.output_dir:
+            # Default to the same directory as the CSV
+            self.output_dir = os.path.dirname(csv_path) if csv_path else os.getcwd()
+
         # --- Build the position trajectory for the chosen mode ---
         start_index = int(self.get_parameter('start_index').value)
         end_index = int(self.get_parameter('end_index').value)
+
+        # Store the original CSV path for loading action data later
+        self._csv_path = csv_path
+        self._start_index = start_index
+        self._end_index = end_index
+
         self.trajectory = self._build_trajectory(
             csv_path, self.input_mode, start_index, end_index)
         self.n_steps = self.trajectory.shape[0]
@@ -226,9 +254,23 @@ class ReplayNode(Node):
             raise ValueError('Trajectory is empty after applying start/end '
                              'index; nothing to replay')
 
+        # Load the action trajectory for theoretical calculations
+        self.action_trajectory = None
+        self.theoretical_qdd = None
+        self.theoretical_qvel = None
+        self.theoretical_q = None
+        if self.record_data:
+            self._load_theoretical_trajectory(csv_path, start_index, end_index)
+
         # --- Latest joint feedback (for move-to-start) ---
         self._latest_q: Optional[np.ndarray] = None
+        self._latest_qvel: Optional[np.ndarray] = None
+        self._latest_qdd: Optional[np.ndarray] = None
         self._joint_state_lock = threading.Lock()
+
+        # --- Data recording ---
+        self.recorded_data: List[Dict[str, Any]] = []
+        self._recording_active = False
 
         # --- ROS interfaces ---
         # The real /mx_mix_command carries MechUnitCmdArray (header + a list
@@ -395,27 +437,130 @@ class ReplayNode(Node):
         e = n if end_index < 0 else min(end_index, n)
         return traj[s:e].copy()
 
+    def _load_theoretical_trajectory(self, csv_path: str,
+                                     start_index: int, end_index: int) -> None:
+        """Load action trajectory and compute theoretical qdd, qvel, q."""
+        # Load action data
+        action_data = self._read_columns(csv_path, 'effective_action')
+
+        # Load initial states
+        q0 = self._read_columns(csv_path, 'arm_cmd_q')[0].copy()
+        qvel0 = self._read_columns(csv_path, 'arm_cmd_qvel')[0].copy()
+
+        n = action_data.shape[0]
+        dt = self.integration_dt
+
+        # Initialize arrays for theoretical values
+        self.theoretical_qdd = np.empty((n, N_JOINTS), dtype=np.float64)
+        self.theoretical_qvel = np.empty((n, N_JOINTS), dtype=np.float64)
+        self.theoretical_q = np.empty((n, N_JOINTS), dtype=np.float64)
+
+        # Row 0 initial state
+        self.theoretical_q[0] = q0
+        self.theoretical_qvel[0] = qvel0
+        self.theoretical_qdd[0] = np.zeros(N_JOINTS)  # No action at t=0
+
+        q = q0.copy()
+        qvel = qvel0.copy()
+
+        # Integrate action to get qdd, qvel, q
+        for k in range(1, n):
+            # Convert action to acceleration
+            qdd = action_data[k] * self.action_scale_per_joint
+            if self.arm_action_limiter:
+                qdd = np.clip(qdd, -self.arm_acc_limit_rad_s2,
+                             self.arm_acc_limit_rad_s2)
+
+            # Integrate to velocity
+            qvel = qvel + qdd * dt
+            if self.arm_action_limiter:
+                qvel = np.clip(qvel, -self.arm_vel_limit_rad_s,
+                              self.arm_vel_limit_rad_s)
+
+            # Integrate to position
+            q = q + qvel * dt
+            if self.clip_to_limits:
+                q = np.clip(q, self.q_low, self.q_high)
+
+            self.theoretical_qdd[k] = qdd
+            self.theoretical_qvel[k] = qvel
+            self.theoretical_q[k] = q
+
+        # Apply slicing
+        s = max(0, start_index)
+        e = n if end_index < 0 else min(end_index, n)
+        self.action_trajectory = action_data[s:e].copy()
+        self.theoretical_qdd = self.theoretical_qdd[s:e].copy()
+        self.theoretical_qvel = self.theoretical_qvel[s:e].copy()
+        self.theoretical_q = self.theoretical_q[s:e].copy()
+
+        self.get_logger().info(
+            f'Loaded theoretical trajectory for comparison: {self.theoretical_q.shape[0]} steps')
+
     # ------------------------------------------------------------------
     # Joint feedback
     # ------------------------------------------------------------------
     def _joint_state_callback(self, msg: JointState) -> None:
         name_to_pos = {}
+        name_to_vel = {}
+        name_to_acc = {}
+
         for i, name in enumerate(msg.name):
             if i < len(msg.position):
                 v = float(msg.position[i])
                 if np.isfinite(v):
                     name_to_pos[name] = v
+            if i < len(msg.velocity):
+                v = float(msg.velocity[i])
+                if np.isfinite(v):
+                    name_to_vel[name] = v
+            # In this system, JointState.effort carries acceleration (rad/s²)
+            if i < len(msg.effort):
+                v = float(msg.effort[i])
+                if np.isfinite(v):
+                    name_to_acc[name] = v
+
         try:
             q = np.array([name_to_pos[n] for n in RIGHT_ARM_JOINTS],
                          dtype=np.float64)
         except KeyError:
             return  # frame did not contain all right-arm joints
+
+        # Velocity and acceleration are optional
+        qvel = None
+        if len(name_to_vel) >= len(RIGHT_ARM_JOINTS):
+            try:
+                qvel = np.array([name_to_vel[n] for n in RIGHT_ARM_JOINTS],
+                               dtype=np.float64)
+            except KeyError:
+                pass
+
+        qdd = None
+        if len(name_to_acc) >= len(RIGHT_ARM_JOINTS):
+            try:
+                qdd = np.array([name_to_acc[n] for n in RIGHT_ARM_JOINTS],
+                              dtype=np.float64)
+            except KeyError:
+                pass
+
         with self._joint_state_lock:
             self._latest_q = q
+            self._latest_qvel = qvel
+            self._latest_qdd = qdd
 
     def _get_latest_q(self) -> Optional[np.ndarray]:
         with self._joint_state_lock:
             return None if self._latest_q is None else self._latest_q.copy()
+
+    def _get_latest_state(self) -> tuple[Optional[np.ndarray],
+                                         Optional[np.ndarray],
+                                         Optional[np.ndarray]]:
+        """Get latest position, velocity, and acceleration."""
+        with self._joint_state_lock:
+            q = None if self._latest_q is None else self._latest_q.copy()
+            qvel = None if self._latest_qvel is None else self._latest_qvel.copy()
+            qdd = None if self._latest_qdd is None else self._latest_qdd.copy()
+            return q, qvel, qdd
 
     # ------------------------------------------------------------------
     # Publishing
@@ -535,11 +680,43 @@ class ReplayNode(Node):
     def _begin_replay(self) -> None:
         self._phase = 'replay'
         self._replay_idx = 0
+        if self.record_data:
+            self._recording_active = True
+            self.recorded_data = []
+            self.get_logger().info('Data recording activated')
         self.get_logger().info(
             f'Beginning replay ({self.n_steps} steps, single loop)')
 
     def _step_replay(self) -> None:
-        self._publish_q(self.trajectory[self._replay_idx])
+        idx = self._replay_idx
+        cmd_q = self.trajectory[idx]
+
+        # Record data if recording is active
+        if self._recording_active:
+            actual_q, actual_qvel, actual_qdd = self._get_latest_state()
+            if actual_q is not None:
+                record = {
+                    'step': idx,
+                    'timestamp': self.get_clock().now().nanoseconds * 1e-9,
+                    'cmd_q': cmd_q.copy(),
+                    'actual_q': actual_q.copy(),
+                }
+                # Store feedback velocity/acceleration if available
+                if actual_qvel is not None:
+                    record['actual_qvel_feedback'] = actual_qvel.copy()
+                if actual_qdd is not None:
+                    record['actual_qdd_feedback'] = actual_qdd.copy()
+
+                # Add theoretical values if available
+                if self.theoretical_q is not None and idx < len(self.theoretical_q):
+                    record['theoretical_q'] = self.theoretical_q[idx].copy()
+                    record['theoretical_qvel'] = self.theoretical_qvel[idx].copy()
+                    record['theoretical_qdd'] = self.theoretical_qdd[idx].copy()
+                    if self.action_trajectory is not None:
+                        record['action'] = self.action_trajectory[idx].copy()
+                self.recorded_data.append(record)
+
+        self._publish_q(cmd_q)
         self._replay_idx += 1
         if self._replay_idx >= self.n_steps:
             if self.loop:
@@ -548,9 +725,159 @@ class ReplayNode(Node):
             else:
                 self._phase = 'done'
                 self.timer.cancel()
+                if self._recording_active:
+                    self._save_recorded_data()
                 self.get_logger().info(
                     f'Replay complete ({self.n_steps} steps). Holding last '
                     'command. Ctrl-C to exit.')
+
+    # ------------------------------------------------------------------
+    # Data recording and analysis
+    # ------------------------------------------------------------------
+    def _save_recorded_data(self) -> None:
+        """Save recorded data and compute actual velocities and accelerations."""
+        if not self.recorded_data:
+            self.get_logger().warn('No data recorded')
+            return
+
+        self.get_logger().info(f'Processing {len(self.recorded_data)} recorded samples...')
+
+        # Convert to numpy arrays for easier processing
+        n = len(self.recorded_data)
+        times = np.array([r['timestamp'] for r in self.recorded_data])
+        actual_q = np.array([r['actual_q'] for r in self.recorded_data])
+        cmd_q = np.array([r['cmd_q'] for r in self.recorded_data])
+
+        # Check if we have feedback velocity and acceleration
+        has_feedback_qvel = 'actual_qvel_feedback' in self.recorded_data[0]
+        has_feedback_qdd = 'actual_qdd_feedback' in self.recorded_data[0]
+
+        # Compute or use actual velocities
+        actual_qvel = np.zeros_like(actual_q)
+        if self.use_feedback_velocity and has_feedback_qvel:
+            actual_qvel = np.array([r['actual_qvel_feedback'] for r in self.recorded_data])
+            self.get_logger().info('Using velocity from JointState feedback')
+        else:
+            # Compute via numerical differentiation
+            for i in range(1, n):
+                dt = times[i] - times[i-1]
+                if dt > 0:
+                    actual_qvel[i] = (actual_q[i] - actual_q[i-1]) / dt
+            self.get_logger().info('Computed velocity via numerical differentiation')
+
+        # Compute or use actual accelerations
+        actual_qdd = np.zeros_like(actual_q)
+        if self.use_feedback_acceleration and has_feedback_qdd:
+            actual_qdd = np.array([r['actual_qdd_feedback'] for r in self.recorded_data])
+            self.get_logger().info('Using acceleration from JointState feedback (effort field)')
+        else:
+            # Compute via numerical differentiation of velocity
+            for i in range(1, n):
+                dt = times[i] - times[i-1]
+                if dt > 0:
+                    actual_qdd[i] = (actual_qvel[i] - actual_qvel[i-1]) / dt
+            self.get_logger().info('Computed acceleration via numerical differentiation')
+
+        # Prepare data for CSV export
+        csv_rows = []
+        for i in range(n):
+            row = {
+                'step': self.recorded_data[i]['step'],
+                'timestamp': times[i],
+            }
+            # Add actual values
+            for j, joint in enumerate(RIGHT_ARM_JOINTS):
+                row[f'actual_q/{joint}'] = actual_q[i, j]
+                row[f'actual_qvel/{joint}'] = actual_qvel[i, j]
+                row[f'actual_qdd/{joint}'] = actual_qdd[i, j]
+                row[f'cmd_q/{joint}'] = cmd_q[i, j]
+
+            # Add theoretical values if available
+            if 'theoretical_q' in self.recorded_data[i]:
+                for j, joint in enumerate(RIGHT_ARM_JOINTS):
+                    row[f'theoretical_q/{joint}'] = self.recorded_data[i]['theoretical_q'][j]
+                    row[f'theoretical_qvel/{joint}'] = self.recorded_data[i]['theoretical_qvel'][j]
+                    row[f'theoretical_qdd/{joint}'] = self.recorded_data[i]['theoretical_qdd'][j]
+                if 'action' in self.recorded_data[i]:
+                    for j, joint in enumerate(RIGHT_ARM_JOINTS):
+                        row[f'action/{joint}'] = self.recorded_data[i]['action'][j]
+
+            csv_rows.append(row)
+
+        # Save to CSV
+        timestamp_str = self.get_clock().now().to_msg()
+        timestamp_sec = timestamp_str.sec
+        output_csv = os.path.join(
+            self.output_dir,
+            f'replay_analysis_{timestamp_sec}.csv'
+        )
+
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        with open(output_csv, 'w', newline='') as f:
+            if csv_rows:
+                writer = csv.DictWriter(f, fieldnames=csv_rows[0].keys())
+                writer.writeheader()
+                writer.writerows(csv_rows)
+
+        self.get_logger().info(f'Saved analysis data to: {output_csv}')
+
+        # Also save a summary JSON
+        summary = {
+            'n_samples': n,
+            'duration': float(times[-1] - times[0]),
+            'control_rate_hz': self.control_rate_hz,
+            'input_mode': self.input_mode,
+            'joints': RIGHT_ARM_JOINTS,
+            'output_csv': output_csv,
+            'use_feedback_velocity': self.use_feedback_velocity and has_feedback_qvel,
+            'use_feedback_acceleration': self.use_feedback_acceleration and has_feedback_qdd,
+        }
+
+        # Compute tracking errors
+        if 'theoretical_q' in self.recorded_data[0]:
+            theoretical_q = np.array([r['theoretical_q'] for r in self.recorded_data])
+            theoretical_qvel = np.array([r['theoretical_qvel'] for r in self.recorded_data])
+            theoretical_qdd = np.array([r['theoretical_qdd'] for r in self.recorded_data])
+
+            q_error = actual_q - theoretical_q
+            qvel_error = actual_qvel - theoretical_qvel
+            qdd_error = actual_qdd - theoretical_qdd
+
+            summary['tracking_errors'] = {
+                'position': {
+                    'mean_abs_rad': float(np.mean(np.abs(q_error))),
+                    'max_abs_rad': float(np.max(np.abs(q_error))),
+                    'rms_rad': float(np.sqrt(np.mean(q_error**2))),
+                    'mean_abs_deg': float(np.degrees(np.mean(np.abs(q_error)))),
+                    'max_abs_deg': float(np.degrees(np.max(np.abs(q_error)))),
+                },
+                'velocity': {
+                    'mean_abs_rad_s': float(np.mean(np.abs(qvel_error))),
+                    'max_abs_rad_s': float(np.max(np.abs(qvel_error))),
+                    'rms_rad_s': float(np.sqrt(np.mean(qvel_error**2))),
+                },
+                'acceleration': {
+                    'mean_abs_rad_s2': float(np.mean(np.abs(qdd_error))),
+                    'max_abs_rad_s2': float(np.max(np.abs(qdd_error))),
+                    'rms_rad_s2': float(np.sqrt(np.mean(qdd_error**2))),
+                }
+            }
+
+        output_json = os.path.join(
+            self.output_dir,
+            f'replay_analysis_{timestamp_sec}.json'
+        )
+        with open(output_json, 'w') as f:
+            json.dump(summary, f, indent=2)
+
+        self.get_logger().info(f'Saved summary to: {output_json}')
+        if 'tracking_errors' in summary:
+            self.get_logger().info(
+                f"Position tracking error: "
+                f"mean={summary['tracking_errors']['position']['mean_abs_deg']:.3f}° "
+                f"max={summary['tracking_errors']['position']['max_abs_deg']:.3f}°"
+            )
 
 
 def main(args=None) -> None:

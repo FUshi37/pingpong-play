@@ -26,6 +26,7 @@ setup(
     entry_points={
         'console_scripts': [
             'replay_node = pingpong_replay.replay_node:main',
+            'plot_analysis = pingpong_replay.plot_analysis:main',
         ],
     },
 )

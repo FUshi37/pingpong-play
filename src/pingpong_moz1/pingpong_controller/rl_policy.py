@@ -133,12 +133,19 @@ class RLPolicyController:
         device: str = "cpu",
         robot_xml_path: Optional[str] = None,
         logger: Optional[object] = None,
+        arm_action_limiter: bool = False,
     ) -> None:
         self._logger = logger or _LoggerShim()
         self.dt = float(dt)
         self.action_acc_scale = float(action_acc_scale)
         self.deterministic = bool(deterministic)
         self.ball_obs_age_clip_s = max(1e-6, float(ball_obs_age_clip_s))
+        # When True, clip mapped joint acceleration and the integrated joint
+        # velocity to the arm limits inside predict(), mirroring the training
+        # env's `arm_action_limiter=True` branch. The SB3 reference path was
+        # trained with the limiter off, so this defaults to False to keep
+        # that path byte-for-byte unchanged.
+        self.arm_action_limiter = bool(arm_action_limiter)
 
         self.n_arm = len(RIGHT_ARM_JOINTS)
         self.arm_vel_limit_rad_s = np.deg2rad(
@@ -154,31 +161,16 @@ class RLPolicyController:
             raise ValueError(
                 "arm limit arrays must have length 7 (RIGHT_ARM_JOINTS)")
 
-        # Load SB3 policy. Failures are re-raised so the caller can fall back.
-        try:
-            from stable_baselines3 import PPO  # type: ignore
-        except Exception as exc:  # pragma: no cover - import-time only
-            raise RuntimeError(
-                f"stable-baselines3 is required to load the RL policy: {exc}"
-            ) from exc
-
-        self._logger.info(f"Loading PPO policy from: {model_path}")
-        self.model = PPO.load(model_path, device=device)
-        obs_space = getattr(self.model, "observation_space", None)
-        obs_shape = getattr(obs_space, "shape", None)
-        if obs_shape is None or tuple(obs_shape) != (EXPECTED_OBS_DIM,):
-            raise RuntimeError(
-                f"Loaded model observation shape {obs_shape} does not match "
-                f"expected ({EXPECTED_OBS_DIM},)")
-        act_space = getattr(self.model, "action_space", None)
-        act_shape = getattr(act_space, "shape", None)
-        if act_shape is None or tuple(act_shape) != (self.n_arm,):
-            raise RuntimeError(
-                f"Loaded model action shape {act_shape} does not match "
-                f"expected ({self.n_arm},)")
+        # Load the policy. Subclasses override `_load_model` to support
+        # other checkpoint formats (e.g. MJX/JAX .pkl). The base class loads
+        # a stable-baselines3 PPO .zip. Failures are re-raised so the caller
+        # can fall back to default joint positions.
+        self._load_model(model_path, device)
+        self._validate_io_shapes()
         self._logger.info(
             f"RL policy loaded | obs_dim={EXPECTED_OBS_DIM}, "
-            f"act_dim={self.n_arm}, dt={self.dt:.4f}s, device={device}")
+            f"act_dim={self.n_arm}, dt={self.dt:.4f}s, device={device}, "
+            f"arm_action_limiter={self.arm_action_limiter}")
 
         # Optional MuJoCo FK for racket position/velocity.
         self.mj_model = None
@@ -252,6 +244,53 @@ class RLPolicyController:
                 "racket FK disabled")
 
         self.reset()
+
+    # ------------------------------------------------------------------
+    # Model loading / inference (overridable by subclasses)
+    # ------------------------------------------------------------------
+
+    def _load_model(self, model_path: str, device: str) -> None:
+        """Load a stable-baselines3 PPO policy from a .zip checkpoint.
+
+        Subclasses override this to support other formats. After this
+        returns, `self.model` must expose `observation_space.shape` and
+        `action_space.shape`, and `_policy_action` must be able to run a
+        forward pass on a (EXPECTED_OBS_DIM,) observation.
+        """
+        try:
+            from stable_baselines3 import PPO  # type: ignore
+        except Exception as exc:  # pragma: no cover - import-time only
+            raise RuntimeError(
+                f"stable-baselines3 is required to load the RL policy: {exc}"
+            ) from exc
+
+        self._logger.info(f"Loading PPO policy from: {model_path}")
+        self.model = PPO.load(model_path, device=device)
+
+    def _validate_io_shapes(self) -> None:
+        """Check the loaded model's obs/act dims against expectations."""
+        obs_space = getattr(self.model, "observation_space", None)
+        obs_shape = getattr(obs_space, "shape", None)
+        if obs_shape is None or tuple(obs_shape) != (EXPECTED_OBS_DIM,):
+            raise RuntimeError(
+                f"Loaded model observation shape {obs_shape} does not match "
+                f"expected ({EXPECTED_OBS_DIM},)")
+        act_space = getattr(self.model, "action_space", None)
+        act_shape = getattr(act_space, "shape", None)
+        if act_shape is None or tuple(act_shape) != (self.n_arm,):
+            raise RuntimeError(
+                f"Loaded model action shape {act_shape} does not match "
+                f"expected ({self.n_arm},)")
+
+    def _policy_action(self, obs: np.ndarray) -> np.ndarray:
+        """Map an observation to a raw (pre-clip) action vector.
+
+        Base implementation calls SB3's `model.predict`. Subclasses
+        override to run their own forward pass. Returns a float32 array
+        of shape (n_arm,); the caller clips it to [-1, 1].
+        """
+        action, _ = self.model.predict(obs, deterministic=self.deterministic)
+        return np.asarray(action, dtype=np.float32).reshape(self.n_arm)
 
     # ------------------------------------------------------------------
     # State management
@@ -457,18 +496,29 @@ class RLPolicyController:
             arm_dq=arm_dq,
         )
 
-        action, _ = self.model.predict(obs, deterministic=self.deterministic)
-        action = np.asarray(action, dtype=np.float32).reshape(self.n_arm)
+        action = self._policy_action(obs)
         if not np.all(np.isfinite(action)):
             self._logger.warn(
                 "RL policy returned non-finite action; holding last command")
             return self.arm_cmd_q.copy()
         action = np.clip(action, -1.0, 1.0)
 
-        # Action-to-joint integration (mirrors JuggleEnv.step with
-        # arm_action_limiter=False, action_scale_mult=1.0).
+        # Action-to-joint integration. Mirrors JuggleEnv.step:
+        #   desired_qdd = action * acc_limit * acc_scale
+        #   cmd_qvel   += desired_qdd * dt
+        #   cmd_q      += cmd_qvel * dt    (clipped to joint range)
+        # When arm_action_limiter is True (set per checkpoint), the mapped
+        # acceleration and the integrated velocity are additionally clipped
+        # to the arm limits, matching the training env's limiter branch.
         desired_qdd = action * self.arm_acc_limit_rad_s2 * self.action_acc_scale
+        if self.arm_action_limiter:
+            desired_qdd = np.clip(
+                desired_qdd,
+                -self.arm_acc_limit_rad_s2, self.arm_acc_limit_rad_s2)
         cmd_qvel = self.arm_cmd_qvel + desired_qdd * step_dt
+        if self.arm_action_limiter:
+            cmd_qvel = np.clip(
+                cmd_qvel, -self.arm_vel_limit_rad_s, self.arm_vel_limit_rad_s)
         self.arm_cmd_q = np.clip(
             self.arm_cmd_q + cmd_qvel * step_dt,
             self.arm_q_low, self.arm_q_high).astype(np.float32)

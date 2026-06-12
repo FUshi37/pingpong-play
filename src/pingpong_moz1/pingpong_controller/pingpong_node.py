@@ -44,6 +44,7 @@ from pingpong_controller.fov_loss_compensator import (
     gravity_for_base_link,
     gravity_for_camera_frame,
 )
+from pingpong_controller.mjx_rl_policy import MjxRLPolicyController
 from pingpong_controller.rl_policy import (
     HEAD_JOINTS,
     LEFT_ARM_JOINTS,
@@ -130,6 +131,13 @@ class PingPongControllerNode(Node):
             'models', 'best_model.zip')
         self.declare_parameter('rl_model_path', default_rl_model_path)
         self.declare_parameter('enable_rl_policy', True)
+        # Policy backend: 'sb3' loads a stable-baselines3 PPO .zip via
+        # RLPolicyController; 'mjx' loads an MJX/JAX curriculum .pkl via
+        # MjxRLPolicyController. The MJX adapter runs the 2-layer tanh MLP
+        # in pure NumPy (no JAX at runtime) and auto-reads env_cfg from the
+        # checkpoint to align action_acc_scale, ball_obs_age_clip, arm
+        # limits, and arm_action_limiter with training.
+        self.declare_parameter('policy_backend', 'sb3')
         # 200 Hz control loop -> dt = 0.005 s.
         self.declare_parameter('rl_policy_dt', 0.005)
         self.declare_parameter('control_rate_hz', 200.0)
@@ -308,6 +316,13 @@ class PingPongControllerNode(Node):
         self.rl_model_path = self.get_parameter('rl_model_path').value
         self.enable_rl_policy = bool(
             self.get_parameter('enable_rl_policy').value)
+        self.policy_backend = str(
+            self.get_parameter('policy_backend').value).lower()
+        if self.policy_backend not in ('sb3', 'mjx'):
+            self.get_logger().error(
+                f'Invalid policy_backend={self.policy_backend}; must be '
+                '"sb3" or "mjx". Falling back to sb3.')
+            self.policy_backend = 'sb3'
         self.rl_policy_dt = float(self.get_parameter('rl_policy_dt').value)
         self.control_rate_hz = float(
             self.get_parameter('control_rate_hz').value)
@@ -367,21 +382,38 @@ class PingPongControllerNode(Node):
                 self.enable_rl_policy = False
             else:
                 try:
-                    self.rl_controller = RLPolicyController(
-                        model_path=self.rl_model_path,
-                        dt=self.control_dt,
-                        ball_obs_age_clip_s=self.rl_ball_obs_age_clip,
-                        device=self.rl_policy_device,
-                        robot_xml_path=self.robot_xml_path,
-                        logger=self.get_logger(),
-                    )
+                    if self.policy_backend == 'mjx':
+                        self.get_logger().info(
+                            f'Loading MJX policy from: {self.rl_model_path}')
+                        self.rl_controller = MjxRLPolicyController(
+                            model_path=self.rl_model_path,
+                            dt=self.control_dt,
+                            ball_obs_age_clip_s=self.rl_ball_obs_age_clip,
+                            device=self.rl_policy_device,
+                            robot_xml_path=self.robot_xml_path,
+                            logger=self.get_logger(),
+                            align_with_checkpoint=True,
+                        )
+                    else:  # sb3
+                        self.get_logger().info(
+                            f'Loading SB3 policy from: {self.rl_model_path}')
+                        self.rl_controller = RLPolicyController(
+                            model_path=self.rl_model_path,
+                            dt=self.control_dt,
+                            ball_obs_age_clip_s=self.rl_ball_obs_age_clip,
+                            device=self.rl_policy_device,
+                            robot_xml_path=self.robot_xml_path,
+                            logger=self.get_logger(),
+                        )
                     self._last_safe_joint_positions = \
                         self.rl_controller.current_arm_cmd_q().astype(
                             np.float64)
                     self._last_raw_joint_positions = \
                         self._last_safe_joint_positions.copy()
                     self.get_logger().info(
-                        f'RLPolicyController ready (model={self.rl_model_path})')
+                        f'RLPolicyController ready '
+                        f'(backend={self.policy_backend}, '
+                        f'model={self.rl_model_path})')
                 except Exception as exc:
                     self.get_logger().error(
                         f'Failed to initialize RLPolicyController: {exc}; '

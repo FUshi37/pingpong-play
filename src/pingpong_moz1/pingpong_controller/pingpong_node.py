@@ -104,9 +104,10 @@ class PingPongControllerNode(Node):
         self.declare_parameter('save_trajectory_json', True)
 
         # Live visualization window (off by default; turn on for debugging
-        # with `enable_visualization:=true`). Drawing runs in a dedicated
-        # thread so it does not steal time from the 200 Hz control loop or
-        # the YOLO image callback.
+        # with `enable_visualization:=true`). A dedicated worker thread does
+        # the drawing and ships frames to a GUI subprocess, fed by a
+        # single-slot drop-old handoff from the vision callback, so it never
+        # steals time from the 200 Hz control loop or the YOLO image callback.
         self.declare_parameter('enable_visualization', False)
         self.declare_parameter('visualization_window_name', 'PingPong Detection')
 
@@ -502,6 +503,18 @@ class PingPongControllerNode(Node):
         self._viz_send = None  # multiprocessing.Connection (parent end)
         self._viz_lock = threading.Lock()
         self._viz_disabled_runtime = False
+        # Single-slot drop-old handoff between the vision callback (producer)
+        # and the dedicated viz worker thread (consumer). The vision callback
+        # only ever overwrites _viz_pending with the newest (raw_bgr,
+        # observation) and signals _viz_event; it never does remap / render /
+        # pipe-send itself, so a slow/blocked GUI pipe cannot back-pressure the
+        # detection callback. The worker drops any intermediate frames and
+        # always processes the latest slot.
+        self._viz_slot_lock = threading.Lock()
+        self._viz_pending = None  # (raw_bgr, observation) or None
+        self._viz_event = threading.Event()
+        self._viz_thread = None
+        self._viz_thread_running = False
         if self.enable_visualization:
             self.get_logger().info(
                 f'Visualization enabled: window "{self.visualization_window_name}" '
@@ -976,10 +989,11 @@ class PingPongControllerNode(Node):
         # Publish ball state debug topic (reflects vision detection cadence).
         self._publish_ball_state_debug(ball_state)
 
-        # Hand the latest frame + observation to the visualizer thread (if
-        # enabled). This is fire-and-forget: the drawer reads the most recent
-        # snapshot and skips intermediate frames, so it never blocks the
-        # detection callback.
+        # Hand the latest frame + observation to the viz worker thread (if
+        # enabled). This is a cheap drop-old enqueue: it overwrites the single
+        # pending slot and returns immediately, so the worker (which does the
+        # remap/render/blocking pipe-send) never back-pressures this detection
+        # callback. Intermediate frames are dropped, not queued.
         if self.enable_visualization:
             self._publish_visualization_frame(image, observation)
 
@@ -1496,65 +1510,120 @@ class PingPongControllerNode(Node):
 
     def _publish_visualization_frame(self, raw_bgr: np.ndarray,
                                      observation: dict) -> None:
-        """Render one detection frame and ship it to the GUI subprocess.
+        """Hand the latest frame to the viz worker thread (drop-old, O(1)).
 
-        The actual cv2.imshow runs in `_visualization_subprocess_main`.
-        Here we only undistort, draw the overlay, and push the resulting
-        ndarray over the multiprocessing pipe. If the subprocess has died
-        or never started, we disable visualization for the rest of the run
-        instead of crashing the node.
+        Called from the vision detection callback. This MUST stay cheap: it
+        only copies the raw frame into a single slot (overwriting any pending
+        frame the worker has not picked up yet) and signals the worker. All
+        the expensive work — undistort remap, overlay rendering, and the
+        potentially-blocking pipe send to the GUI subprocess — happens in
+        `_visualization_worker_loop` on its own thread, so a slow or stalled
+        GUI can never back-pressure detection. Intermediate frames are simply
+        dropped, which is fine for a debug view.
         """
         if self._viz_disabled_runtime:
             return
         if raw_bgr is None or raw_bgr.size == 0:
             return
 
-        # Lazily start the GUI subprocess on the first frame so we don't
-        # spawn it before the detector is ready.
-        if self._viz_proc is None and not self._start_visualization_subprocess():
+        # Lazily start the worker thread on the first frame (it owns spawning
+        # the GUI subprocess) so we don't start it before the detector runs.
+        if self._viz_thread is None:
+            self._start_visualization_worker()
+        if self._viz_disabled_runtime:
             return
 
-        # If the subprocess died for any reason, fall back to headless.
-        if self._viz_proc is not None and not self._viz_proc.is_alive():
-            self.get_logger().info(
-                'Visualization subprocess exited; continuing headless')
-            self._viz_disabled_runtime = True
-            self._cleanup_visualization_subprocess()
-            return
+        # Copy the frame: the source buffer (RealSense frame / decoded ROS
+        # image) may be recycled once this callback returns, and the worker
+        # reads it asynchronously. The ~1.2 MB memcpy is microseconds — far
+        # cheaper than the remap/render/send we just moved off this thread.
+        with self._viz_slot_lock:
+            self._viz_pending = (raw_bgr.copy(), observation)
+        self._viz_event.set()
 
-        # Use the same image space the detector worked in so circles/bboxes
-        # land on the right pixels.
-        if (self.detector is not None
-                and self.detector.use_undistort
-                and getattr(self.detector, 'map1', None) is not None
-                and getattr(self.detector, 'map2', None) is not None):
+    def _start_visualization_worker(self) -> bool:
+        """Start the dedicated viz worker thread. True on success."""
+        if self._viz_disabled_runtime:
+            return False
+        if self._viz_thread is not None and self._viz_thread.is_alive():
+            return True
+        self._viz_thread_running = True
+        self._viz_thread = threading.Thread(
+            target=self._visualization_worker_loop,
+            name='pingpong_viz_worker', daemon=True)
+        self._viz_thread.start()
+        return True
+
+    def _visualization_worker_loop(self) -> None:
+        """Consume the latest frame slot and drive the GUI subprocess.
+
+        Owns the expensive path (undistort remap, overlay render, pipe send)
+        so the vision callback stays at full detection rate. Always processes
+        the most recent frame in the slot, dropping any it missed. If the GUI
+        subprocess dies or the pipe send raises, visualization disables itself
+        for the rest of the run and the thread exits.
+        """
+        while self._viz_thread_running:
+            # Wait for a new frame (with a timeout so shutdown is responsive).
+            if not self._viz_event.wait(timeout=0.5):
+                continue
+            self._viz_event.clear()
+            with self._viz_slot_lock:
+                pending = self._viz_pending
+                self._viz_pending = None
+            if pending is None:
+                continue
+            raw_bgr, observation = pending
+
+            # Lazily spawn the GUI subprocess on the first real frame.
+            if (self._viz_proc is None
+                    and not self._start_visualization_subprocess()):
+                self._viz_disabled_runtime = True
+                return
+            if self._viz_proc is not None and not self._viz_proc.is_alive():
+                self.get_logger().info(
+                    'Visualization subprocess exited; continuing headless')
+                self._viz_disabled_runtime = True
+                self._cleanup_visualization_subprocess()
+                return
+
+            # Use the same image space the detector worked in so the
+            # circles/bboxes land on the right pixels.
+            if (self.detector is not None
+                    and self.detector.use_undistort
+                    and getattr(self.detector, 'map1', None) is not None
+                    and getattr(self.detector, 'map2', None) is not None):
+                try:
+                    viz_bgr = cv2.remap(
+                        raw_bgr, self.detector.map1, self.detector.map2,
+                        cv2.INTER_LINEAR)
+                except cv2.error:
+                    viz_bgr = raw_bgr
+            else:
+                viz_bgr = raw_bgr
+
             try:
-                viz_bgr = cv2.remap(
-                    raw_bgr, self.detector.map1, self.detector.map2,
-                    cv2.INTER_LINEAR)
-            except cv2.error:
-                viz_bgr = raw_bgr.copy()
-        else:
-            viz_bgr = raw_bgr.copy()
+                annotated = self._render_visualization_frame(
+                    viz_bgr, observation)
+            except Exception as exc:  # noqa: BLE001 - keep thread alive path
+                self.get_logger().warn(
+                    f'Visualization render failed: {exc}; '
+                    'disabling visualization',
+                    throttle_duration_sec=2.0)
+                self._viz_disabled_runtime = True
+                self._cleanup_visualization_subprocess()
+                return
 
-        try:
-            annotated = self._render_visualization_frame(viz_bgr, observation)
-        except Exception as exc:  # noqa: BLE001 - keep callback alive
-            self.get_logger().warn(
-                f'Visualization render failed: {exc}; disabling visualization',
-                throttle_duration_sec=2.0)
-            self._viz_disabled_runtime = True
-            self._cleanup_visualization_subprocess()
-            return
+            # Make the array contiguous so pickle is fast over the pipe.
+            if not annotated.flags['C_CONTIGUOUS']:
+                annotated = np.ascontiguousarray(annotated)
 
-        # Make the array contiguous so pickle is fast on the hot path.
-        if not annotated.flags['C_CONTIGUOUS']:
-            annotated = np.ascontiguousarray(annotated)
-
-        with self._viz_lock:
-            send = self._viz_send
+            with self._viz_lock:
+                send = self._viz_send
             if send is None:
                 return
+            # This send may block if the GUI is slow — but it blocks THIS
+            # worker thread, not the detection callback.
             try:
                 send.send(annotated)
             except (BrokenPipeError, OSError, EOFError) as exc:
@@ -1562,6 +1631,7 @@ class PingPongControllerNode(Node):
                     f'Visualization pipe closed ({exc}); continuing headless')
                 self._viz_disabled_runtime = True
                 self._cleanup_visualization_subprocess()
+                return
 
     def _start_visualization_subprocess(self) -> bool:
         """Spawn the GUI subprocess; True on success, False on failure."""
@@ -1627,8 +1697,14 @@ class PingPongControllerNode(Node):
             self._viz_proc = None
 
     def _shutdown_visualization(self) -> None:
-        """Tear down the visualization subprocess. Safe to call multiple times."""
+        """Tear down the viz worker thread + subprocess. Safe to call twice."""
         self._viz_disabled_runtime = True
+        # Stop the worker thread first so it can't touch the pipe mid-teardown.
+        self._viz_thread_running = False
+        self._viz_event.set()
+        if self._viz_thread is not None and self._viz_thread.is_alive():
+            self._viz_thread.join(timeout=2.0)
+        self._viz_thread = None
         self._cleanup_visualization_subprocess()
 
     def _render_visualization_frame(self, frame: np.ndarray,
@@ -1837,10 +1913,11 @@ def main(args=None):
         # Multi-threaded executor so the 200 Hz control timer is not blocked
         # by the heavy YOLO image callback. Control, vision, and joint-state
         # callbacks are on separate callback groups, so at least one thread
-        # is always free for control. The visualization window (when
-        # enabled) is driven inline from the vision callback; OpenCV's
-        # internal startWindowThread() owns the Qt event loop, so we don't
-        # need any main-thread plumbing here.
+        # is always free for control. The visualization window (when enabled)
+        # is driven by a dedicated viz worker thread fed via a single-slot
+        # drop-old handoff from the vision callback, and the actual cv2.imshow
+        # runs in a separate GUI subprocess — so neither rendering nor a
+        # stalled GUI can back-pressure detection or control.
         executor = MultiThreadedExecutor(num_threads=4)
         executor.add_node(node)
         executor.spin()

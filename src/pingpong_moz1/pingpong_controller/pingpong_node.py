@@ -16,6 +16,7 @@ from typing import Optional
 import time
 import os
 import threading
+from queue import Queue, Full, Empty
 import glob
 import multiprocessing as mp
 import json
@@ -38,6 +39,7 @@ from nav_msgs.msg import Odometry
 
 from pingpong_controller.ball_detector import PingPongBallDetector
 from pingpong_controller.calibration_loader import load_calibration
+from pingpong_controller.viz_render import render_detection_overlay
 from pingpong_controller.fov_loss_compensator import (
     FovLossCompensator,
     FovLossCompensatorConfig,
@@ -117,6 +119,17 @@ class PingPongControllerNode(Node):
         # steals time from the 200 Hz control loop or the YOLO image callback.
         self.declare_parameter('enable_visualization', False)
         self.declare_parameter('visualization_window_name', 'PingPong Detection')
+
+        # Raw video recording: save the unprocessed RealSense RGB stream at its
+        # native rate (e.g. 848x480@60Hz) on a dedicated thread, completely
+        # independent of the visualization pipeline. No overlay, no undistort,
+        # no detection — just the raw frames straight off the camera. Run the
+        # offline tool tools/annotate_raw_video.py afterwards to produce the
+        # detection-annotated video. raw_video_path blank => timestamped file
+        # under outputs/videos/. raw_video_fps<=0 => use realsense_fps.
+        self.declare_parameter('save_raw_video', False)
+        self.declare_parameter('raw_video_path', '')
+        self.declare_parameter('raw_video_fps', 0.0)
 
         # Debug/monitoring topics under /pingpong namespace.
         self.declare_parameter('ball_state_topic', '/pingpong/ball_state')
@@ -253,6 +266,15 @@ class PingPongControllerNode(Node):
             self.get_parameter('enable_visualization').value)
         self.visualization_window_name = str(
             self.get_parameter('visualization_window_name').value)
+
+        # Raw video recording: independent of visualization. Saves the
+        # unprocessed RealSense RGB frames straight off the camera.
+        self.save_raw_video = bool(
+            self.get_parameter('save_raw_video').value)
+        self.raw_video_path = str(
+            self.get_parameter('raw_video_path').value).strip()
+        self.raw_video_fps = float(
+            self.get_parameter('raw_video_fps').value)
 
         # Debug/monitoring topic parameters.
         self.ball_state_topic = self.get_parameter('ball_state_topic').value
@@ -620,19 +642,42 @@ class PingPongControllerNode(Node):
         self._viz_proc = None
         self._viz_send = None  # multiprocessing.Connection (parent end)
         self._viz_lock = threading.Lock()
+        # Disables the entire viz pipeline (worker thread + producer handoff).
         self._viz_disabled_runtime = False
+        # Disables ONLY the GUI subprocess display while keeping the worker
+        # thread alive — so video recording can continue even after the GUI
+        # window dies or is unavailable (headless / no DISPLAY).
+        self._viz_gui_disabled = False
         # Single-slot drop-old handoff between the vision callback (producer)
-        # and the dedicated viz worker thread (consumer). The vision callback
-        # only ever overwrites _viz_pending with the newest (raw_bgr,
-        # observation) and signals _viz_event; it never does remap / render /
-        # pipe-send itself, so a slow/blocked GUI pipe cannot back-pressure the
-        # detection callback. The worker drops any intermediate frames and
-        # always processes the latest slot.
+        # and the viz worker (consumer): the worker always renders the LATEST
+        # frame and drops any it missed, so the window stays real-time even
+        # when rendering/display can't keep up with the camera. Recording is
+        # NOT done here anymore — the raw RealSense stream is recorded on its
+        # own thread (see _enqueue_raw_video_frame), so visualization never
+        # needs the lossless queue that previously caused display lag.
         self._viz_slot_lock = threading.Lock()
         self._viz_pending = None  # (raw_bgr, observation) or None
+        self._viz_queue_mode = False  # always single-slot (real-time, drop old)
+        self._viz_frame_queue = None
         self._viz_event = threading.Event()
         self._viz_thread = None
         self._viz_thread_running = False
+
+        # --- Raw video recording (independent pipeline; unprocessed RGB) ---
+        # Fed directly from the RealSense reader thread, bypassing detection
+        # and visualization entirely, so it captures the true native-rate
+        # stream regardless of how slow rendering or YOLO are.
+        self._raw_video_writer = None
+        self._raw_video_lock = threading.Lock()
+        self._raw_video_path_resolved = None
+        self._raw_video_frame_size = None
+        self._raw_video_frames_written = 0
+        self._raw_video_disabled_runtime = False
+        self._raw_video_queue = None
+        self._raw_video_writer_thread = None
+        self._raw_video_writer_running = False
+        self._raw_video_queue_max_size = 360  # ~6 seconds at 60fps buffer
+
         if self.enable_visualization:
             self.get_logger().info(
                 f'Visualization enabled: window "{self.visualization_window_name}" '
@@ -640,6 +685,23 @@ class PingPongControllerNode(Node):
         else:
             self.get_logger().info(
                 'Visualization disabled (enable_visualization=False)')
+
+        # Raw recording is fed from the direct-RealSense reader loop. In ROS
+        # topic mode there is no such loop, so disable it with a warning.
+        if self.save_raw_video and not self.use_direct_realsense:
+            self.get_logger().warn(
+                'save_raw_video=true but use_direct_realsense=false; raw '
+                'recording is only supported in direct_realsense mode. '
+                'Disabling raw video recording.')
+            self.save_raw_video = False
+        if self.save_raw_video:
+            raw_fps_text = (
+                f'{self.raw_video_fps:.1f}'
+                if self.raw_video_fps > 0.0 else 'auto (realsense_fps)')
+            self.get_logger().info(
+                'Raw video recording enabled: saving unprocessed RealSense '
+                f'RGB stream (fps={raw_fps_text}); file resolved on first '
+                'frame. Post-process with tools/annotate_raw_video.py.')
 
         # --- Branch on input mode ---
         if self.use_direct_realsense:
@@ -994,6 +1056,13 @@ class PingPongControllerNode(Node):
                 continue
             if len(color_image.shape) != 3:
                 continue
+
+            # Record the raw frame BEFORE detection/visualization touch it, so
+            # the saved video is the true native-rate RealSense stream. This
+            # only enqueues (a non-blocking O(1) handoff to the raw writer
+            # thread); the actual encode happens off this thread.
+            if self.save_raw_video and not self._raw_video_disabled_runtime:
+                self._enqueue_raw_video_frame(color_image)
 
             stamp = self.get_clock().now().to_msg()
             self._handle_cv_image(color_image, stamp)
@@ -1889,9 +1958,24 @@ class PingPongControllerNode(Node):
         # image) may be recycled once this callback returns, and the worker
         # reads it asynchronously. The ~1.2 MB memcpy is microseconds — far
         # cheaper than the remap/render/send we just moved off this thread.
-        with self._viz_slot_lock:
-            self._viz_pending = (raw_bgr.copy(), observation)
-        self._viz_event.set()
+        frame_data = (raw_bgr.copy(), observation)
+
+        if self._viz_queue_mode:
+            # Queue mode: enqueue all frames for video recording
+            try:
+                self._viz_frame_queue.put(frame_data, block=False)
+                self._viz_event.set()
+            except Full:
+                # Queue full - log warning and drop this frame
+                self.get_logger().warn(
+                    'Visualization frame queue full; dropping frame '
+                    '(worker thread too slow for 60fps)',
+                    throttle_duration_sec=5.0)
+        else:
+            # Single-slot mode: overwrite with latest (for GUI display only)
+            with self._viz_slot_lock:
+                self._viz_pending = frame_data
+            self._viz_event.set()
 
     def _start_visualization_worker(self) -> bool:
         """Start the dedicated viz worker thread. True on success."""
@@ -1907,37 +1991,39 @@ class PingPongControllerNode(Node):
         return True
 
     def _visualization_worker_loop(self) -> None:
-        """Consume the latest frame slot and drive the GUI subprocess.
+        """Consume the latest frame slot, record it, and drive the GUI.
 
-        Owns the expensive path (undistort remap, overlay render, pipe send)
-        so the vision callback stays at full detection rate. Always processes
-        the most recent frame in the slot, dropping any it missed. If the GUI
-        subprocess dies or the pipe send raises, visualization disables itself
-        for the rest of the run and the thread exits.
+        Owns the expensive path (undistort remap, overlay render, optional
+        video write, GUI pipe send) so the vision callback stays at full
+        detection rate. Always processes the most recent frame in the slot,
+        dropping any it missed.
+
+        Recording and the GUI display are decoupled: if the GUI subprocess
+        dies or its pipe breaks, only the display stops — the worker keeps
+        rendering and writing frames to the video file. The worker exits only
+        when there is nothing left to do (GUI gone AND not recording) or on a
+        render failure.
         """
         while self._viz_thread_running:
             # Wait for a new frame (with a timeout so shutdown is responsive).
             if not self._viz_event.wait(timeout=0.5):
                 continue
             self._viz_event.clear()
-            with self._viz_slot_lock:
-                pending = self._viz_pending
-                self._viz_pending = None
-            if pending is None:
-                continue
-            raw_bgr, observation = pending
 
-            # Lazily spawn the GUI subprocess on the first real frame.
-            if (self._viz_proc is None
-                    and not self._start_visualization_subprocess()):
-                self._viz_disabled_runtime = True
-                return
-            if self._viz_proc is not None and not self._viz_proc.is_alive():
-                self.get_logger().info(
-                    'Visualization subprocess exited; continuing headless')
-                self._viz_disabled_runtime = True
-                self._cleanup_visualization_subprocess()
-                return
+            # Get frame from queue or single slot
+            if self._viz_queue_mode:
+                try:
+                    pending = self._viz_frame_queue.get(timeout=0.1)
+                except Empty:
+                    continue
+            else:
+                with self._viz_slot_lock:
+                    pending = self._viz_pending
+                    self._viz_pending = None
+                if pending is None:
+                    continue
+
+            raw_bgr, observation = pending
 
             # Use the same image space the detector worked in so the
             # circles/bboxes land on the right pixels.
@@ -1966,28 +2052,61 @@ class PingPongControllerNode(Node):
                 self._cleanup_visualization_subprocess()
                 return
 
-            # Make the array contiguous so pickle is fast over the pipe.
+            # Make the array contiguous so pickle-over-pipe send is fast.
             if not annotated.flags['C_CONTIGUOUS']:
                 annotated = np.ascontiguousarray(annotated)
 
-            with self._viz_lock:
-                send = self._viz_send
-            if send is None:
-                return
-            # This send may block if the GUI is slow — but it blocks THIS
-            # worker thread, not the detection callback.
-            try:
-                send.send(annotated)
-            except (BrokenPipeError, OSError, EOFError) as exc:
-                self.get_logger().info(
-                    f'Visualization pipe closed ({exc}); continuing headless')
+            # Best-effort GUI display.
+            if not self._viz_gui_disabled:
+                self._send_frame_to_gui(annotated)
+
+            # Nothing left to do? Exit the worker.
+            if self._viz_gui_disabled:
                 self._viz_disabled_runtime = True
-                self._cleanup_visualization_subprocess()
                 return
 
+    def _send_frame_to_gui(self, annotated: np.ndarray) -> None:
+        """Ship one rendered frame to the GUI subprocess (best-effort).
+
+        Spawns the subprocess lazily on the first frame. Any failure (spawn
+        error, dead process, broken pipe) disables only the GUI display via
+        ``_viz_gui_disabled`` — recording, if enabled, keeps running.
+        """
+        # Lazily spawn the GUI subprocess on the first real frame.
+        if self._viz_proc is None and not self._start_visualization_subprocess():
+            self._viz_gui_disabled = True
+            return
+        if self._viz_proc is not None and not self._viz_proc.is_alive():
+            self.get_logger().info(
+                'Visualization subprocess exited; '
+                'continuing without display')
+            self._viz_gui_disabled = True
+            self._cleanup_visualization_subprocess()
+            return
+
+        with self._viz_lock:
+            send = self._viz_send
+        if send is None:
+            self._viz_gui_disabled = True
+            return
+        # This send may block if the GUI is slow — but it blocks THIS worker
+        # thread, not the detection callback.
+        try:
+            send.send(annotated)
+        except (BrokenPipeError, OSError, EOFError) as exc:
+            self.get_logger().info(
+                f'Visualization pipe closed ({exc}); '
+                'continuing without display')
+            self._viz_gui_disabled = True
+            self._cleanup_visualization_subprocess()
+
     def _start_visualization_subprocess(self) -> bool:
-        """Spawn the GUI subprocess; True on success, False on failure."""
-        if self._viz_disabled_runtime:
+        """Spawn the GUI subprocess; True on success, False on failure.
+
+        A failure here disables only the GUI display (``_viz_gui_disabled``),
+        never the whole pipeline — video recording, if enabled, keeps running.
+        """
+        if self._viz_disabled_runtime or self._viz_gui_disabled:
             return False
         try:
             # `spawn` instead of `fork` so the child gets a clean Python
@@ -2010,8 +2129,8 @@ class PingPongControllerNode(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn(
                 f'Failed to start visualization subprocess: {exc}; '
-                'disabling visualization')
-            self._viz_disabled_runtime = True
+                'disabling GUI display')
+            self._viz_gui_disabled = True
             return False
 
         self._viz_proc = proc
@@ -2051,137 +2170,220 @@ class PingPongControllerNode(Node):
     def _shutdown_visualization(self) -> None:
         """Tear down the viz worker thread + subprocess. Safe to call twice."""
         self._viz_disabled_runtime = True
-        # Stop the worker thread first so it can't touch the pipe mid-teardown.
+        # Stop the worker thread first so it can't touch the pipe or the video
+        # writer mid-teardown.
         self._viz_thread_running = False
         self._viz_event.set()
         if self._viz_thread is not None and self._viz_thread.is_alive():
             self._viz_thread.join(timeout=2.0)
         self._viz_thread = None
+
         self._cleanup_visualization_subprocess()
+
+    # ------------------------------------------------------------------
+    # Raw video recording helpers (independent of visualization). Fed from
+    # the RealSense reader thread via _enqueue_raw_video_frame; a dedicated
+    # writer thread does the encoding so the reader never blocks on disk.
+    # ------------------------------------------------------------------
+
+    def _enqueue_raw_video_frame(self, raw_bgr: np.ndarray) -> None:
+        """Hand one raw RealSense frame to the raw-video writer thread.
+
+        Called from the RealSense reader loop. O(1) non-blocking: copies the
+        frame (the RealSense buffer is recycled after the callback) and pushes
+        it onto the writer queue, dropping the frame only if the queue is full
+        (disk/encoder can't keep up).
+        """
+        if self._raw_video_writer_thread is None:
+            self._start_raw_video_writer_thread()
+        if self._raw_video_queue is None:
+            return
+        try:
+            self._raw_video_queue.put(raw_bgr.copy(), block=False)
+        except Full:
+            self.get_logger().warn(
+                f'Raw video queue full ({self._raw_video_queue_max_size} '
+                'frames); dropping frame (disk/encoder too slow)',
+                throttle_duration_sec=5.0)
+
+    def _start_raw_video_writer_thread(self) -> None:
+        """Start the dedicated raw-video writer thread (idempotent)."""
+        if self._raw_video_writer_thread is not None:
+            return
+        self._raw_video_queue = Queue(maxsize=self._raw_video_queue_max_size)
+        self._raw_video_writer_running = True
+        self._raw_video_writer_thread = threading.Thread(
+            target=self._raw_video_writer_loop,
+            name='raw_video_writer', daemon=True)
+        self._raw_video_writer_thread.start()
+        self.get_logger().info('Raw video writer thread started')
+
+    def _raw_video_writer_loop(self) -> None:
+        """Dedicated thread: drain the queue and encode raw frames."""
+        while self._raw_video_writer_running:
+            try:
+                frame = self._raw_video_queue.get(timeout=0.1)
+                self._write_raw_video_frame(frame)
+            except Empty:
+                continue
+            except Exception as exc:  # noqa: BLE001 - keep node alive
+                self.get_logger().error(
+                    f'Raw video writer thread error: {exc}; stopping '
+                    'raw recording', throttle_duration_sec=2.0)
+                self._raw_video_disabled_runtime = True
+                break
+
+    def _write_raw_video_frame(self, raw_bgr: np.ndarray) -> None:
+        """Open the raw writer lazily and append one BGR frame.
+
+        Runs on the raw-video writer thread. The first frame fixes resolution
+        and fps for the whole file. Any failure disables raw recording for the
+        rest of the run without killing the thread.
+        """
+        if raw_bgr is None or raw_bgr.size == 0:
+            return
+        height, width = raw_bgr.shape[:2]
+        with self._raw_video_lock:
+            if self._raw_video_writer is None:
+                if not self._open_raw_video_writer(width, height):
+                    self._raw_video_disabled_runtime = True
+                    return
+            frame = raw_bgr
+            if (self._raw_video_frame_size is not None
+                    and (width, height) != self._raw_video_frame_size):
+                try:
+                    frame = cv2.resize(raw_bgr, self._raw_video_frame_size)
+                except cv2.error:
+                    return
+            try:
+                self._raw_video_writer.write(frame)
+                self._raw_video_frames_written += 1
+            except Exception as exc:  # noqa: BLE001 - keep thread alive
+                self.get_logger().warn(
+                    f'Raw video write failed: {exc}; disabling raw recording',
+                    throttle_duration_sec=2.0)
+                self._raw_video_disabled_runtime = True
+                self._release_raw_video_writer_locked()
+
+    def _resolve_raw_video_path(self) -> str:
+        """Return the raw video output path, auto-generating one if unset."""
+        path = self.raw_video_path
+        if path:
+            return os.path.expandvars(os.path.expanduser(path))
+        ts = time.strftime('%Y%m%d_%H%M%S')
+        return os.path.join(
+            self.source_module_dir, 'outputs', 'videos',
+            f'pingpong_raw_{ts}.mp4')
+
+    def _resolve_raw_video_fps(self) -> float:
+        """Pick the raw recording fps: explicit param, else realsense fps."""
+        if self.raw_video_fps > 0.0:
+            return float(self.raw_video_fps)
+        try:
+            rs_fps = float(self.realsense_fps)
+            if rs_fps > 0.0:
+                return rs_fps
+        except (TypeError, ValueError):
+            pass
+        return 60.0
+
+    def _open_raw_video_writer(self, width: int, height: int) -> bool:
+        """Create the raw cv2.VideoWriter. Caller must hold _raw_video_lock."""
+        path = self._resolve_raw_video_path()
+        out_dir = os.path.dirname(path)
+        if out_dir:
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+            except OSError as exc:
+                self.get_logger().error(
+                    f'Cannot create raw video output dir {out_dir}: {exc}; '
+                    'raw recording disabled')
+                return False
+
+        fps = self._resolve_raw_video_fps()
+        # mp4v is the most broadly available codec; raw frames are large but
+        # this keeps the offline post-process step (re-decode + detect) simple.
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(path, fourcc, fps, (width, height))
+        if not writer.isOpened():
+            self.get_logger().error(
+                f'Failed to open raw VideoWriter for {path} '
+                f'({width}x{height}@{fps:.1f}); raw recording disabled')
+            return False
+
+        self._raw_video_writer = writer
+        self._raw_video_path_resolved = path
+        self._raw_video_frame_size = (width, height)
+        self._raw_video_frames_written = 0
+        self.get_logger().info(
+            f'Recording raw video -> {path} '
+            f'({width}x{height}@{fps:.1f} fps)')
+        return True
+
+    def _release_raw_video_writer_locked(self) -> None:
+        """Release the raw writer and log a summary. Caller holds the lock."""
+        if self._raw_video_writer is None:
+            return
+        try:
+            self._raw_video_writer.release()
+        except Exception:  # noqa: BLE001
+            pass
+        self._raw_video_writer = None
+        if self._raw_video_frames_written > 0 and self._raw_video_path_resolved:
+            self.get_logger().info(
+                f'Saved raw video: {self._raw_video_path_resolved} '
+                f'({self._raw_video_frames_written} frames)')
+        elif self._raw_video_path_resolved:
+            self.get_logger().warn(
+                'Raw video recording produced no frames; file may be empty: '
+                f'{self._raw_video_path_resolved}')
+
+    def _stop_raw_video_recording(self) -> None:
+        """Stop the raw writer thread, flush the queue, finalize the file."""
+        if self._raw_video_writer_thread is not None:
+            self._raw_video_writer_running = False
+            if self._raw_video_writer_thread.is_alive():
+                self._raw_video_writer_thread.join(timeout=5.0)
+            # Flush whatever is still queued so we don't lose the tail.
+            if self._raw_video_queue is not None:
+                remaining = self._raw_video_queue.qsize()
+                if remaining > 0:
+                    self.get_logger().info(
+                        f'Flushing {remaining} remaining raw video frames...')
+                while True:
+                    try:
+                        frame = self._raw_video_queue.get_nowait()
+                    except Empty:
+                        break
+                    self._write_raw_video_frame(frame)
+            self._raw_video_writer_thread = None
+            self._raw_video_queue = None
+        with self._raw_video_lock:
+            self._release_raw_video_writer_locked()
 
     def _render_visualization_frame(self, frame: np.ndarray,
                                     observation: dict) -> np.ndarray:
         """Overlay detection results on a BGR frame.
 
-        Draws (when available): YOLO mask tint, fitted circle, smoothed
-        circle, color-refined bbox, status text with FPS / detection rate /
-        depth / 3D position.
+        Thin wrapper around the shared ``render_detection_overlay`` so the
+        live visualization window and the offline raw-video annotation tool
+        draw identical overlays. All node-specific state (frame counters,
+        callback rate, output frame) is gathered here and passed in.
         """
-        canvas = frame.copy()
-        height, width = canvas.shape[:2]
-
-        detected = bool(observation.get('detected', False))
-        raw = observation.get('raw_measurement') or {}
-
-        # Mask tint: faintly color-fill the YOLO mask so the user can see
-        # what the network actually segmented before we collapsed it to a
-        # circle.
-        mask = raw.get('mask')
-        if mask is not None and isinstance(mask, np.ndarray) and mask.size > 0:
-            try:
-                if mask.shape[:2] != canvas.shape[:2]:
-                    mask = cv2.resize(
-                        mask, (width, height), interpolation=cv2.INTER_NEAREST)
-                colored = np.zeros_like(canvas)
-                colored[mask > 0] = (0, 200, 255)  # orange-ish in BGR
-                canvas = cv2.addWeighted(canvas, 1.0, colored, 0.35, 0)
-            except cv2.error:
-                pass
-
-        if detected:
-            cx_raw = raw.get('image_x')
-            cy_raw = raw.get('image_y')
-            radius_raw = raw.get('radius_px')
-            cx_smooth = raw.get('smoothed_cx')
-            cy_smooth = raw.get('smoothed_cy')
-            radius_smooth = raw.get('smoothed_radius')
-
-            if (cx_raw is not None and cy_raw is not None
-                    and radius_raw is not None):
-                cv2.circle(
-                    canvas,
-                    (int(round(cx_raw)), int(round(cy_raw))),
-                    int(round(max(radius_raw, 1.0))),
-                    (0, 255, 0), 2)
-                cv2.drawMarker(
-                    canvas,
-                    (int(round(cx_raw)), int(round(cy_raw))),
-                    (0, 255, 0), markerType=cv2.MARKER_CROSS,
-                    markerSize=14, thickness=2)
-
-            if (cx_smooth is not None and cy_smooth is not None
-                    and radius_smooth is not None
-                    and (cx_smooth != cx_raw or cy_smooth != cy_raw)):
-                cv2.circle(
-                    canvas,
-                    (int(round(cx_smooth)), int(round(cy_smooth))),
-                    int(round(max(radius_smooth, 1.0))),
-                    (0, 200, 255), 1, cv2.LINE_AA)
-
-            color_bbox = raw.get('color_bbox')
-            if color_bbox is not None and len(color_bbox) == 4:
-                bx, by, bw, bh = (int(v) for v in color_bbox)
-                cv2.rectangle(
-                    canvas, (bx, by), (bx + bw, by + bh), (0, 165, 255), 1)
-
-        # Status text (top-left HUD).
         if len(self.callback_times) > 0:
             avg_dt = sum(self.callback_times) / len(self.callback_times)
             callback_hz = 1.0 / avg_dt if avg_dt > 0 else 0.0
         else:
             callback_hz = 0.0
-        detection_rate = (100.0 * self.detection_count / self.frame_count
-                          if self.frame_count > 0 else 0.0)
-
-        lines = [
-            f"Frame {self.frame_count} | Callback {callback_hz:5.1f} Hz | "
-            f"Detect {detection_rate:5.1f}%",
-        ]
-
-        if detected:
-            depth_mm = raw.get('depth_mm', 0.0) or 0.0
-            method = raw.get('detection_method', '?')
-            lines.append(
-                f"Pixel ({raw.get('image_x', 0.0):6.1f}, "
-                f"{raw.get('image_y', 0.0):6.1f}) | "
-                f"r {raw.get('radius_px', 0.0):5.1f}px | "
-                f"depth {depth_mm:6.1f} mm | {method}"
-            )
-            pos = observation.get('position') or [0.0, 0.0, 0.0]
-            output_frame = (
-                getattr(self.detector, 'output_frame', 'camera')
-                if self.detector is not None else 'camera')
-            lines.append(
-                f"Pos[{output_frame}] "
-                f"({pos[0]:7.1f}, {pos[1]:7.1f}, {pos[2]:7.1f}) mm"
-            )
-            if raw.get('motion_blur_detected'):
-                lines.append(
-                    "MOTION BLUR"
-                    + (" (corrected)" if raw.get('motion_blur_corrected') else "")
-                )
-        else:
-            reason = observation.get('reject_reason') or 'no_detection'
-            lines.append(f"NOT DETECTED [{reason}]")
-
-        # Draw HUD with a translucent backdrop so it's readable on any scene.
-        x0, y0 = 8, 8
-        line_h = 22
-        box_w = max(380, width // 3)
-        box_h = line_h * len(lines) + 12
-        overlay = canvas.copy()
-        cv2.rectangle(
-            overlay, (x0 - 4, y0 - 4),
-            (x0 + box_w, y0 + box_h), (0, 0, 0), thickness=-1)
-        cv2.addWeighted(overlay, 0.45, canvas, 0.55, 0, dst=canvas)
-        for i, text in enumerate(lines):
-            cv2.putText(
-                canvas, text, (x0, y0 + 16 + i * line_h),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                (0, 255, 0) if detected else (0, 0, 255),
-                1, cv2.LINE_AA)
-
-        return canvas
+        output_frame = (
+            getattr(self.detector, 'output_frame', 'camera')
+            if self.detector is not None else 'camera')
+        return render_detection_overlay(
+            frame, observation,
+            frame_count=self.frame_count,
+            detection_count=self.detection_count,
+            callback_hz=callback_hz,
+            output_frame=output_frame)
 
     def _publish_ball_state_debug(self, ball_state: BallState) -> None:
         """Publish ball detection result as Odometry on /pingpong/ball_state.
@@ -2292,6 +2494,7 @@ def main(args=None):
 
         if node:
             node._shutdown_realsense()
+            node._stop_raw_video_recording()
             node._shutdown_visualization()
             node.save_trajectory_plot()
             if executor is not None:

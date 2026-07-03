@@ -14,6 +14,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 
+try:
+    from scipy.spatial.transform import Rotation as _R
+    _HAVE_SCIPY = True
+except ImportError:
+    _HAVE_SCIPY = False
+
 
 # Right-arm joint names (must match replay_node.py)
 RIGHT_ARM_JOINTS: List[str] = [
@@ -235,12 +241,145 @@ def plot_error_analysis(csv_path: str, output_path: Optional[str] = None,
         plt.show()
 
 
+def _ee_columns_present(df: pd.DataFrame, prefix: str) -> bool:
+    """True if df has prefix_pos/{x,y,z} and prefix_quat/{x,y,z,w} columns."""
+    pos_ok = all(f'{prefix}_pos/{a}' in df.columns for a in 'xyz')
+    quat_ok = all(f'{prefix}_quat/{a}' in df.columns for a in 'xyzw')
+    return pos_ok and quat_ok
+
+
+def _extract_ee(df: pd.DataFrame, prefix: str):
+    """Return (pos Nx3 [m], euler Nx3 [deg]) for an EE prefix, or (None, None).
+
+    Quaternions are stored xyzw. Rows with NaN are kept as NaN so gaps show as
+    breaks in the line rather than silently shifting the time axis.
+    """
+    if not _ee_columns_present(df, prefix):
+        return None, None
+    pos = np.column_stack([df[f'{prefix}_pos/{a}'].values for a in 'xyz'])
+    quat = np.column_stack([df[f'{prefix}_quat/{a}'].values for a in 'xyzw'])
+    euler = np.full((len(df), 3), np.nan)
+    if _HAVE_SCIPY:
+        ok = np.isfinite(quat).all(axis=1) & (
+            np.linalg.norm(quat, axis=1) > 1e-6)
+        if ok.any():
+            euler[ok] = _R.from_quat(quat[ok]).as_euler('xyz', degrees=True)
+    return pos, euler
+
+
+def _auto_label(df: pd.DataFrame, fallback: str) -> str:
+    """Guess a run's label from its columns: cartesian runs have cart_cmd_*."""
+    if _ee_columns_present(df, 'cart_cmd'):
+        return 'cartesian'
+    if _ee_columns_present(df, 'cart_actual'):
+        return 'joint'
+    return fallback
+
+
+def plot_ee_comparison(csv_path: str, output_path: Optional[str] = None,
+                       compare_path: Optional[str] = None,
+                       labels: Optional[List[str]] = None) -> None:
+    """Plot end-effector position + orientation over time.
+
+    Shows the controller-reported actual EE pose (``cart_actual_*``) and, when
+    present, the commanded EE pose (``cart_cmd_*``). With ``compare_path`` a
+    second run is overlaid so two replay methods (e.g. joint vs cartesian
+    output) can be compared in task space. Both runs' actual poses come from the
+    controller's own ``/cart_states`` so they share a frame and are directly
+    comparable.
+
+    Run labels: explicit ``labels`` win; otherwise each run is auto-named
+    ``cartesian`` (has ``cart_cmd_*``) or ``joint`` from its columns.
+    """
+    paths = [csv_path] + ([compare_path] if compare_path else [])
+    loaded = []
+    for r_idx, path in enumerate(paths):
+        print(f"Loading EE data from: {path}")
+        df = pd.read_csv(path)
+        if not _ee_columns_present(df, 'cart_actual'):
+            print(f"Warning: {path} has no cart_actual_* columns; "
+                  "re-run with record_data:=true to log the EE pose. Skipping.")
+            continue
+        if labels and r_idx < len(labels):
+            lab = labels[r_idx]
+        else:
+            lab = _auto_label(df, fallback=f'run {r_idx + 1}')
+        loaded.append((df, lab))
+    if not loaded:
+        print("Error: no run has end-effector pose columns; nothing to plot.")
+        return
+    if not _HAVE_SCIPY:
+        print("Warning: scipy not available; orientation (euler) omitted.")
+
+    pos_labels = ['X (m)', 'Y (m)', 'Z (m)']
+    rot_labels = ['Roll (deg)', 'Pitch (deg)', 'Yaw (deg)']
+    fig, axes = plt.subplots(2, 3, figsize=(18, 9), sharex=True)
+
+    # Distinct colours per run; actual solid, command dashed.
+    run_colors = ['tab:blue', 'tab:red', 'tab:green']
+    for r_idx, (df, lab) in enumerate(loaded):
+        t = df['step'].values
+        c = run_colors[r_idx % len(run_colors)]
+        a_pos, a_eul = _extract_ee(df, 'cart_actual')
+        c_pos, c_eul = _extract_ee(df, 'cart_cmd')
+        for k in range(3):
+            axes[0, k].plot(t, a_pos[:, k], color=c, linewidth=1.4,
+                            label=f'{lab} actual', alpha=0.85)
+            if c_pos is not None:
+                axes[0, k].plot(t, c_pos[:, k], color=c, linewidth=1.0,
+                                linestyle='--', alpha=0.7,
+                                label=f'{lab} command')
+            axes[1, k].plot(t, a_eul[:, k], color=c, linewidth=1.4,
+                            label=f'{lab} actual', alpha=0.85)
+            if c_eul is not None:
+                axes[1, k].plot(t, c_eul[:, k], color=c, linewidth=1.0,
+                                linestyle='--', alpha=0.7,
+                                label=f'{lab} command')
+
+    for k in range(3):
+        axes[0, k].set_ylabel(pos_labels[k])
+        axes[0, k].set_title(f'EE Position {pos_labels[k][0]}')
+        axes[0, k].grid(True, alpha=0.3)
+        axes[0, k].legend(loc='best', fontsize=8)
+        axes[1, k].set_ylabel(rot_labels[k])
+        axes[1, k].set_title(f'EE Orientation {rot_labels[k].split()[0]}')
+        axes[1, k].set_xlabel('Step')
+        axes[1, k].grid(True, alpha=0.3)
+        axes[1, k].legend(loc='best', fontsize=8)
+
+    title = 'End-effector pose'
+    if len(loaded) > 1:
+        title += f' comparison: {loaded[0][1]} vs {loaded[1][1]}'
+    fig.suptitle(title, fontsize=14)
+    plt.tight_layout()
+
+    if output_path:
+        print(f"Saving EE plot to: {output_path}")
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print("EE plot saved successfully")
+    else:
+        print("Displaying EE plot (close window to continue)...")
+        plt.show()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Plot comparison of actual vs theoretical right-arm trajectory')
     parser.add_argument('csv_path', help='Path to replay_analysis_*.csv file')
     parser.add_argument('-o', '--output', help='Output path for the plot (PNG/PDF)')
     parser.add_argument('--error-plot', help='Output path for error analysis plot')
+    parser.add_argument('--ee-plot',
+                        help='Output path for the end-effector pose plot '
+                             '(position + orientation over time)')
+    parser.add_argument('--compare',
+                        help='Second replay_analysis_*.csv to overlay on the '
+                             'EE plot (e.g. a joint-mode run to compare against '
+                             'a cartesian-mode run)')
+    parser.add_argument('--labels', nargs='+',
+                        help='Override legend labels for the EE plot runs, '
+                             'e.g. --labels cartesian joint. If omitted, each '
+                             'run is auto-named "cartesian" (has cart_cmd_*) '
+                             'or "joint" from its columns.')
     parser.add_argument('-j', '--joints', type=int, nargs='+',
                        help='Joint indices to plot (0-6), default: all joints')
     parser.add_argument('--show', action='store_true',
@@ -250,6 +389,9 @@ def main():
 
     if not os.path.isfile(args.csv_path):
         print(f"Error: File not found: {args.csv_path}")
+        return 1
+    if args.compare and not os.path.isfile(args.compare):
+        print(f"Error: --compare file not found: {args.compare}")
         return 1
 
     # Validate joint indices
@@ -267,6 +409,12 @@ def main():
     if args.error_plot or args.show:
         error_output = args.error_plot if args.error_plot and not args.show else None
         plot_error_analysis(args.csv_path, error_output, args.joints)
+
+    # Generate end-effector pose plot if requested (or whenever a comparison
+    # run is given, since that is its main purpose).
+    if args.ee_plot or args.compare or args.show:
+        ee_output = args.ee_plot if args.ee_plot and not args.show else None
+        plot_ee_comparison(args.csv_path, ee_output, args.compare, args.labels)
 
     return 0
 

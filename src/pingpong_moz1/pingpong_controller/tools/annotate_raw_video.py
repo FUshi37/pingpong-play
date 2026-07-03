@@ -67,6 +67,86 @@ def _auto_calibration(width: int, height: int) -> str:
     return fallback
 
 
+def _load_timestamps(csv_path: str) -> dict:
+    """Load the node's per-frame timestamp sidecar into {frame_idx: t_sec}.
+
+    Returns an empty dict on any problem (the caller falls back to fps timing).
+    """
+    table = {}
+    try:
+        with open(csv_path, 'r') as fh:
+            header = fh.readline()  # 'frame_idx,t_capture_sec'
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(',')
+                if len(parts) < 2:
+                    continue
+                try:
+                    table[int(parts[0])] = float(parts[1])
+                except ValueError:
+                    continue
+    except OSError:
+        return {}
+    return table
+
+
+def _load_depth_frame(depth_dir: str, frame_idx: int):
+    """Load aligned depth frame ``depth_<idx>.npy`` for a 0-based frame index.
+
+    The recorder writes one depth file per RGB frame keyed by the same index.
+    Returns the 2D depth array, or None when the file is missing / empty /
+    unreadable (the detector then falls back to monocular for that frame).
+    """
+    if not depth_dir:
+        return None
+    path = os.path.join(depth_dir, f'depth_{frame_idx:06d}.npy')
+    if not os.path.isfile(path):
+        return None
+    try:
+        depth = np.load(path)
+    except Exception:  # noqa: BLE001
+        return None
+    if depth is None or depth.size == 0:
+        return None
+    return depth
+
+
+def _write_detection_row(fh, frame_idx: int, t_sec: float,
+                         observation: dict) -> None:
+    """Append one detection row to the offline log.
+
+    Mirrors the node estimator-log raw_* columns so
+    validate_estimator_replay.py can consume either source. A miss is logged
+    with detected=0 and NaN positions; the depth_method column records whether
+    hardware depth ('sensor') or monocular geometry ('geometry') was used so a
+    later pass can split the two.
+    """
+    detected = bool(observation.get('detected', False))
+    raw = observation.get('raw_measurement') or {}
+    filt_rej = bool(raw.get('filter_rejected', False))
+    pos = observation.get('position') or [float('nan')] * 3
+    vel = observation.get('velocity') or [float('nan')] * 3
+
+    def _f(v):
+        try:
+            return f'{float(v):.3f}'
+        except (TypeError, ValueError):
+            return 'nan'
+
+    radius = raw.get('radius_px', '')
+    depth_mm = raw.get('depth_mm', '')
+    depth_method = raw.get('depth_method', '')
+    fh.write(
+        f'{frame_idx},{t_sec:.6f},{int(detected)},{int(filt_rej)},'
+        f'{_f(pos[0])},{_f(pos[1])},{_f(pos[2])},'
+        f'{_f(vel[0])},{_f(vel[1])},{_f(vel[2])},'
+        f'{_f(radius) if radius != "" else ""},'
+        f'{_f(depth_mm) if depth_mm != "" else ""},'
+        f'{depth_method}\n')
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -92,6 +172,29 @@ def parse_args():
     p.add_argument('--camera-tilt-deg', type=float, default=40.0)
     p.add_argument('--no-kalman', action='store_true',
                    help='Disable Kalman smoothing (default: enabled).')
+    p.add_argument('--no-ellipse-fit', action='store_true',
+                   help='Disable ellipse-fit radius (use minEnclosingCircle). '
+                        'Default: ellipse fit ON (matches node default).')
+    p.add_argument('--temporal-tracker', action='store_true',
+                   help='Enable the multi-frame temporal tracker (motion gate '
+                        '+ miss bridging). Pass this to match a node run that '
+                        'had enable_temporal_tracker=True.')
+    p.add_argument('--tracker-max-miss-bridge', type=int, default=2,
+                   help='Temporal tracker: max consecutive missed frames to '
+                        'bridge (default 2).')
+    p.add_argument('--tracker-gate-px', type=float, default=120.0,
+                   help='Temporal tracker: motion-consistency gate in px '
+                        '(default 120).')
+    p.add_argument('--hsv-lower', default='',
+                   help='Orange HSV lower bound "H,S,V" (e.g. 8,80,80). '
+                        'Empty = detector default. Match the node run.')
+    p.add_argument('--hsv-upper', default='',
+                   help='Orange HSV upper bound "H,S,V" (e.g. 22,255,255). '
+                        'Empty = detector default. Match the node run.')
+    p.add_argument('--color-match-threshold', type=float, default=0.3,
+                   help='Min orange-pixel ratio in mask (default 0.3).')
+    p.add_argument('--color-circularity-min', type=float, default=0.4,
+                   help='Min circularity for color fallback (default 0.4).')
     p.add_argument('--output-frame', default='base_link',
                    choices=['base_link', 'camera'],
                    help='Coordinate frame for 3D position (default base_link, '
@@ -99,6 +202,33 @@ def parse_args():
     p.add_argument('--fps', type=float, default=0.0,
                    help='Override timing fps used for detection dt and output. '
                         '<=0 uses the input video fps.')
+    p.add_argument('--timestamps-csv', default='',
+                   help='Per-frame timestamp sidecar (frame_idx,t_capture_sec) '
+                        'saved by the node alongside the raw video. When given, '
+                        'detection dt uses these TRUE capture times instead of '
+                        'the constant-fps assumption. Default: auto-detect '
+                        '<input>_timestamps.csv next to the input.')
+    p.add_argument('--depth-dir', default='',
+                   help='Directory of aligned 16-bit depth frames '
+                        '(depth_<idx>.npy) saved by the node. Enables hardware '
+                        'depth replay. Default: auto-detect <input>_depth/ '
+                        'next to the input when --use-depth-sensor is set.')
+    p.add_argument('--use-depth-sensor', action='store_true',
+                   help='Feed recorded hardware depth into the detector '
+                        '(matches a node run with use_depth_sensor=True). '
+                        'Requires a depth dir; falls back to monocular per '
+                        'frame when a depth frame is missing/invalid.')
+    p.add_argument('--depth-scale', type=float, default=0.001,
+                   help='Depth scale (m per z16 count) the node logged at '
+                        'startup ("depth_scale=... m/count"). Default 0.001.')
+    p.add_argument('--depth-neighborhood-px', type=int, default=2,
+                   help='Depth sampling half-window when no ball mask is '
+                        'available (matches node depth_neighborhood_px).')
+    p.add_argument('--detection-log', default='',
+                   help='Optional CSV of per-frame detection results '
+                        '(frame_idx, t, x/y/z mm, vx/vy/vz, depth_mm, '
+                        'depth_method, detected). Default: '
+                        '<output>_detections.csv. Pass "none" to skip.')
     p.add_argument('--show', action='store_true',
                    help='Also display frames while processing (slower).')
     return p.parse_args()
@@ -124,6 +254,36 @@ def main():
 
     print(f'Input : {args.input} ({width}x{height}, '
           f'{video_fps:.2f} fps, {total} frames)')
+
+    root_in, _ = os.path.splitext(args.input)
+
+    # Per-frame timestamps: explicit, else auto-detect the node's sidecar.
+    ts_path = args.timestamps_csv
+    if not ts_path:
+        cand = root_in + '_timestamps.csv'
+        ts_path = cand if os.path.isfile(cand) else ''
+    timestamps = _load_timestamps(ts_path) if ts_path else {}
+    if timestamps:
+        print(f'Times : {ts_path} ({len(timestamps)} stamps; using TRUE '
+              'capture times for detection dt)')
+    else:
+        print(f'Times : none (constant {fps:.1f} fps assumption)')
+
+    # Hardware depth: explicit dir, else auto-detect when --use-depth-sensor.
+    depth_dir = args.depth_dir
+    if not depth_dir and args.use_depth_sensor:
+        cand = root_in + '_depth'
+        depth_dir = cand if os.path.isdir(cand) else ''
+    if args.use_depth_sensor:
+        if depth_dir and os.path.isdir(depth_dir):
+            print(f'Depth : {depth_dir} (hardware depth ON, scale='
+                  f'{args.depth_scale} m/count)')
+        else:
+            print('WARNING: --use-depth-sensor set but no depth dir found; '
+                  'replaying monocular only.', file=sys.stderr)
+            depth_dir = ''
+    else:
+        depth_dir = ''
 
     calib_path = args.calibration
     if calib_path.lower() in ('auto', ''):
@@ -156,6 +316,15 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
 
     # Build the detector exactly like the node's calibration path.
+    def _parse_hsv(s):
+        s = s.strip()
+        if not s:
+            return None
+        parts = [int(v) for v in s.split(',')]
+        return parts if len(parts) == 3 else None
+
+    hsv_lower = _parse_hsv(args.hsv_lower)
+    hsv_upper = _parse_hsv(args.hsv_upper)
     detector = PingPongBallDetector(
         yolo_model_path=yolo_model,
         ball_diameter_mm=40.0,
@@ -175,6 +344,17 @@ def main():
         use_camera=False,
         calibration_data=calibration,
         output_frame=args.output_frame,
+        enable_ellipse_fit=not args.no_ellipse_fit,
+        enable_temporal_tracker=args.temporal_tracker,
+        tracker_max_miss_bridge=args.tracker_max_miss_bridge,
+        tracker_gate_px=args.tracker_gate_px,
+        hsv_lower=hsv_lower,
+        hsv_upper=hsv_upper,
+        color_match_threshold=args.color_match_threshold,
+        color_circularity_min=args.color_circularity_min,
+        use_depth_sensor=args.use_depth_sensor,
+        depth_scale=args.depth_scale,
+        depth_neighborhood_px=args.depth_neighborhood_px,
     )
     output_frame = getattr(detector, 'output_frame', args.output_frame)
 
@@ -185,22 +365,59 @@ def main():
         cap.release()
         return 1
     print(f'Output: {out_path} ({width}x{height}@{fps:.1f} fps)')
+
+    # Per-frame detection log (consumed by validate_estimator_replay.py to
+    # compare hardware-depth vs monocular). Columns mirror the node's
+    # estimator-log raw_* fields so the validator can read either source.
+    det_log = None
+    det_log_path = args.detection_log
+    if det_log_path.lower() != 'none':
+        if not det_log_path:
+            det_root, _ = os.path.splitext(out_path)
+            det_log_path = det_root + '_detections.csv'
+        try:
+            det_log = open(det_log_path, 'w', buffering=1)
+            det_log.write(
+                'frame_idx,t_sec,detected,filter_rejected,'
+                'x_mm,y_mm,z_mm,vx_mm_s,vy_mm_s,vz_mm_s,'
+                'radius_px,depth_mm,depth_method\n')
+            print(f'DetLog: {det_log_path}')
+        except OSError as exc:
+            print(f'WARNING: cannot open detection log {det_log_path}: {exc}',
+                  file=sys.stderr)
+            det_log = None
     print('Processing...')
 
     frame_count = 0
     detection_count = 0
+    depth_used_count = 0
     try:
         while True:
             ok, raw_bgr = cap.read()
             if not ok:
                 break
+            frame_idx = frame_count  # 0-based, matches recorder file index
             frame_count += 1
-            observation_time = frame_count / fps
+            # Prefer the TRUE capture time from the sidecar; fall back to the
+            # constant-fps clock when no timestamp exists for this frame.
+            observation_time = timestamps.get(frame_idx)
+            if observation_time is None:
+                observation_time = frame_count / fps
 
+            depth_image = (_load_depth_frame(depth_dir, frame_idx)
+                           if depth_dir else None)
             observation = detector.get_observation(
-                raw_bgr, observation_time=observation_time)
+                raw_bgr, observation_time=observation_time,
+                depth_image=depth_image)
             if observation.get('detected', False):
                 detection_count += 1
+
+            if det_log is not None:
+                _write_detection_row(
+                    det_log, frame_idx, observation_time, observation)
+                raw = observation.get('raw_measurement') or {}
+                if raw.get('depth_method') == 'sensor':
+                    depth_used_count += 1
 
             # Remap the raw frame to undistorted space for rendering, mirroring
             # the live viz worker so overlay coordinates line up.
@@ -239,6 +456,8 @@ def main():
     finally:
         cap.release()
         writer.release()
+        if det_log is not None:
+            det_log.close()
         if args.show:
             cv2.destroyAllWindows()
 
@@ -246,6 +465,10 @@ def main():
     print()
     print(f'Done. {frame_count} frames, {detection_count} detected '
           f'({rate:.1f}%).')
+    if depth_dir:
+        dpct = 100.0 * depth_used_count / detection_count if detection_count else 0.0
+        print(f'Hardware depth used on {depth_used_count}/{detection_count} '
+              f'detections ({dpct:.1f}%); rest fell back to monocular.')
     print(f'Saved: {out_path}')
     return 0
 

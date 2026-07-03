@@ -260,6 +260,111 @@ class OneEuroFilter:
         self.t_prev = None
 
 
+class TemporalBallTracker:
+    """多帧时序跟踪层：像素空间的匀速运动模型（方案4）。
+
+    这不是 TrackNet 那样的学习式热图检测器，而是用**运动连续性**抓住 TrackNet
+    对快球/短暂遮挡鲁棒的核心机制，零训练、可直接跑：
+
+      1. ROI 引导：用上一帧速度预测本帧球的像素位置，供颜色 fallback 缩小搜索框。
+      2. 运动一致性门控：YOLO/颜色给出的检测若与预测位置偏离超过 ``gate_px``
+         （随连续漏检线性放宽），判为离群，标记 ``filter_rejected`` 让下游估计器
+         跳过——避免把背景误检喂进滤波器。
+      3. 短暂漏检桥接：连续漏检 <= ``max_miss_bridge`` 帧时，用匀速模型外推出一个
+         “桥接”像素位置，让 2D 框视觉上不掉、ROI 不丢；该点标记 ``tracker_bridged``
+         且 ``filter_rejected``，仅用于可视化/ROI，**不**作为真实测量喂估计器
+         （否则与 ball_state_estimator 的外推重复计算）。
+
+    纯 2D 像素空间，不碰 3D/深度；半径用最近一次真实检测的半径，深度仍由
+    fit_circle + 椭圆短轴决定。线程：只在 process_frame（单线程）里调用。
+    """
+
+    def __init__(self, gate_px=120.0, max_miss_bridge=2,
+                 min_speed_px=1.0):
+        self.gate_px = float(gate_px)
+        self.max_miss_bridge = int(max_miss_bridge)
+        self.min_speed_px = float(min_speed_px)
+        self.reset()
+
+    def reset(self):
+        self._pos = None          # 最近接受的像素位置 [cx, cy]
+        self._vel = np.zeros(2)   # 像素速度 [vx, vy] (px/frame)
+        self._radius = None       # 最近真实检测半径
+        self._misses = 0          # 自上次真实检测以来的连续漏检数
+        self._initialized = False
+
+    def predict(self):
+        """返回本帧的预测像素位置 [cx, cy]，未初始化则 None。"""
+        if not self._initialized or self._pos is None:
+            return None
+        steps = float(self._misses + 1)
+        return self._pos + self._vel * steps
+
+    def predict_roi(self, margin_px, image_w, image_h):
+        """返回预测位置周围的搜索 ROI (x, y, w, h)，未初始化则 None。"""
+        p = self.predict()
+        if p is None:
+            return None
+        cx, cy = float(p[0]), float(p[1])
+        x1 = max(0, int(cx - margin_px))
+        y1 = max(0, int(cy - margin_px))
+        x2 = min(int(image_w), int(cx + margin_px))
+        y2 = min(int(image_h), int(cy + margin_px))
+        if x2 <= x1 or y2 <= y1:
+            return None
+        return (x1, y1, x2 - x1, y2 - y1)
+
+    def gate(self, cx, cy):
+        """检测是否通过运动一致性门控。
+
+        门限随连续漏检放宽（漏检越久，球可能偏离越远）。未初始化时一律通过
+        （冷启动）。返回 (ok: bool, dist_px: float, gate_px: float)。
+        """
+        if not self._initialized or self._pos is None:
+            return True, 0.0, self.gate_px
+        pred = self.predict()
+        dist = float(np.hypot(cx - pred[0], cy - pred[1]))
+        gate = self.gate_px * (1.0 + self._misses)
+        return dist <= gate, dist, gate
+
+    def update_accept(self, cx, cy, radius):
+        """以一帧真实检测更新模型（已通过门控）。"""
+        p = np.array([float(cx), float(cy)])
+        if not self._initialized or self._pos is None:
+            self._vel = np.zeros(2)
+        else:
+            # 用桥接帧数归一化，估计每帧速度。
+            steps = float(self._misses + 1)
+            self._vel = (p - self._pos) / max(steps, 1.0)
+        self._pos = p
+        if radius is not None and np.isfinite(radius):
+            self._radius = float(radius)
+        self._misses = 0
+        self._initialized = True
+
+    def bridge(self):
+        """漏检时尝试桥接。
+
+        返回 (cx, cy, radius) 若可桥接（连续漏检未超上限且已初始化），否则 None。
+        ``_pos`` 始终锚定在最近一次真实检测处，多帧外推完全交给 ``predict()`` 用
+        ``_misses`` 计数完成（避免把外推位置再写回 _pos 造成重复累加）。
+        """
+        if not self._initialized or self._pos is None:
+            self._misses += 1
+            return None
+        if self._misses >= self.max_miss_bridge:
+            # 超出桥接上限：判定为真丢失，复位以免速度发散。
+            self._misses += 1
+            if self._misses > self.max_miss_bridge + 3:
+                self.reset()
+            return None
+        pred = self.predict()   # 用当前 _misses 外推（pos + vel*(misses+1)）
+        self._misses += 1       # 记一次漏检；_pos 保持锚定不动
+        r = self._radius
+        return (float(pred[0]), float(pred[1]),
+                float(r) if r is not None else None)
+
+
 class PingPongBallDetector:
     def __init__(self,
                  yolo_model_path,
@@ -284,7 +389,18 @@ class PingPongBallDetector:
                  camera_cy=None,
                  camera_dist_coeffs=None,
                  calibration_data: Optional[CalibrationData] = None,
-                 output_frame='base_link'):
+                 output_frame='base_link',
+                 enable_ellipse_fit=True,
+                 enable_temporal_tracker=False,
+                 tracker_max_miss_bridge=2,
+                 tracker_gate_px=120.0,
+                 hsv_lower=None,
+                 hsv_upper=None,
+                 color_match_threshold=0.3,
+                 color_circularity_min=0.4,
+                 use_depth_sensor=False,
+                 depth_scale=0.001,
+                 depth_neighborhood_px=2):
         """
         初始化乒乓球检测器
 
@@ -305,6 +421,25 @@ class PingPongBallDetector:
             camera_dist_coeffs: 畸变系数数组（use_camera=False时可选，默认无畸变）
             calibration_data: CalibrationData对象，包含相机内参和外参（优先级最高）
             output_frame: 输出坐标系 'camera' 或 'base_link'
+            enable_ellipse_fit: 用椭圆拟合的短轴作为半径（对运动拖影更鲁棒，
+                minEnclosingCircle 会被拖影撑大半径 -> 深度偏小）。默认 True。
+            enable_temporal_tracker: 启用多帧时序跟踪层（运动连续性门控 +
+                短暂漏检桥接 + ROI 引导）。默认 False，向后兼容。
+            tracker_max_miss_bridge: 时序层最多桥接的连续漏检帧数。
+            tracker_gate_px: 时序层运动一致性门限（像素），超过则判为离群。
+            hsv_lower/hsv_upper: 橙色 HSV 范围 [H,S,V]，None 用默认
+                ([5,50,50]/[30,255,255])。收紧可减少把别的橙色物体当成球。
+            color_match_threshold: mask 区域内匹配橙色的像素占比阈值（默认 0.3）。
+            color_circularity_min: 颜色 fallback 的最小圆度（默认 0.4）。
+            use_depth_sensor: 用 RealSense 硬件深度（D455）替代单目几何测距。
+                需要调用方把对齐到彩色帧的深度图传入 process_frame/
+                get_observation。无效深度（空洞/越界）自动 fallback 单目几何。
+                默认 False（保持纯单目行为）。
+            depth_scale: 深度图单位换算到 mm 的系数。RealSense z16 原始单位是
+                深度计数，depth_scale(米/计数)*1000 = mm。D455 默认 0.001 m，
+                即一个计数 = 1mm，传入的深度图若已是 mm 可设 1.0。
+            depth_neighborhood_px: 球心邻域半径（像素），取该窗口内有效深度的
+                中位数抗噪声/空洞。默认 2（5x5 窗口）。
         """
         self.ball_diameter_mm = ball_diameter_mm
         self.ball_radius_mm = ball_diameter_mm / 2.0
@@ -312,10 +447,18 @@ class PingPongBallDetector:
         self.target_class = target_class
         self.camera_tilt_deg = camera_tilt_deg
         self.use_kalman = use_kalman
+        self.enable_ellipse_fit = bool(enable_ellipse_fit)
+        self.enable_temporal_tracker = bool(enable_temporal_tracker)
         self.infer_imgsz = infer_imgsz
         self.device = device
         self.half = half
         self.use_undistort = use_undistort
+        # Hardware-depth (D455) option. When on, depth comes from the aligned
+        # depth frame instead of the monocular circle-radius geometry; falls
+        # back to geometry per-frame when the depth lookup is invalid.
+        self.use_depth_sensor = bool(use_depth_sensor)
+        self.depth_scale = float(depth_scale)
+        self.depth_neighborhood_px = max(0, int(depth_neighborhood_px))
         self.print_every = max(1, int(print_every))
         self.profile_every = max(0, int(profile_every))
         self.profile_samples = []
@@ -487,11 +630,17 @@ class PingPongBallDetector:
         self.min_radius = 10
         self.max_radius = 200
 
-        # 桔黄色HSV范围（用于颜色验证）
+        # 桔黄色HSV范围（用于颜色验证），可由构造参数覆盖以便外部调参。
         # 这里放宽了 S/V 下限，减少阴影和局部高光导致的漏检。
-        self.hsv_lower = np.array([5, 50, 50])
-        self.hsv_upper = np.array([30, 255, 255])
-        self.color_match_threshold = 0.3  # 至少30%的像素匹配颜色
+        self.hsv_lower = (np.array(hsv_lower, dtype=np.int32)
+                          if hsv_lower is not None
+                          else np.array([5, 50, 50]))
+        self.hsv_upper = (np.array(hsv_upper, dtype=np.int32)
+                          if hsv_upper is not None
+                          else np.array([30, 255, 255]))
+        self.color_match_threshold = float(color_match_threshold)
+        # 颜色 fallback 的最小圆度（防止把不规则橙色块当成球）。
+        self.color_circularity_min = float(color_circularity_min)
 
         # 性能统计
         self.fps_queue = deque(maxlen=30)
@@ -529,6 +678,13 @@ class PingPongBallDetector:
         self.motion_blur_circularity_threshold = 0.65
         self.motion_blur_radius_ratio_threshold = 1.35
         self.min_motion_speed_px = 5.0  # 最小运动速度（px/frame）
+
+        # 多帧时序跟踪层（方案4）：像素空间匀速模型，做运动一致性门控、
+        # ROI 引导与短暂漏检桥接。默认关闭，向后兼容。
+        self.temporal_tracker = TemporalBallTracker(
+            gate_px=float(tracker_gate_px),
+            max_miss_bridge=int(tracker_max_miss_bridge),
+        ) if self.enable_temporal_tracker else None
 
         # 初始化卡尔曼滤波器（默认不使用，--kalman 可开启）
         if self.use_kalman:
@@ -732,7 +888,7 @@ class PingPongBallDetector:
 
         circle_area = np.pi * radius * radius
         circularity = area / circle_area if circle_area > 0 else 0
-        if circularity < 0.4:
+        if circularity < self.color_circularity_min:
             return None
 
         mask = np.zeros(rgb_image.shape[:2], dtype=np.uint8)
@@ -837,6 +993,11 @@ class PingPongBallDetector:
         """
         从mask拟合圆，得到图像圆心和半径
 
+        当 enable_ellipse_fit=True 时优先用 cv2.fitEllipse 的**短半轴**作为半径：
+        运动拖影把球在运动方向上拉长，minEnclosingCircle 取最小外接圆会被拉长的
+        长轴撑大半径（=> 深度 Z=fR/r 偏小、噪声放大）；椭圆短轴更接近球的真实直径，
+        因此深度噪声更小。拟合失败/点数不足时回退到 minEnclosingCircle。
+
         Args:
             mask: 二值mask
 
@@ -857,12 +1018,27 @@ class PingPongBallDetector:
         if cv2.contourArea(largest_contour) < 100:
             return None
 
-        # 拟合最小外接圆
-        (cx, cy), radius = cv2.minEnclosingCircle(largest_contour)
+        cx = cy = radius = None
 
-        # 半径范围检查
-        if radius < self.min_radius or radius > self.max_radius:
-            return None
+        # 优先：椭圆拟合，取短半轴为半径（对拖影鲁棒）。fitEllipse 需 >=5 点。
+        if self.enable_ellipse_fit and len(largest_contour) >= 5:
+            try:
+                (ex, ey), (axis_a, axis_b), _angle = cv2.fitEllipse(
+                    largest_contour)
+                minor_axis = min(axis_a, axis_b)
+                r_minor = minor_axis / 2.0
+                if (np.isfinite(ex) and np.isfinite(ey)
+                        and np.isfinite(r_minor)
+                        and self.min_radius <= r_minor <= self.max_radius):
+                    cx, cy, radius = ex, ey, r_minor
+            except cv2.error:
+                cx = cy = radius = None
+
+        # 回退：最小外接圆
+        if radius is None:
+            (cx, cy), radius = cv2.minEnclosingCircle(largest_contour)
+            if radius < self.min_radius or radius > self.max_radius:
+                return None
 
         return (cx, cy, radius)
 
@@ -889,6 +1065,71 @@ class PingPongBallDetector:
         # 计算深度
         depth_mm = (f * self.ball_diameter_mm) / (2.0 * radius_px)
 
+        return depth_mm
+
+    def get_depth_from_depthmap(self, cx_px, cy_px, depth_image,
+                                ball_mask=None, geom_depth_mm=None):
+        """从对齐的深度图读取球心深度（硬件深度，D455）。
+
+        小目标（~20px 的乒乓球）的深度采样有两个坑：球边缘像素会混入球后方
+        的背景深度（墙/地面，~1m），快速运动时深度帧与彩色帧的微小时间差也会
+        让采样点偏到球外。本函数用三重防护抗这些污染：
+
+          1. 优先在球 mask 内采样（只取球面像素，不碰边缘）；无 mask 时退回
+             球心小窗口。
+          2. 取**近分位数**（25%）而非中位数：球面一定在背景前面，深度值偏小
+             的那批才是球，中位数会被混入的背景拉大。
+          3. 单目几何先验闸门：硬件深度偏离单目超过 ``depth_gate_mm`` 判为背景
+             污染，返回 None（调用方 fallback 单目）。单目虽有偏差但不会突然
+             跳到 1m 外。
+
+        Args:
+            cx_px, cy_px: 球心像素坐标（与 depth_image 同坐标系；ROS 路径下均已
+                去畸变）。
+            depth_image: 2D 深度图（uint16/float），与彩色帧对齐、同分辨率。
+            ball_mask: 可选，球的二值 mask（与 depth_image 同分辨率），用于把
+                深度采样限制在球面内。
+            geom_depth_mm: 可选，单目几何深度，用作离群闸门的先验。
+
+        Returns:
+            depth_mm: 深度(毫米)，或 None（无有效深度 / 被判为背景污染）。
+        """
+        if depth_image is None:
+            return None
+        h, w = depth_image.shape[:2]
+        cx = int(round(cx_px))
+        cy = int(round(cy_px))
+        if not (0 <= cx < w and 0 <= cy < h):
+            return None
+
+        # --- 采集候选深度像素 ---
+        depths = None
+        if ball_mask is not None and ball_mask.shape[:2] == depth_image.shape[:2]:
+            # 球 mask 内的深度像素（最干净）
+            sel = (ball_mask > 0) & (depth_image > 0)
+            if np.count_nonzero(sel) >= 5:
+                depths = depth_image[sel]
+        if depths is None:
+            # 退回球心小窗口
+            r = self.depth_neighborhood_px
+            patch = depth_image[max(0, cy-r):min(h, cy+r+1),
+                                max(0, cx-r):min(w, cx+r+1)]
+            depths = patch[patch > 0]
+        if depths.size < 3:
+            return None
+
+        # --- 近分位数：球面在背景前，取偏小的一批 ---
+        depth_mm = float(np.percentile(depths, 25)) * self.depth_scale * 1000.0
+
+        # --- 合理性 + 单目先验闸门 ---
+        if depth_mm < 100.0 or depth_mm > 5000.0:
+            return None
+        if geom_depth_mm is not None and geom_depth_mm > 0:
+            # 偏离单目太多 -> 多半采到了背景；放弃硬件深度。门限取“单目的
+            # 40% 或 200mm 的较大者”，给单目本身的偏差留余量。
+            gate = max(0.40 * geom_depth_mm, 200.0)
+            if abs(depth_mm - geom_depth_mm) > gate:
+                return None
         return depth_mm
 
     def backproject_to_3d(self, cx_px, cy_px, depth_mm):
@@ -1077,12 +1318,15 @@ class PingPongBallDetector:
             'method': 'axis_endpoints',
         }
 
-    def process_frame(self, color_image):
+    def process_frame(self, color_image, depth_image=None):
         """
         处理单帧图像，返回球的位置信息（原始测量，未滤波）
 
         Args:
             color_image: BGR格式图像
+            depth_image: 可选，对齐到彩色帧的深度图（与 color_image 同坐标系、
+                同分辨率）。仅在 use_depth_sensor=True 时使用；无效则 fallback
+                单目几何。
 
         Returns:
             dict: 包含检测结果的字典，未检测到时返回None
@@ -1094,7 +1338,11 @@ class PingPongBallDetector:
         # 1.5 如果 YOLO 失败，尝试颜色 fallback
         if mask is None:
             roi = None
-            if self.last_detection_pixel is not None:
+            # 优先用时序跟踪层的运动预测 ROI（方案4），否则退回上一帧像素位置。
+            if self.temporal_tracker is not None:
+                roi = self.temporal_tracker.predict_roi(
+                    self.roi_margin, self.image_width, self.image_height)
+            if roi is None and self.last_detection_pixel is not None:
                 cx, cy = self.last_detection_pixel
                 x1 = max(0, int(cx - self.roi_margin))
                 y1 = max(0, int(cy - self.roi_margin))
@@ -1188,9 +1436,20 @@ class PingPongBallDetector:
         cy_smooth = self.oef_cy(now, cy_smooth)
         radius_smooth = self.oef_radius(now, radius_smooth)
 
-        # 5. 使用平滑后的半径计算深度（用于 3D 位置）
-        depth_mm = self.recover_depth_from_circle(radius_smooth)
+        # 5. 计算深度。优先硬件深度（D455），无效则 fallback 单目几何。
+        #    硬件深度在球 mask 内取近分位数（球面在背景前），并用单目几何作
+        #    先验闸门剔除背景污染（球边缘窗口偶尔抓到球后方的墙/地面）。
+        geom_depth_mm = self.recover_depth_from_circle(radius_smooth)
+        depth_mm = geom_depth_mm
         depth_method = 'geometry'
+        if self.use_depth_sensor and depth_image is not None:
+            sensor_depth_mm = self.get_depth_from_depthmap(
+                cx_smooth, cy_smooth, depth_image,
+                ball_mask=circle_mask, geom_depth_mm=geom_depth_mm)
+            if sensor_depth_mm is not None:
+                depth_mm = sensor_depth_mm
+                depth_method = 'sensor'
+            # else: 深度空洞/越界/被背景污染，保留单目几何（method=geometry）
 
         # 6. 反投影到3D（使用平滑后的值）
         X, Y, Z = self.backproject_to_3d(cx_smooth, cy_smooth, depth_mm)
@@ -1269,13 +1528,62 @@ class PingPongBallDetector:
             velocities.append(float(slope))
         return velocities
 
-    def get_observation(self, color_image, observation_time=None):
+    def _bridge_measurement(self):
+        """用时序跟踪层桥接一帧漏检，合成一个 measurement dict。
+
+        返回与 process_frame 同结构的 dict（标记 tracker_bridged=True），或 None
+        （未启用 / 无法桥接）。半径取最近真实检测半径，深度照常由半径反推；该点
+        仅用于可视化与 ROI 维持，调用方会标记 filter_rejected 不喂估计器。
+        """
+        if self.temporal_tracker is None:
+            return None
+        bridged = self.temporal_tracker.bridge()
+        if bridged is None:
+            return None
+        cx, cy, radius = bridged
+        if radius is None or not np.isfinite(radius):
+            return None
+        depth_mm = self.recover_depth_from_circle(radius)
+        X, Y, Z = self.backproject_to_3d(cx, cy, depth_mm)
+        self.last_detection_pixel = (cx, cy)
+        return {
+            'image_x': cx,
+            'image_y': cy,
+            'radius_px': radius,
+            'smoothed_cx': cx,
+            'smoothed_cy': cy,
+            'smoothed_radius': radius,
+            'depth_mm': depth_mm,
+            'depth_method': 'tracker_bridge',
+            'detection_method': 'tracker_bridge',
+            'X_mm': X,
+            'Y_mm': Y,
+            'Z_mm': Z,
+            'mask': None,
+            'refined_mask': None,
+            'color_bbox': None,
+            'color_ratio': 0.0,
+            'motion_blur_detected': False,
+            'motion_blur_corrected': False,
+            'blur_aspect': 1.0,
+            'blur_circularity': 1.0,
+            'radius_ratio': 1.0,
+            'correction_method': None,
+            'tracker_bridged': True,
+        }
+
+    def get_observation(self, color_image, observation_time=None,
+                        depth_image=None):
         """
         获取球的观测值（仅平滑，不做运动预测）
         检测失败时直接返回 detected=False，不外推位置
 
         Args:
             color_image: BGR格式图像（原始图像，可能有畸变）
+            depth_image: 可选，对齐到彩色帧的深度图（原始畸变空间，与
+                color_image 同分辨率）。仅 use_depth_sensor=True 时使用；这里会
+                和彩色图做相同的去畸变 remap，使其与检测到的（去畸变）像素坐标
+                对齐，再传给 process_frame。
 
         Returns:
             dict: {
@@ -1295,12 +1603,40 @@ class PingPongBallDetector:
         if self.use_undistort and self.map1 is not None and self.map2 is not None:
             color_image = cv2.remap(
                 color_image, self.map1, self.map2, cv2.INTER_LINEAR)
+            # 深度图做相同的 remap，使其与去畸变后的彩色像素坐标对齐。
+            # 用 NEAREST 避免在深度空洞(0)与有效值之间插值出假深度。
+            if depth_image is not None:
+                depth_image = cv2.remap(
+                    depth_image, self.map1, self.map2, cv2.INTER_NEAREST)
 
         # 获取原始测量
-        measurement = self.process_frame(color_image)
+        measurement = self.process_frame(color_image, depth_image=depth_image)
 
-        # 检测失败：直接返回 False，不做任何预测或补帧
+        # 检测失败：先尝试时序跟踪层桥接（方案4），桥接点仅用于可视化/ROI，
+        # 标记 filter_rejected 不喂估计器；无法桥接才返回 detected=False。
         if measurement is None or 'error' in measurement:
+            bridged = self._bridge_measurement()
+            if bridged is not None:
+                self.missed_frames += 1
+                pos_camera = [bridged['X_mm'], bridged['Y_mm'],
+                              bridged['Z_mm']]
+                if (self.output_frame == 'base_link'
+                        and self.T_base_camera is not None):
+                    pos_bridged = self._transform_to_base_link(pos_camera)
+                else:
+                    pos_bridged = pos_camera
+                return {
+                    'position': pos_bridged,
+                    'velocity': self._calculate_velocity_from_clean_history(),
+                    'detected': True,
+                    'raw_measurement': {
+                        **bridged,
+                        'filter_rejected': True,
+                        'reject_reason': 'tracker_bridged',
+                        'raw_position': pos_bridged,
+                    },
+                    'smoothed': False,
+                }
             self.missed_frames += 1
             # 连续漏检超过阈值，清理历史和平滑器
             if self.missed_frames > self.max_prediction_frames:
@@ -1311,6 +1647,8 @@ class PingPongBallDetector:
                 self.oef_radius.reset()
                 if self.use_kalman and self.kalman is not None:
                     self.kalman.reset()
+                if self.temporal_tracker is not None:
+                    self.temporal_tracker.reset()
             return {
                 'position': [
                     0,
@@ -1326,6 +1664,39 @@ class PingPongBallDetector:
                     'error',
                     'unknown'),
             }
+
+        # 方案4：时序运动一致性门控。检测在像素空间偏离运动预测过大 -> 离群，
+        # 标记 filter_rejected 让估计器跳过（但仍返回 detected=True 供可视化）。
+        if self.temporal_tracker is not None:
+            mx = measurement['smoothed_cx']
+            my = measurement['smoothed_cy']
+            ok, dist_px, gate_px = self.temporal_tracker.gate(mx, my)
+            if not ok:
+                # 门控失败：记一次漏检（推进桥接计数），不更新运动模型。
+                self.temporal_tracker.bridge()
+                gate_reason = f'tracker_gate: {dist_px:.0f}>{gate_px:.0f}px'
+                pos_camera = [measurement['X_mm'], measurement['Y_mm'],
+                              measurement['Z_mm']]
+                if (self.output_frame == 'base_link'
+                        and self.T_base_camera is not None):
+                    pos_out = self._transform_to_base_link(pos_camera)
+                else:
+                    pos_out = pos_camera
+                vel_hist = self._calculate_velocity_from_clean_history()
+                return {
+                    'position': pos_out,
+                    'velocity': vel_hist,
+                    'detected': True,
+                    'raw_measurement': {
+                        **measurement,
+                        'filter_rejected': True,
+                        'reject_reason': gate_reason,
+                    },
+                    'smoothed': False,
+                }
+            # 通过门控：用真实检测更新运动模型。
+            self.temporal_tracker.update_accept(
+                mx, my, measurement['smoothed_radius'])
 
         # 提取原始位置（camera 坐标系，已经过源头 One Euro Filter 平滑）
         pos_camera = [

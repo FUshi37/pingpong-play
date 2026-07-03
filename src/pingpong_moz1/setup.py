@@ -32,6 +32,7 @@ setup(
     entry_points={
         'console_scripts': [
             'pingpong_node = pingpong_controller.pingpong_node:main',
+            'enhanced_trajectory_visualizer = pingpong_controller.enhanced_trajectory_visualizer:main',
         ],
     },
 )

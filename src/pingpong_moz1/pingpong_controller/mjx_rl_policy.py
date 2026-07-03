@@ -43,6 +43,7 @@ from pingpong_controller.rl_policy import (
     DEFAULT_ARM_VEL_LIMIT_DEG_S,
     DEFAULT_BALL_OBS_AGE_CLIP_S,
     EXPECTED_OBS_DIM,
+    EXPECTED_OBS_DIM_WITH_DELAY,
     RLPolicyController,
 )
 
@@ -142,12 +143,16 @@ class MjxRLPolicyController(RLPolicyController):
             raise RuntimeError(
                 f"MJX checkpoint missing 'params': {model_path}")
 
-        obs_dim = int(payload.get("obs_dim", EXPECTED_OBS_DIM))
+        obs_dim = int(payload.get("obs_dim", self._expected_obs_dim))
         act_dim = int(payload.get("act_dim", self.n_arm))
-        if obs_dim != EXPECTED_OBS_DIM or act_dim != self.n_arm:
+
+        # Validate against the expected dimension (50 or 67 based on enable_delay_conditioning)
+        if obs_dim != self._expected_obs_dim or act_dim != self.n_arm:
             raise RuntimeError(
                 f"MJX checkpoint obs_dim/act_dim ({obs_dim}, {act_dim}) "
-                f"does not match expected ({EXPECTED_OBS_DIM}, {self.n_arm})")
+                f"does not match expected ({self._expected_obs_dim}, {self.n_arm}). "
+                f"Checkpoint requires delay_conditioning={obs_dim == EXPECTED_OBS_DIM_WITH_DELAY}, "
+                f"but controller has enable_delay_conditioning={self.enable_delay_conditioning}")
 
         flat = _flatten_params(payload["params"])
         required = [
@@ -178,7 +183,7 @@ class MjxRLPolicyController(RLPolicyController):
 
         # `self.model` stays None: a lightweight shim provides the obs/act
         # shapes that `_validate_io_shapes` checks against.
-        self.model = _MjxModelShim(EXPECTED_OBS_DIM, self.n_arm)
+        self.model = _MjxModelShim(self._expected_obs_dim, self.n_arm)
         if not self.deterministic:
             self._logger.warn(
                 "MjxRLPolicyController only supports deterministic inference "
@@ -188,7 +193,7 @@ class MjxRLPolicyController(RLPolicyController):
         w = self._pi_weights
         hidden = w["l1_w"].shape[1]
         checks = [
-            (w["l1_w"].shape, (EXPECTED_OBS_DIM, hidden)),
+            (w["l1_w"].shape, (self._expected_obs_dim, hidden)),
             (w["l1_b"].shape, (hidden,)),
             (w["l2_w"].shape, (hidden, hidden)),
             (w["l2_b"].shape, (hidden,)),

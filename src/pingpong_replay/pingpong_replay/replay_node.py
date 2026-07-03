@@ -28,6 +28,20 @@ same motion.  ``angle`` is the most faithful (no integration drift) and is the
 recommended default for a first hardware check; the other modes exist so you
 can validate the integration path that the live policy actually uses.
 
+Actuator-delay compensation
+----------------------------
+The real joints track a position command with a transport delay plus a
+first-order lag, so the arm lands behind the commanded trajectory. The sim
+policy was trained with an actuator compensator (``compensate_q_ref`` in
+``delay_control.py``) that pre-distorts each command to cancel exactly this
+delay+lag. This node can run the same compensator online: set
+``compensation_mode`` to ``inverse_mpc`` (recommended), ``inverse_smith`` or
+``lead`` and it pre-distorts every published command using the recorded nominal
+``(q, qvel, qdd)`` and the live ``/joint_states`` feedback. The defaults match
+the shipped ``inverse_mpc`` checkpoint's training config. The default
+``compensation_mode='none'`` publishes the recorded command unchanged (legacy
+behaviour). See ``compensation.py`` for the full parameter list.
+
 Safety
 ------
 A hardware arm is involved, so by default the node:
@@ -42,6 +56,40 @@ A hardware arm is involved, so by default the node:
 The replay then plays exactly one loop and stops (set ``loop:=true`` to
 restart automatically).  Review the limits and the CSV before running on
 real hardware.
+
+Cartesian output mode
+---------------------
+By default the node publishes a joint command (``MechUnitCmd.jnt_pos`` with
+``use_jnt=True``). Set ``output_mode:=cartesian`` to instead convert every
+joint command to an end-effector pose and publish it as
+``MechUnitCmd.end_pose`` (``use_jnt=False``) plus the redundant arm angle
+``psi`` -- the same Cartesian command format the teleop driver uses. The pose
+is computed by a dependency-free forward kinematics over the right-arm chain
+parsed from ``robot_xml_path`` (``moz1_pd.xml``); ``mujoco`` is not required.
+
+Because the FK is rooted at the arm-mount body, the controller's reported pose
+relates to ours by ``T_report = B @ fk(q) @ C``: a base-frame offset ``B``
+(controller base relative to our root) and a tool offset ``C`` (the
+controller's TCP is not our model site). At startup (``cart_calibrate=true``,
+default) the move-to-start ramp is published *in joint space* while the node
+collects ``(measured q, reported pose, reported psi)`` samples from
+``/joint_states`` + ``/cart_states``; when the ramp completes it fits ``B`` and
+``C`` (least squares) and the ``psi`` convention (geometric swivel angle, with
+the reference direction/sign/offset chosen to match the reported psi), then
+switches to cartesian publishing for the hold and replay. A single ramp sweep
+(~30 deg of orientation change) fits the pose model to a few mm. ``psi`` is
+handled per ``psi_mode``: ``computed`` (fitted swivel angle; default), ``zero``
+(let the controller choose), or ``passthrough`` (echo the latest reported psi).
+Set ``cart_calibrate:=false`` to publish raw FK poses (``B=C=identity``; only
+correct if the controller expects the arm-mount frame and site TCP). The
+recorded analysis CSV gains ``cart_cmd_*`` / ``cart_actual_*`` columns so
+task-space tracking (and the psi convention) can be validated.
+
+Note on redundancy: streaming a joint-recorded trajectory through cartesian
+mode is only faithful if ``psi`` is right -- the controller re-solves IK for
+the 7-DOF arm and picks the elbow from ``psi``. If the fitted psi rmse is high
+(logged at calibration), the reproduced posture will differ; prefer joint
+output mode when exact posture matters.
 """
 
 import csv
@@ -57,7 +105,19 @@ import rclpy
 from rclpy.node import Node
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from sensor_msgs.msg import JointState
-from mc_core_interface.msg import MechUnitCmd, MechUnitCmdArray
+from mc_core_interface.msg import (
+    MechUnitCmd, MechUnitCmdArray, MechUnitStateArray)
+
+from pingpong_replay.compensation import (
+    CommandCompensator, VALID_COMPENSATION_MODES)
+from pingpong_replay.cartesian_fk import RightArmFK
+
+try:
+    from scipy.spatial.transform import Rotation as _ScipyRotation
+    from scipy.optimize import least_squares as _scipy_least_squares
+    _SCIPY_AVAILABLE = True
+except ImportError:
+    _SCIPY_AVAILABLE = False
 
 
 # Right-arm joint names, in MechUnitCmd / CSV column order. Mirrors
@@ -100,6 +160,18 @@ DEFAULT_Q_HIGH_RAD: List[float] = [
 
 VALID_MODES = ("action", "qdd", "qvel", "angle")
 
+# Output representation published on /mx_mix_command. 'joint' is the legacy
+# behaviour (MechUnitCmd.jnt_pos, use_jnt=True). 'cartesian' converts each
+# joint command to an end-effector pose via FK and publishes it as
+# MechUnitCmd.end_pose (use_jnt=False) plus the redundant arm angle psi.
+VALID_OUTPUT_MODES = ("joint", "cartesian")
+
+# How the redundant arm angle (psi) is filled in cartesian mode.
+#   computed     -- FK swivel-angle estimate, offset to match /cart_states.
+#   zero         -- always 0.0 (let the controller pick the arm posture).
+#   passthrough  -- echo the latest controller-reported psi from /cart_states.
+VALID_PSI_MODES = ("computed", "zero", "passthrough")
+
 # CSV column prefixes per mode. Values are read as "<prefix>/<joint_name>".
 MODE_COLUMN_PREFIX = {
     "action": "effective_action",   # in [-1, 1]
@@ -122,6 +194,29 @@ class ReplayNode(Node):
         # One of: action | qdd | qvel | angle
         self.declare_parameter('input_mode', 'angle')
         self.declare_parameter('right_arm_mu_idx', 0)
+
+        # --- Cartesian output mode -------------------------------------
+        # output_mode='joint' (default) publishes the joint command unchanged
+        # (legacy). output_mode='cartesian' converts each joint command to an
+        # end-effector pose via FK (parsed from robot_xml_path) and publishes
+        # it as MechUnitCmd.end_pose with use_jnt=False, plus the redundant
+        # arm angle psi. The pose is round-tripped against the controller's
+        # own /cart_states at startup (cart_calibrate=True), so it lands in the
+        # exact frame/TCP the controller expects regardless of how this FK's
+        # root frame is defined.
+        self.declare_parameter('output_mode', 'joint')   # joint | cartesian
+        default_robot_xml = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), 'moz1_pd.xml')
+        self.declare_parameter('robot_xml_path', default_robot_xml)
+        self.declare_parameter('cart_state_topic', '/cart_states')
+        self.declare_parameter('psi_mode', 'computed')  # computed|zero|passthrough
+        self.declare_parameter('cart_calibrate', True)
+        self.declare_parameter('cart_state_wait_timeout', 5.0)
+        # Minimum number of (q, reported-pose) samples to collect over the
+        # move-to-start ramp before fitting the B/C/psi calibration. The ramp
+        # must provide enough orientation diversity; ~60 samples (a ~18deg
+        # sweep) already fits the pose model to a few mm.
+        self.declare_parameter('cart_cal_min_samples', 60)
 
         # The trace was recorded at 200 Hz (dt = 0.005 s). control_rate_hz sets
         # the publish cadence; integration uses integration_dt.
@@ -164,6 +259,37 @@ class ReplayNode(Node):
         self.declare_parameter('q_high', DEFAULT_Q_HIGH_RAD)
         self.declare_parameter('clip_to_limits', True)
 
+        # --- Actuator-delay compensation (mirrors the sim policy's
+        #     compensate_q_ref path). Defaults are the values the shipped
+        #     inverse_mpc checkpoint was trained with (extracted from its
+        #     env_cfg). compensation_mode='none' (default) keeps the legacy
+        #     behaviour of publishing the recorded command unchanged. ---
+        self.declare_parameter('compensation_mode', 'none')  # none|lead|inverse_smith|inverse_mpc
+        self.declare_parameter('comp_delay_ms', 72.0)
+        self.declare_parameter('comp_actuator_tau_s', 0.074)
+        self.declare_parameter('comp_actuator_gain', 1.0)
+        self.declare_parameter('comp_command_buffer_extra_steps', 4)
+        self.declare_parameter('comp_delay_conditioning', True)
+        # lead
+        self.declare_parameter('comp_lead_beta', 0.0)
+        self.declare_parameter('comp_lead_delay_scale', 1.0)
+        self.declare_parameter('comp_lead_tau_scale', 1.0)
+        self.declare_parameter('comp_lead_max_delta_rad', 0.0)
+        # inverse_smith
+        self.declare_parameter('comp_inverse_beta', 1.0)
+        self.declare_parameter('comp_inverse_delay_scale', 1.0)
+        self.declare_parameter('comp_inverse_tau_scale', 1.0)
+        self.declare_parameter('comp_inverse_max_delta_rad', 0.0)
+        # inverse_mpc
+        self.declare_parameter('comp_mpc_beta', 1.2)
+        self.declare_parameter('comp_mpc_delay_scale', 1.05)
+        self.declare_parameter('comp_mpc_tau_scale', 0.75)
+        self.declare_parameter('comp_mpc_horizon_steps', 6)
+        self.declare_parameter('comp_mpc_tracking_weight', 1.0)
+        self.declare_parameter('comp_mpc_nominal_weight', 0.25)
+        self.declare_parameter('comp_mpc_delta_weight', 0.05)
+        self.declare_parameter('comp_mpc_max_delta_rad', 0.5235987755982988)  # 30 deg
+
         # --- Resolve parameters ---
         self.command_topic = self.get_parameter('command_topic').value
         self.joint_state_topic = self.get_parameter('joint_state_topic').value
@@ -174,6 +300,29 @@ class ReplayNode(Node):
                 f"got '{self.input_mode}'")
         self.right_arm_mu_idx = int(
             self.get_parameter('right_arm_mu_idx').value)
+
+        # --- Resolve cartesian output mode ---
+        self.output_mode = str(
+            self.get_parameter('output_mode').value).strip().lower()
+        if self.output_mode in ('', 'jnt'):
+            self.output_mode = 'joint'
+        if self.output_mode not in VALID_OUTPUT_MODES:
+            raise ValueError(
+                f"output_mode must be one of {VALID_OUTPUT_MODES}, "
+                f"got '{self.output_mode}'")
+        self.cart_state_topic = self.get_parameter('cart_state_topic').value
+        self.robot_xml_path = str(self.get_parameter('robot_xml_path').value)
+        self.psi_mode = str(
+            self.get_parameter('psi_mode').value).strip().lower()
+        if self.psi_mode not in VALID_PSI_MODES:
+            raise ValueError(
+                f"psi_mode must be one of {VALID_PSI_MODES}, "
+                f"got '{self.psi_mode}'")
+        self.cart_calibrate = bool(self.get_parameter('cart_calibrate').value)
+        self.cart_state_wait_timeout = float(
+            self.get_parameter('cart_state_wait_timeout').value)
+        self.cart_cal_min_samples = max(
+            12, int(self.get_parameter('cart_cal_min_samples').value))
 
         self.control_rate_hz = float(
             self.get_parameter('control_rate_hz').value)
@@ -229,6 +378,54 @@ class ReplayNode(Node):
                 raise ValueError(
                     f"{name} must have length {N_JOINTS}, got {arr.shape}")
 
+        # --- Resolve actuator-delay compensation parameters ---
+        self.compensation_mode = str(
+            self.get_parameter('compensation_mode').value).strip().lower()
+        if self.compensation_mode in ('', 'off', 'false', '0'):
+            self.compensation_mode = 'none'
+        if self.compensation_mode not in VALID_COMPENSATION_MODES:
+            raise ValueError(
+                f"compensation_mode must be one of {VALID_COMPENSATION_MODES}, "
+                f"got '{self.compensation_mode}'")
+        # Build the compensator. Position clip uses the same q_low/q_high as the
+        # publisher so the pre-distorted command never exceeds joint limits.
+        self.compensator = CommandCompensator(
+            n_joints=N_JOINTS,
+            dt=self.integration_dt,
+            mode=self.compensation_mode,
+            delay_ms=float(self.get_parameter('comp_delay_ms').value),
+            actuator_tau_s=float(self.get_parameter('comp_actuator_tau_s').value),
+            actuator_gain=float(self.get_parameter('comp_actuator_gain').value),
+            command_buffer_extra_steps=int(
+                self.get_parameter('comp_command_buffer_extra_steps').value),
+            delay_conditioning=bool(
+                self.get_parameter('comp_delay_conditioning').value),
+            lead_beta=float(self.get_parameter('comp_lead_beta').value),
+            lead_delay_scale=float(self.get_parameter('comp_lead_delay_scale').value),
+            lead_tau_scale=float(self.get_parameter('comp_lead_tau_scale').value),
+            lead_max_delta_rad=float(
+                self.get_parameter('comp_lead_max_delta_rad').value),
+            inverse_beta=float(self.get_parameter('comp_inverse_beta').value),
+            inverse_delay_scale=float(
+                self.get_parameter('comp_inverse_delay_scale').value),
+            inverse_tau_scale=float(
+                self.get_parameter('comp_inverse_tau_scale').value),
+            inverse_max_delta_rad=float(
+                self.get_parameter('comp_inverse_max_delta_rad').value),
+            mpc_beta=float(self.get_parameter('comp_mpc_beta').value),
+            mpc_delay_scale=float(self.get_parameter('comp_mpc_delay_scale').value),
+            mpc_tau_scale=float(self.get_parameter('comp_mpc_tau_scale').value),
+            mpc_horizon_steps=int(self.get_parameter('comp_mpc_horizon_steps').value),
+            mpc_tracking_weight=float(
+                self.get_parameter('comp_mpc_tracking_weight').value),
+            mpc_nominal_weight=float(
+                self.get_parameter('comp_mpc_nominal_weight').value),
+            mpc_delta_weight=float(self.get_parameter('comp_mpc_delta_weight').value),
+            mpc_max_delta_rad=float(self.get_parameter('comp_mpc_max_delta_rad').value),
+            q_low=self.q_low if self.clip_to_limits else None,
+            q_high=self.q_high if self.clip_to_limits else None,
+        )
+
         csv_path = self._resolve_csv_path(
             str(self.get_parameter('csv_path').value))
 
@@ -254,6 +451,16 @@ class ReplayNode(Node):
             raise ValueError('Trajectory is empty after applying start/end '
                              'index; nothing to replay')
 
+        # Nominal command velocity/acceleration aligned with self.trajectory.
+        # The compensator needs (q_cmd, qdot_cmd, qdd_cmd) every tick; these are
+        # the recorded arm_cmd_qvel and desired_qdd columns (same sliced range).
+        # Only loaded when compensation is active so a plain replay is unaffected.
+        self.cmd_qvel_traj: Optional[np.ndarray] = None
+        self.cmd_qdd_traj: Optional[np.ndarray] = None
+        if self.compensator.enabled:
+            self._load_nominal_command_derivatives(
+                csv_path, start_index, end_index)
+
         # Load the action trajectory for theoretical calculations
         self.action_trajectory = None
         self.theoretical_qdd = None
@@ -267,6 +474,31 @@ class ReplayNode(Node):
         self._latest_qvel: Optional[np.ndarray] = None
         self._latest_qdd: Optional[np.ndarray] = None
         self._joint_state_lock = threading.Lock()
+
+        # --- Cartesian output mode: FK + calibration state ---
+        # _fk converts a joint command to an end-effector pose. The controller's
+        # reported pose relates to ours by T_report = B @ fk(q) @ C, where B is a
+        # base-frame offset and C a tool/TCP offset (the controller's TCP is not
+        # our model site). Both are fitted from samples collected while the arm
+        # sweeps the move-to-start ramp (published in joint space), together with
+        # the redundant arm angle psi (a geometric swivel angle whose reference
+        # direction and constant bias are chosen to match the reported psi).
+        self.fk: Optional[RightArmFK] = None
+        self._cart_B = np.eye(4)             # base offset (controller <- our root)
+        self._cart_C = np.eye(4)             # tool offset (our site -> controller TCP)
+        self._cart_psi_ref = np.array([-1.0, 0.0, 0.0])  # arm-angle reference dir
+        self._cart_psi_sign = 1.0
+        self._cart_psi_offset = 0.0
+        self._cart_calibrated = False        # True once B/C/psi are usable
+        self._cart_cal_samples: List[Dict[str, np.ndarray]] = []
+        self._cart_fit_pos_rms = float('nan')
+        self._cart_fit_pos_max = float('nan')
+        self._latest_cart_pose: Optional[np.ndarray] = None  # 4x4, reported
+        self._latest_cart_psi: Optional[float] = None
+        self._cart_state_lock = threading.Lock()
+        self._cart_wait_start = self.get_clock().now()
+        if self.output_mode == 'cartesian':
+            self._init_cartesian()
 
         # --- Data recording ---
         self.recorded_data: List[Dict[str, Any]] = []
@@ -283,6 +515,15 @@ class ReplayNode(Node):
             JointState, self.joint_state_topic,
             self._joint_state_callback, 10,
             callback_group=self.js_cb_group)
+        # Cartesian feedback (controller-reported end-effector pose + psi).
+        # Needed in cartesian mode for the startup calibration / psi passthrough,
+        # and in *any* mode when recording, so the actual EE pose is logged for
+        # task-space comparison between joint and cartesian replays.
+        if self.output_mode == 'cartesian' or self.record_data:
+            self.create_subscription(
+                MechUnitStateArray, self.cart_state_topic,
+                self._cart_state_callback, 10,
+                callback_group=self.js_cb_group)
 
         # --- Replay state machine ---
         # phase: 'init' -> 'move_to_start' -> 'wait_confirm' -> 'replay' -> 'done'
@@ -314,6 +555,14 @@ class ReplayNode(Node):
         self.get_logger().info(
             f'  start pose (CSV t=0, deg) = '
             f'{np.round(np.degrees(self.replay_start_pose), 2).tolist()}')
+        self.get_logger().info(f'  {self.compensator.describe()}')
+
+        if self.output_mode == 'cartesian':
+            self.get_logger().info(
+                f'  output_mode=cartesian psi_mode={self.psi_mode} '
+                f'calibrate={self.cart_calibrate} '
+                f'xml={os.path.basename(self.robot_xml_path)} '
+                f'cart_state_topic="{self.cart_state_topic}"')
 
         self.timer = self.create_timer(self.control_dt, self._on_timer)
 
@@ -436,6 +685,40 @@ class ReplayNode(Node):
         s = max(0, start_index)
         e = n if end_index < 0 else min(end_index, n)
         return traj[s:e].copy()
+
+    def _load_nominal_command_derivatives(self, csv_path: str,
+                                          start_index: int,
+                                          end_index: int) -> None:
+        """Load nominal command velocity/acceleration for the compensator.
+
+        The compensator pre-distorts each step from the nominal command state
+        ``(q_cmd, qdot_cmd, qdd_cmd)``. ``q_cmd`` is ``self.trajectory`` (already
+        built/sliced); here we load the matching ``arm_cmd_qvel`` (qdot) and
+        ``desired_qdd`` (qdd) columns and slice them identically. ``desired_qdd``
+        falls back to ``desired_qdd_raw`` if the post-limiter column is absent.
+        The arrays line up row-for-row with ``self.trajectory``.
+        """
+        qvel = self._read_columns(csv_path, 'arm_cmd_qvel')
+        try:
+            qdd = self._read_columns(csv_path, 'desired_qdd')
+        except KeyError:
+            qdd = self._read_columns(csv_path, 'desired_qdd_raw')
+
+        n = qvel.shape[0]
+        s = max(0, start_index)
+        e = n if end_index < 0 else min(end_index, n)
+        self.cmd_qvel_traj = qvel[s:e].copy()
+        self.cmd_qdd_traj = qdd[s:e].copy()
+
+        if (self.cmd_qvel_traj.shape[0] != self.n_steps
+                or self.cmd_qdd_traj.shape[0] != self.n_steps):
+            raise ValueError(
+                'nominal qvel/qdd length '
+                f'({self.cmd_qvel_traj.shape[0]}/{self.cmd_qdd_traj.shape[0]}) '
+                f'does not match trajectory length ({self.n_steps})')
+        self.get_logger().info(
+            f'Loaded nominal command derivatives for compensation: '
+            f'{self.cmd_qvel_traj.shape[0]} steps')
 
     def _load_theoretical_trajectory(self, csv_path: str,
                                      start_index: int, end_index: int) -> None:
@@ -563,11 +846,291 @@ class ReplayNode(Node):
             return q, qvel, qdd
 
     # ------------------------------------------------------------------
+    # Cartesian output mode: FK, calibration, publishing
+    # ------------------------------------------------------------------
+    def _init_cartesian(self) -> None:
+        """Load the FK model for cartesian output mode (fail fast if broken)."""
+        if not _SCIPY_AVAILABLE:
+            raise RuntimeError(
+                'output_mode=cartesian requires scipy '
+                '(scipy.spatial.transform.Rotation + scipy.optimize) for the '
+                'pose/psi calibration, but scipy is not importable')
+        if self.cart_calibrate and not self.move_to_start:
+            raise ValueError(
+                'output_mode=cartesian with cart_calibrate=true needs the '
+                'move_to_start ramp to collect calibration samples, but '
+                'move_to_start=false. Enable the ramp, or set '
+                'cart_calibrate:=false to publish raw FK poses (uncalibrated).')
+        if not os.path.isfile(self.robot_xml_path):
+            resolved = self._resolve_robot_xml(self.robot_xml_path)
+            if resolved is None:
+                raise FileNotFoundError(
+                    f'output_mode=cartesian needs robot_xml_path; '
+                    f'"{self.robot_xml_path}" not found and no moz1_pd.xml '
+                    'found in the known controller model locations. Pass '
+                    '-p robot_xml_path:=/abs/path/to/moz1_pd.xml')
+            self.robot_xml_path = resolved
+        self.fk = RightArmFK(self.robot_xml_path, RIGHT_ARM_JOINTS)
+        self.get_logger().info(
+            f'Cartesian FK loaded from {self.robot_xml_path} '
+            f'(ee site="{self.fk.EE_SITE}")')
+
+    def _resolve_robot_xml(self, requested: str) -> Optional[str]:
+        """Find moz1_pd.xml in the known controller model locations."""
+        rel = 'pingpong_controller/models/moz1_pd.xml'
+        candidates = [
+            os.path.join(os.getcwd(), 'src', 'pingpong_moz1', rel),
+            os.path.join(os.getcwd(), rel),
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                self.get_logger().info(f'Using default robot_xml_path: {c}')
+                return c
+        return None
+
+    @staticmethod
+    def _pose_msg_to_T(pose) -> np.ndarray:
+        """geometry_msgs/Pose -> 4x4 homogeneous transform."""
+        T = np.eye(4)
+        q_xyzw = [pose.orientation.x, pose.orientation.y,
+                  pose.orientation.z, pose.orientation.w]
+        T[:3, :3] = _ScipyRotation.from_quat(q_xyzw).as_matrix()
+        T[0, 3] = pose.position.x
+        T[1, 3] = pose.position.y
+        T[2, 3] = pose.position.z
+        return T
+
+    def _cart_state_callback(self, msg: MechUnitStateArray) -> None:
+        """Cache the controller-reported end-effector pose + psi for our unit."""
+        for state in msg.states:
+            if int(state.mu_idx) != self.right_arm_mu_idx:
+                continue
+            try:
+                T = self._pose_msg_to_T(state.end_pose)
+            except Exception:  # noqa: BLE001 - malformed pose
+                return
+            if not np.all(np.isfinite(T)):
+                return
+            psi = float(state.psi) if np.isfinite(float(state.psi)) else None
+            with self._cart_state_lock:
+                self._latest_cart_pose = T
+                self._latest_cart_psi = psi
+            return
+
+    def _get_latest_cart(self):
+        with self._cart_state_lock:
+            T = None if self._latest_cart_pose is None \
+                else self._latest_cart_pose.copy()
+            psi = self._latest_cart_psi
+            return T, psi
+
+    def _collect_cal_sample(self) -> None:
+        """Snapshot a (measured q, reported pose, reported psi) calibration tuple.
+
+        Called every tick while the move-to-start ramp drives the arm in joint
+        space. Only stored when both a joint feedback and a reported cartesian
+        pose are available so the pair is self-consistent.
+        """
+        q_meas = self._get_latest_q()
+        T_report, psi_report = self._get_latest_cart()
+        if q_meas is None or T_report is None:
+            return
+        self._cart_cal_samples.append({
+            'q': q_meas, 'T': T_report,
+            'psi': np.nan if psi_report is None else float(psi_report),
+        })
+
+    @staticmethod
+    def _vec_to_T(v: np.ndarray) -> np.ndarray:
+        """6-vector (tx,ty,tz, rx,ry,rz rotvec) -> 4x4 homogeneous transform."""
+        T = np.eye(4)
+        T[:3, :3] = _ScipyRotation.from_rotvec(v[3:]).as_matrix()
+        T[:3, 3] = v[:3]
+        return T
+
+    def _fit_cartesian_calibration(self) -> bool:
+        """Fit T_report = B @ fk(q) @ C and the psi convention from samples.
+
+        Returns True on success. The controller's reported pose differs from our
+        FK by a base-frame offset B (controller base <- our arm-mount root) and a
+        tool offset C (our site -> controller TCP); a single left-multiply cannot
+        absorb C because it does not commute with the arm's changing orientation.
+        psi is fitted as sign*arm_angle(q, ref) + offset over a small set of
+        candidate reference directions, picking the best match to reported psi.
+        """
+        samples = self._cart_cal_samples
+        if len(samples) < self.cart_cal_min_samples:
+            self.get_logger().error(
+                f'Cartesian calibration: only {len(samples)} samples collected '
+                f'(need >= {self.cart_cal_min_samples}). The move-to-start ramp '
+                'did not yield enough /cart_states + /joint_states pairs. '
+                'Aborting.')
+            return False
+
+        # Guard against a degenerate ramp: if the arm barely moved (e.g. it
+        # already started at the trajectory start), the samples are near
+        # identical and the B/C fit is unidentifiable -- least squares would
+        # report a meaningless "0mm" residual from a rank-deficient problem.
+        # Require enough joint-space sweep to pin down both offsets.
+        q_all = np.array([s['q'] for s in samples])
+        q_span_deg = float(np.degrees(np.max(q_all.max(0) - q_all.min(0))))
+        if q_span_deg < 5.0:
+            self.get_logger().error(
+                f'Cartesian calibration: ramp swept only {q_span_deg:.1f} deg '
+                '(max per-joint range); too little motion to identify the '
+                'pose offset. The arm likely started at the trajectory start. '
+                'Start the arm away from the start pose, increase '
+                'move_to_start_duration, or use cart_calibrate:=false. '
+                'Aborting.')
+            return False
+
+        A = [self.fk.ee_pose(s['q']) for s in samples]
+        T_rep = [s['T'] for s in samples]
+
+        def resid(p):
+            B = self._vec_to_T(p[:6])
+            C = self._vec_to_T(p[6:])
+            r = []
+            for Ai, Ti in zip(A, T_rep):
+                E = B @ Ai @ C @ np.linalg.inv(Ti)
+                r.extend(E[:3, 3])
+                r.extend(_ScipyRotation.from_matrix(E[:3, :3]).as_rotvec())
+            return r
+
+        sol = _scipy_least_squares(
+            resid, np.zeros(12), method='lm', max_nfev=20000)
+        self._cart_B = self._vec_to_T(sol.x[:6])
+        self._cart_C = self._vec_to_T(sol.x[6:])
+
+        # Fit-quality on the calibration samples (position residual).
+        pe = []
+        for Ai, Ti in zip(A, T_rep):
+            Tp = self._cart_B @ Ai @ self._cart_C
+            pe.append(float(np.linalg.norm(Tp[:3, 3] - Ti[:3, 3])))
+        pe = np.asarray(pe)
+        self._cart_fit_pos_rms = float(np.sqrt(np.mean(pe ** 2)))
+        self._cart_fit_pos_max = float(pe.max())
+
+        # --- psi convention: choose reference direction + sign + offset ---
+        psis = np.array([s['psi'] for s in samples])
+        have_psi = np.isfinite(psis)
+        if have_psi.sum() >= max(12, self.cart_cal_min_samples // 2):
+            self._fit_psi_convention(
+                [s['q'] for s in samples], psis, have_psi)
+        else:
+            self.get_logger().warn(
+                'Cartesian calibration: too few reported psi samples; '
+                'psi computed with default reference (may not match controller)')
+
+        self._cart_calibrated = True
+        self.get_logger().info(
+            'Cartesian calibration fitted from '
+            f'{len(samples)} samples: pose model T=B@fk(q)@C '
+            f'pos rms={self._cart_fit_pos_rms*1e3:.1f}mm '
+            f'max={self._cart_fit_pos_max*1e3:.1f}mm | '
+            f'B_t={np.round(self._cart_B[:3,3],4).tolist()} '
+            f'C_t={np.round(self._cart_C[:3,3],4).tolist()}')
+        if self._cart_fit_pos_max > 0.02:
+            self.get_logger().warn(
+                f'Cartesian pose-fit max residual '
+                f'{self._cart_fit_pos_max*1e3:.0f}mm is high; the ramp may lack '
+                'orientation diversity or the model is off. Inspect tracking.')
+        return True
+
+    def _fit_psi_convention(self, qs, psis, mask) -> None:
+        """Pick arm-angle reference dir + sign + circular offset matching psi."""
+        candidates = {
+            '+X': np.array([1.0, 0.0, 0.0]), '-X': np.array([-1.0, 0.0, 0.0]),
+            '+Y': np.array([0.0, 1.0, 0.0]), '-Y': np.array([0.0, -1.0, 0.0]),
+            '+Z': np.array([0.0, 0.0, 1.0]), '-Z': np.array([0.0, 0.0, -1.0]),
+        }
+        idx = np.where(mask)[0]
+        best = None  # (rmse, name, ref, sign, offset)
+        for name, ref in candidates.items():
+            aa = np.array([self.fk.arm_angle(qs[i], ref) for i in idx])
+            ok = np.isfinite(aa)
+            if ok.sum() < 12:
+                continue
+            for sign in (1.0, -1.0):
+                d = psis[idx][ok] - sign * aa[ok]
+                off = float(np.arctan2(np.sin(d).mean(), np.cos(d).mean()))
+                err = np.angle(np.exp(1j * (psis[idx][ok] - (sign * aa[ok] + off))))
+                rmse = float(np.sqrt(np.mean(err ** 2)))
+                if best is None or rmse < best[0]:
+                    best = (rmse, name, ref, sign, off)
+        if best is None:
+            self.get_logger().warn(
+                'psi convention fit failed (degenerate samples); using default')
+            return
+        rmse, name, ref, sign, off = best
+        self._cart_psi_ref = ref
+        self._cart_psi_sign = sign
+        self._cart_psi_offset = off
+        self.get_logger().info(
+            f'psi convention: ref={name} sign={sign:+.0f} '
+            f'offset={np.degrees(off):.1f}deg rmse={np.degrees(rmse):.2f}deg')
+        if rmse > np.radians(10.0):
+            self.get_logger().warn(
+                f'psi fit rmse {np.degrees(rmse):.1f}deg is high; the '
+                'controller may use a different redundancy convention. '
+                'Consider psi_mode:=zero or passthrough.')
+
+    def _compute_cartesian_cmd(self, q: np.ndarray):
+        """Return (T_cmd 4x4, psi) for joint command ``q`` in controller frame."""
+        T_cmd = self._cart_B @ self.fk.ee_pose(q) @ self._cart_C
+        if self.psi_mode == 'zero':
+            psi = 0.0
+        elif self.psi_mode == 'passthrough':
+            _, psi_report = self._get_latest_cart()
+            psi = float(psi_report) if psi_report is not None else 0.0
+        else:  # computed
+            psi = (self._cart_psi_sign
+                   * self.fk.arm_angle(q, self._cart_psi_ref)
+                   + self._cart_psi_offset)
+        return T_cmd, psi
+
+    def _publish_cartesian(self, q: np.ndarray) -> None:
+        """Publish ``q`` as an end-effector pose command (use_jnt=False)."""
+        T_cmd, psi = self._compute_cartesian_cmd(q)
+        cmd = MechUnitCmd()
+        cmd.mu_idx = self.right_arm_mu_idx
+        cmd.use_jnt = False
+        cmd.psi = float(psi)
+        cmd.end_pose.position.x = float(T_cmd[0, 3])
+        cmd.end_pose.position.y = float(T_cmd[1, 3])
+        cmd.end_pose.position.z = float(T_cmd[2, 3])
+        quat_xyzw = _ScipyRotation.from_matrix(T_cmd[:3, :3]).as_quat()
+        cmd.end_pose.orientation.x = float(quat_xyzw[0])
+        cmd.end_pose.orientation.y = float(quat_xyzw[1])
+        cmd.end_pose.orientation.z = float(quat_xyzw[2])
+        cmd.end_pose.orientation.w = float(quat_xyzw[3])
+        msg = MechUnitCmdArray()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = ''
+        msg.cmds = [cmd]
+        self.cmd_pub.publish(msg)
+
+    # ------------------------------------------------------------------
     # Publishing
     # ------------------------------------------------------------------
     def _publish_q(self, q: np.ndarray) -> None:
+        """Publish one right-arm command for joint position ``q`` (rad).
+
+        Single funnel for every phase (ramp, hold, replay). In cartesian output
+        mode the command is published as an end-effector pose (use_jnt=False)
+        *once calibration is complete*; while the move-to-start ramp is still
+        collecting calibration samples it is published in joint space, so no
+        cartesian command is ever sent against an unfitted pose model.
+        """
         if self.clip_to_limits:
             q = np.clip(q, self.q_low, self.q_high)
+        if self.output_mode == 'cartesian' and self._cart_calibrated:
+            self._publish_cartesian(q)
+            return
+        self._publish_joint(q)
+
+    def _publish_joint(self, q: np.ndarray) -> None:
+        """Publish ``q`` as a joint position command (use_jnt=True)."""
         cmd = MechUnitCmd()
         cmd.mu_idx = self.right_arm_mu_idx
         cmd.jnt_pos = [float(x) for x in q]
@@ -599,6 +1162,18 @@ class ReplayNode(Node):
         # 'done' -> nothing.
 
     def _enter_after_init(self) -> None:
+        # In cartesian mode the ramp is published in joint space and used to
+        # collect calibration samples; the fit happens when the ramp completes
+        # (see _finish_ramp). With move_to_start disabled, calibration is not
+        # possible (guarded in _init_cartesian unless cart_calibrate=false).
+        if (self.output_mode == 'cartesian' and not self.cart_calibrate
+                and not self._cart_calibrated):
+            self.get_logger().warn(
+                'cart_calibrate=false: publishing raw FK poses (B=C=identity). '
+                'This only matches the robot if the controller expects poses '
+                'in our arm-mount frame with TCP at the model site.')
+            self._cart_calibrated = True
+
         target0 = self.replay_start_pose
         if not self.move_to_start:
             self._enter_wait_confirm()
@@ -633,9 +1208,22 @@ class ReplayNode(Node):
 
     def _step_move_to_start(self) -> None:
         self._publish_q(self._ramp_traj[self._ramp_idx])
+        # Collect a calibration sample each tick while the arm sweeps the ramp
+        # in joint space (cartesian mode with calibration enabled only).
+        if (self.output_mode == 'cartesian' and self.cart_calibrate
+                and not self._cart_calibrated):
+            self._collect_cal_sample()
         self._ramp_idx += 1
         if self._ramp_idx >= self._ramp_traj.shape[0]:
             self.get_logger().info('Reached start pose; holding')
+            # Fit the cartesian calibration from the ramp samples before any
+            # cartesian command is published. Abort if the fit is unusable.
+            if (self.output_mode == 'cartesian' and self.cart_calibrate
+                    and not self._cart_calibrated):
+                if not self._fit_cartesian_calibration():
+                    self._phase = 'done'
+                    self.timer.cancel()
+                    return
             self._enter_wait_confirm()
 
     def _enter_wait_confirm(self) -> None:
@@ -680,6 +1268,14 @@ class ReplayNode(Node):
     def _begin_replay(self) -> None:
         self._phase = 'replay'
         self._replay_idx = 0
+        # Seed the compensator's command buffer with the pose the arm is
+        # actually holding (start pose), so the first pre-distorted commands are
+        # computed against a consistent history instead of zeros.
+        if self.compensator.enabled:
+            seed_q = self._get_latest_q()
+            if seed_q is None:
+                seed_q = self.replay_start_pose
+            self.compensator.reset(seed_q)
         if self.record_data:
             self._recording_active = True
             self.recorded_data = []
@@ -689,16 +1285,33 @@ class ReplayNode(Node):
 
     def _step_replay(self) -> None:
         idx = self._replay_idx
-        cmd_q = self.trajectory[idx]
+        nominal_q = self.trajectory[idx]
+
+        # Apply actuator-delay compensation if enabled: pre-distort the nominal
+        # command using the recorded (qdot, qdd) and the latest measured pose so
+        # the real actuator's delay+lag realizes the nominal motion. When the
+        # compensator is in 'none' mode this returns the nominal command (only
+        # clipped), so the published command is identical to the legacy path.
+        actual_q, actual_qvel, actual_qdd = self._get_latest_state()
+        if self.compensator.enabled:
+            applied_q = actual_q if actual_q is not None else nominal_q
+            cmd_q = self.compensator.step(
+                nominal_q,
+                self.cmd_qvel_traj[idx],
+                self.cmd_qdd_traj[idx],
+                applied_q,
+            )
+        else:
+            cmd_q = nominal_q
 
         # Record data if recording is active
         if self._recording_active:
-            actual_q, actual_qvel, actual_qdd = self._get_latest_state()
             if actual_q is not None:
                 record = {
                     'step': idx,
                     'timestamp': self.get_clock().now().nanoseconds * 1e-9,
                     'cmd_q': cmd_q.copy(),
+                    'nominal_q': nominal_q.copy(),
                     'actual_q': actual_q.copy(),
                 }
                 # Store feedback velocity/acceleration if available
@@ -714,6 +1327,25 @@ class ReplayNode(Node):
                     record['theoretical_qdd'] = self.theoretical_qdd[idx].copy()
                     if self.action_trajectory is not None:
                         record['action'] = self.action_trajectory[idx].copy()
+
+                # Log the controller-reported actual EE pose in EVERY mode (it
+                # comes straight from /cart_states), so joint and cartesian
+                # replays can be compared in task space. The commanded EE pose
+                # (cart_cmd_*) is only available in cartesian mode, where FK is
+                # loaded.
+                T_report, psi_report = self._get_latest_cart()
+                if T_report is not None:
+                    record['cart_actual_pos'] = T_report[:3, 3].copy()
+                    record['cart_actual_quat'] = _ScipyRotation.from_matrix(
+                        T_report[:3, :3]).as_quat()
+                if psi_report is not None:
+                    record['cart_actual_psi'] = float(psi_report)
+                if self.output_mode == 'cartesian':
+                    T_cmd, psi_cmd = self._compute_cartesian_cmd(cmd_q)
+                    record['cart_cmd_pos'] = T_cmd[:3, 3].copy()
+                    record['cart_cmd_quat'] = _ScipyRotation.from_matrix(
+                        T_cmd[:3, :3]).as_quat()  # xyzw
+                    record['cart_cmd_psi'] = float(psi_cmd)
                 self.recorded_data.append(record)
 
         self._publish_q(cmd_q)
@@ -792,6 +1424,12 @@ class ReplayNode(Node):
                 row[f'actual_qdd/{joint}'] = actual_qdd[i, j]
                 row[f'cmd_q/{joint}'] = cmd_q[i, j]
 
+            # Nominal (pre-compensation) command, present when compensation ran.
+            # cmd_q is what was published; nominal_q is the recorded trajectory.
+            if 'nominal_q' in self.recorded_data[i]:
+                for j, joint in enumerate(RIGHT_ARM_JOINTS):
+                    row[f'nominal_q/{joint}'] = self.recorded_data[i]['nominal_q'][j]
+
             # Add theoretical values if available
             if 'theoretical_q' in self.recorded_data[i]:
                 for j, joint in enumerate(RIGHT_ARM_JOINTS):
@@ -801,6 +1439,34 @@ class ReplayNode(Node):
                 if 'action' in self.recorded_data[i]:
                     for j, joint in enumerate(RIGHT_ARM_JOINTS):
                         row[f'action/{joint}'] = self.recorded_data[i]['action'][j]
+
+            # End-effector pose columns. cart_actual_* (controller-reported) is
+            # written in EVERY mode so joint and cartesian replays compare in
+            # task space; cart_cmd_* (what we commanded) only exists in
+            # cartesian mode. Emit a fixed column set so the CSV header is
+            # consistent across rows; missing samples are NaN.
+            axes = ('x', 'y', 'z')
+            quat_axes = ('x', 'y', 'z', 'w')
+            rec = self.recorded_data[i]
+            act_pos = rec.get('cart_actual_pos')
+            act_quat = rec.get('cart_actual_quat')
+            for a in range(3):
+                row[f'cart_actual_pos/{axes[a]}'] = (
+                    float(act_pos[a]) if act_pos is not None else np.nan)
+            for a in range(4):
+                row[f'cart_actual_quat/{quat_axes[a]}'] = (
+                    float(act_quat[a]) if act_quat is not None else np.nan)
+            row['cart_actual_psi'] = float(rec.get('cart_actual_psi', np.nan))
+            if self.output_mode == 'cartesian':
+                cmd_pos = rec.get('cart_cmd_pos')
+                cmd_quat = rec.get('cart_cmd_quat')
+                for a in range(3):
+                    row[f'cart_cmd_pos/{axes[a]}'] = (
+                        float(cmd_pos[a]) if cmd_pos is not None else np.nan)
+                for a in range(4):
+                    row[f'cart_cmd_quat/{quat_axes[a]}'] = (
+                        float(cmd_quat[a]) if cmd_quat is not None else np.nan)
+                row['cart_cmd_psi'] = float(rec.get('cart_cmd_psi', np.nan))
 
             csv_rows.append(row)
 
@@ -832,7 +1498,51 @@ class ReplayNode(Node):
             'output_csv': output_csv,
             'use_feedback_velocity': self.use_feedback_velocity and has_feedback_qvel,
             'use_feedback_acceleration': self.use_feedback_acceleration and has_feedback_qdd,
+            'compensation_mode': self.compensation_mode,
+            'output_mode': self.output_mode,
         }
+        if self.output_mode == 'cartesian':
+            summary['cartesian'] = {
+                'psi_mode': self.psi_mode,
+                'calibrated': self._cart_calibrated,
+                'cart_calibrate': self.cart_calibrate,
+                'robot_xml_path': self.robot_xml_path,
+                'n_cal_samples': len(self._cart_cal_samples),
+                'pose_model': 'T_cmd = B @ fk(q) @ C',
+                'B': self._cart_B.astype(float).tolist(),
+                'C': self._cart_C.astype(float).tolist(),
+                'B_translation_m': self._cart_B[:3, 3].astype(float).tolist(),
+                'C_translation_m': self._cart_C[:3, 3].astype(float).tolist(),
+                'fit_pos_rms_m': self._cart_fit_pos_rms,
+                'fit_pos_max_m': self._cart_fit_pos_max,
+                'psi_ref_dir': self._cart_psi_ref.astype(float).tolist(),
+                'psi_sign': float(self._cart_psi_sign),
+                'psi_offset_rad': float(self._cart_psi_offset),
+            }
+        if self.compensator.enabled:
+            summary['compensation'] = {
+                'mode': self.compensator.mode,
+                'delay_ms': self.compensator.delay_ms,
+                'delay_steps': self.compensator.delay_steps,
+                'actuator_tau_s': self.compensator.actuator_tau_s,
+                'actuator_gain': self.compensator.actuator_gain,
+                'command_buffer_len': self.compensator.command_buffer_len,
+                'mpc_beta': self.compensator.mpc_beta,
+                'mpc_horizon_steps': self.compensator.mpc_horizon_steps,
+                'mpc_delay_scale': self.compensator.mpc_delay_scale,
+                'mpc_tau_scale': self.compensator.mpc_tau_scale,
+                'mpc_max_delta_rad': self.compensator.mpc_max_delta_rad,
+            }
+            # How far the published command was pushed away from the nominal.
+            if 'nominal_q' in self.recorded_data[0]:
+                nominal_q = np.array(
+                    [r['nominal_q'] for r in self.recorded_data])
+                comp_delta = cmd_q - nominal_q
+                summary['compensation']['applied_delta'] = {
+                    'mean_abs_deg': float(np.degrees(np.mean(np.abs(comp_delta)))),
+                    'max_abs_deg': float(np.degrees(np.max(np.abs(comp_delta)))),
+                    'rms_deg': float(np.degrees(np.sqrt(np.mean(comp_delta**2)))),
+                }
 
         # Compute tracking errors
         if 'theoretical_q' in self.recorded_data[0]:

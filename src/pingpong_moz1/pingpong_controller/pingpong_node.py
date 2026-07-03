@@ -38,6 +38,7 @@ from mc_core_interface.msg import MechUnitCmd, MechUnitCmdArray
 from nav_msgs.msg import Odometry
 
 from pingpong_controller.ball_detector import PingPongBallDetector
+from pingpong_controller.hybrid_ball_detector_adapter import HybridBallDetectorAdapter
 from pingpong_controller.calibration_loader import load_calibration
 from pingpong_controller.viz_render import render_detection_overlay
 from pingpong_controller.fov_loss_compensator import (
@@ -45,6 +46,12 @@ from pingpong_controller.fov_loss_compensator import (
     FovLossCompensatorConfig,
     gravity_for_base_link,
     gravity_for_camera_frame,
+)
+from pingpong_controller.ball_state_estimator import (
+    BallStateEstimator,
+    BallStateEstimatorConfig,
+    gravity_for_base_link as estimator_gravity_for_base_link,
+    gravity_for_camera_frame as estimator_gravity_for_camera_frame,
 )
 from pingpong_controller.mjx_rl_policy import MjxRLPolicyController
 from pingpong_controller.rl_policy import (
@@ -60,6 +67,14 @@ from pingpong_controller.rl_policy import (
     target_right_arm_q_rad,
 )
 from pingpong_controller.safety_limiter import RightArmCommandSafetyLimiter
+
+# Import compensation from pingpong_replay
+try:
+    from pingpong_replay.compensation import CommandCompensator
+    _COMPENSATION_AVAILABLE = True
+except ImportError:
+    _COMPENSATION_AVAILABLE = False
+    CommandCompensator = None
 
 
 @dataclass
@@ -131,6 +146,25 @@ class PingPongControllerNode(Node):
         self.declare_parameter('raw_video_path', '')
         self.declare_parameter('raw_video_fps', 0.0)
 
+        # Aligned-depth recording for OFFLINE hardware-depth replay validation.
+        # When on (requires save_raw_video + use_direct_realsense +
+        # use_depth_sensor), the reader loop records the aligned 16-bit depth
+        # frame alongside each RGB frame, plus a per-frame timestamp sidecar so
+        # the offline tool can pair depth<->RGB by frame index and replay with
+        # the TRUE capture times instead of a constant-fps assumption. RGB,
+        # depth, and timestamps are written in lockstep by one writer thread, so
+        # a dropped frame drops the whole bundle and the indices never desync.
+        # Depth is stored as per-frame .npy (16-bit z16 can't go in mp4v).
+        self.declare_parameter('save_depth_frames', False)
+
+        # When on (requires save_raw_video + use_hybrid_detector), the hybrid
+        # reader loop also records the IR (infrared-1) frame alongside each RGB
+        # frame, plus a one-shot camera_params JSON (IR/RGB intrinsics + IR->RGB
+        # extrinsics + depth_scale). The hybrid detector localizes on the IR
+        # stream, so this is what tools/annotate_raw_video_hybrid.py needs to
+        # reproduce detection offline. IR is stored as per-frame .npy (uint8).
+        self.declare_parameter('save_ir_frames', False)
+
         # Debug/monitoring topics under /pingpong namespace.
         self.declare_parameter('ball_state_topic', '/pingpong/ball_state')
         self.declare_parameter('publish_ball_state_debug', True)
@@ -156,11 +190,60 @@ class PingPongControllerNode(Node):
         self.declare_parameter('control_rate_hz', 200.0)
         self.declare_parameter('rl_policy_device', 'cpu')
         self.declare_parameter('rl_ball_obs_age_clip', 0.20)
+        # Enable delay conditioning features in observation (67-dim vs 50-dim).
+        # Set to True for checkpoints trained with delay conditioning (e.g.,
+        # 18_stage4g_strong_contact_dr_inverse_mpc.pkl); set to False for
+        # legacy 50-dim checkpoints. Default True for new deployments.
+        self.declare_parameter('enable_delay_conditioning', True)
+
+        # Replicate simulation bug for validation: the training environment has a bug
+        # where racket_vel ≈ 0 due to using already-updated prev_racket_pos. Set True
+        # to replicate and verify policy with perfectly matched obs distribution.
+        self.declare_parameter('force_obs_to_training_dist', True)
+
+        # Actuator delay compensation parameters
+        # These must match the training environment's compensation settings.
+        # Default values are from the shipped inverse_mpc checkpoint.
+        self.declare_parameter('enable_compensation', True)
+        self.declare_parameter('compensation_mode', 'inverse_mpc')
+        self.declare_parameter('comp_delay_ms', 72.0)
+        self.declare_parameter('comp_actuator_tau_s', 0.074)
+        self.declare_parameter('comp_actuator_gain', 1.0)
+        self.declare_parameter('comp_buffer_extra_steps', 4)
+        self.declare_parameter('comp_delay_conditioning', True)
+        # inverse-MPC parameters (from checkpoint env_cfg)
+        self.declare_parameter('comp_mpc_beta', 1.2)
+        self.declare_parameter('comp_mpc_delay_scale', 1.05)
+        self.declare_parameter('comp_mpc_tau_scale', 0.75)
+        self.declare_parameter('comp_mpc_horizon_steps', 6)
+        self.declare_parameter('comp_mpc_tracking_weight', 1.0)
+        self.declare_parameter('comp_mpc_nominal_weight', 0.25)
+        self.declare_parameter('comp_mpc_delta_weight', 0.05)
+        self.declare_parameter('comp_mpc_max_delta_rad', 0.5235987755982988)  # 30 deg
+
+        # Replay mode: use pre-recorded ball state CSV instead of live detection
+        self.declare_parameter('enable_replay_mode', False)
+        self.declare_parameter('replay_csv_path', '')
+        self.declare_parameter('replay_loop', False)
+        self.declare_parameter('replay_auto_exit', True)
+
+        # Simulation ball state input: subscribe to ball state from simulation
+        # instead of using vision detection. Useful for testing policy with
+        # perfect ball state input from simulation.
+        self.declare_parameter('enable_sim_ball_input', False)
+        self.declare_parameter('sim_ball_topic', '/sim/ball_state')
+
+        # Safety limiter: can be disabled for simulation/testing
+        self.declare_parameter('enable_safety_limiter', True)
 
         # Whole-body init pose publishing.
         self.declare_parameter('enable_init_pose', True)
         self.declare_parameter('init_pose_duration_s', 3.0)
         self.declare_parameter('init_pose_tolerance_rad', 0.05)
+        # After reaching the init pose, hold and wait for the operator to press
+        # Enter on stdin before starting RL (mirrors pingpong_replay). Ignored
+        # for headless/non-TTY runs (auto-continues).
+        self.declare_parameter('require_enter_confirm', False)
         # Mechanical unit indices. All four MechUnitCmd streams share
         # command_topic (default /mx_mix_command). TODO(jacky): set these to
         # real unit ids before deployment.
@@ -190,8 +273,17 @@ class PingPongControllerNode(Node):
         # frame 0 of the recorded action trace below). The safety limiter
         # ramps toward that posture under the normal vel/acc limits, so the
         # move stays smooth. RL resumes as soon as the ball is reacquired.
+        #
+        # Default tightened 1.0 -> 0.4 s: 1.0 s is far too long for a fast
+        # ball. When the ball-state estimator is enabled it is the single loss
+        # authority — it keeps the ball valid through graded extrapolation up
+        # to ball_estimator_invalid_after_s (~0.60 s, covering a full toss),
+        # which refreshes _last_valid_ball_wall_time every tick; only once the
+        # estimator reports invalid does this timeout start counting and fire.
+        # So the arm holds the toss out and only parks if the ball is truly
+        # gone past the estimator's window.
         self.declare_parameter('enable_ball_lost_failsafe', True)
-        self.declare_parameter('ball_lost_failsafe_timeout_s', 1.0)
+        self.declare_parameter('ball_lost_failsafe_timeout_s', 0.4)
         self.declare_parameter(
             'safe_init_pose_csv_path', default_safe_init_pose_csv)
 
@@ -209,23 +301,139 @@ class PingPongControllerNode(Node):
         self.declare_parameter('device', '0')
         self.declare_parameter('half', False)
         self.declare_parameter('use_kalman', False)
+        # 方案1：椭圆拟合短轴作半径（对运动拖影鲁棒，降低深度噪声）。默认开。
+        self.declare_parameter('enable_ellipse_fit', True)
+        # 方案4：多帧时序跟踪层（运动一致性门控 + 短暂漏检桥接 + ROI 引导）。
+        # 默认关，向后兼容；开后对快球/短暂遮挡更鲁棒。
+        self.declare_parameter('enable_temporal_tracker', False)
+        self.declare_parameter('tracker_max_miss_bridge', 2)
+        self.declare_parameter('tracker_gate_px', 120.0)
+
+        # 使用HybridBallDetector (RGB YOLO + IR检测) 代替传统检测器
+        # 适用于灰色反光球，不依赖颜色筛选
+        self.declare_parameter('use_hybrid_detector', False)
+        self.declare_parameter('ir_params_json', '')  # IR参数JSON文件路径，优先级高于单独参数
+        self.declare_parameter('depth_correction_model_path', 'depth_correction_model.pkl')  # 深度校正模型路径
+        self.declare_parameter('yolo_interval', 1)  # YOLO每N帧运行一次，默认1（每帧）
+        self.declare_parameter('ir_threshold', 170)
+        self.declare_parameter('use_adaptive_ir', True)
+        self.declare_parameter('ir_exposure', 1000)  # μs，1ms
+        self.declare_parameter('ir_gain', 16)
+        self.declare_parameter('ir_laser_power', 360)
+        self.declare_parameter('ir_min_radius', 15)
+        self.declare_parameter('ir_max_radius', 60)
+        self.declare_parameter('ir_circularity_min', 0.7)
+        self.declare_parameter('ir_brightness_percentile', 25)
+        self.declare_parameter('hybrid_roi_margin', 100)
+
+        # 颜色判据（用 tools/vision_calib/hsv_color_tuner.py 调好后填入）。
+        # 收紧 HSV 范围/提高阈值可减少把别的橙色物体误判成球。
+        # 灰色反光球时设置color_match_threshold=0禁用颜色筛选
+        self.declare_parameter('hsv_lower', [5, 50, 50])
+        self.declare_parameter('hsv_upper', [30, 255, 255])
+        self.declare_parameter('color_match_threshold', 0.3)
+        self.declare_parameter('color_circularity_min', 0.4)
         self.declare_parameter('camera_tilt_deg', 40.0)
         self.declare_parameter('use_undistort', True)
         self.declare_parameter('print_every', 1)
         self.declare_parameter('realsense_fps', 60)
+        # Use the RealSense hardware frame timestamp (exposure time) instead of
+        # the reader-loop clock for stamping detections. Captures the true
+        # image-capture instant and includes exposure+USB latency in the
+        # perception-latency de-aging; the cost is clock-domain alignment —
+        # RS and ROS clocks drift over long runs. Default OFF; when ON, a
+        # one-shot offset is calibrated at the first frame. Only effective in
+        # direct_realsense mode.
+        self.declare_parameter('use_realsense_hw_timestamp', False)
+        # Hardware depth (D455): use the aligned depth frame for the ball's
+        # depth instead of monocular circle-radius geometry. Default ON — the
+        # D455's wide-baseline active stereo gives ~10-20 mm depth noise vs the
+        # ~80 mm monocular floor that dominates the prediction error, and
+        # get_depth_from_depthmap guards small-ball background contamination
+        # (ball-mask sampling + 25th-percentile + monocular-prior gate),
+        # falling back to monocular per-frame when the gate rejects. Only
+        # effective in direct_realsense mode (the depth stream is opened
+        # there); in ROS-topic mode it is inert and detection stays monocular.
+        self.declare_parameter('use_depth_sensor', True)
+        self.declare_parameter('depth_neighborhood_px', 2)
 
         # FOV-loss compensator: when the ball flies above the camera's
         # field of view during a juggle, propagate a ballistic prediction
         # forward instead of letting detection drop to invalid. Default
         # OFF — controllers fall back to RL hold-last just like before.
         self.declare_parameter('enable_fov_loss_compensation', False)
-        self.declare_parameter('fov_loss_max_predict_duration_s', 0.8)
+        # 0.8 s of ballistic extrapolation is unreliable for a spinning
+        # pingpong ball (Magnus error dominates after ~100-200 ms), so the
+        # default is tightened to 0.20 s. Raise it explicitly if you trust
+        # longer predicts.
+        self.declare_parameter('fov_loss_max_predict_duration_s', 0.2)
         self.declare_parameter('fov_loss_miss_frames_to_predict', 2)
         self.declare_parameter('fov_loss_min_upward_velocity_mm_s', 200.0)
         self.declare_parameter('fov_loss_history_window_s', 0.15)
         self.declare_parameter('fov_loss_drag_coeff_per_s', 0.0)
         self.declare_parameter('fov_loss_gate_max_mahalanobis', 4.0)
         self.declare_parameter('fov_loss_log_period_s', 1.0)
+
+        # Ball-state estimator: a single Kalman filter that bridges the ~60 Hz
+        # vision feed to the 200 Hz control loop AND compensates the perception
+        # latency. update() fuses each real detection stamped at its image time
+        # (t_img); predict_to() rolls the committed state forward to the
+        # control tick, so the elapsed (t_now - t_img) de-ages the measurement
+        # and absorbs the ~21-40 ms sensing latency with no hand-tuned
+        # constant. Execution latency is NOT compensated here (it is modeled by
+        # the RL actuator model), so prediction_horizon_s stays 0.
+        #
+        # Default ON: it is the single state source that delivers all three of
+        # 200 Hz output, perception-latency de-aging, and toss-loss robustness.
+        # It SUPERSEDES the FOV-loss compensator (above) — do not enable both,
+        # or the toss arc gets propagated twice. When this is off the control
+        # loop consumes the detector observation verbatim. See
+        # ball_state_estimator.py.
+        self.declare_parameter('enable_ball_state_estimator', True)
+        # Extrapolation / loss timeline sized for ball-juggling tosses. A toss
+        # above the camera FOV is pure free flight (no contact), so the gravity
+        # +drag ballistic model is accurate across the whole out-of-view arc;
+        # the limit is depth-axis velocity noise, not the dynamics. A 0.5 m toss
+        # leaves the FOV for ~0.3-0.4 s, so the extrapolation cap and the
+        # invalid timeout are set above that with margin (was 0.20 / 0.45 —
+        # tuned for short frame drops, too tight for a full toss).
+        self.declare_parameter('ball_estimator_max_extrapolation_s', 0.45)
+        self.declare_parameter('ball_estimator_trust_loss_s', 0.10)
+        self.declare_parameter('ball_estimator_degrade_loss_s', 0.40)
+        self.declare_parameter('ball_estimator_invalid_after_s', 0.60)
+        self.declare_parameter('ball_estimator_prediction_horizon_s', 0.0)
+        self.declare_parameter('ball_estimator_r_lateral_mm', 20.0)
+        self.declare_parameter('ball_estimator_r_depth_mm', 60.0)
+        # Aerodynamic drag in the ballistic propagation. A 2.7 g / 40 mm ball
+        # has a high drag-to-mass ratio; a no-drag model overshoots a fast ball
+        # by ~80 mm over a 150 ms detector dropout. Default ON. The coefficient
+        # derives from the ITTF ball + standard air (Cd=0.40); see
+        # ball_state_estimator.BallStateEstimatorConfig.drag_k_per_mm.
+        self.declare_parameter('ball_estimator_enable_aero_drag', True)
+        self.declare_parameter('ball_estimator_drag_k_per_mm', 1.117e-4)
+        # Magnus (spin) lift. OFF by default and inert at zero spin: this rig
+        # has no spin sensor and spin is not observable from position-only
+        # arcs. Hook for experiments with an externally KNOWN serve spin only.
+        self.declare_parameter('ball_estimator_enable_magnus', False)
+        self.declare_parameter('ball_estimator_magnus_k', 0.0)
+        # Table plane height (mm) along the up axis in the estimator frame,
+        # used to arm bounce detection before the ball reaches the table. NaN
+        # disables the height test (bounce flagged from velocity sign flip +
+        # speed jump only). Measure this on hardware to enable height-armed
+        # bounce guarding.
+        self.declare_parameter('ball_estimator_table_z_mm', float('nan'))
+        self.declare_parameter('ball_estimator_log_period_s', 1.0)
+        # Record the estimator's full 200 Hz predict_to() output to CSV for
+        # offline debugging (one row per control tick). Captures the bridged /
+        # de-aged ball state alongside the latest raw 60 Hz detection so you
+        # can compare them. Written on shutdown. Default OFF; blank path =>
+        # timestamped file under outputs/rl_sim/.
+        self.declare_parameter('save_estimator_log', False)
+        self.declare_parameter('estimator_log_path', '')
+
+        # RL policy obs/action logging for debugging and analysis
+        self.declare_parameter('save_policy_log', False)
+        self.declare_parameter('policy_log_path', '')
 
         # Camera intrinsics (optional override, default from CameraInfo)
         self.declare_parameter('camera_fx', 0.0)
@@ -275,6 +483,10 @@ class PingPongControllerNode(Node):
             self.get_parameter('raw_video_path').value).strip()
         self.raw_video_fps = float(
             self.get_parameter('raw_video_fps').value)
+        self.save_depth_frames = bool(
+            self.get_parameter('save_depth_frames').value)
+        self.save_ir_frames = bool(
+            self.get_parameter('save_ir_frames').value)
 
         # Debug/monitoring topic parameters.
         self.ball_state_topic = self.get_parameter('ball_state_topic').value
@@ -294,10 +506,72 @@ class PingPongControllerNode(Node):
         self.device = self.get_parameter('device').value
         self.half = self.get_parameter('half').value
         self.use_kalman = self.get_parameter('use_kalman').value
+        self.enable_ellipse_fit = bool(
+            self.get_parameter('enable_ellipse_fit').value)
+        self.enable_temporal_tracker = bool(
+            self.get_parameter('enable_temporal_tracker').value)
+        self.tracker_max_miss_bridge = int(
+            self.get_parameter('tracker_max_miss_bridge').value)
+        self.tracker_gate_px = float(
+            self.get_parameter('tracker_gate_px').value)
+
+        # Hybrid detector parameters
+        self.use_hybrid_detector = bool(
+            self.get_parameter('use_hybrid_detector').value)
+        self.ir_params_json = str(
+            self.get_parameter('ir_params_json').value).strip()
+        self.depth_correction_model_path = str(
+            self.get_parameter('depth_correction_model_path').value).strip()
+        self.yolo_interval = int(
+            self.get_parameter('yolo_interval').value)
+        self.ir_threshold = int(
+            self.get_parameter('ir_threshold').value)
+        self.use_adaptive_ir = bool(
+            self.get_parameter('use_adaptive_ir').value)
+        self.ir_exposure = int(
+            self.get_parameter('ir_exposure').value)
+        self.ir_gain = int(
+            self.get_parameter('ir_gain').value)
+        self.ir_laser_power = int(
+            self.get_parameter('ir_laser_power').value)
+        self.ir_min_radius = int(
+            self.get_parameter('ir_min_radius').value)
+        self.ir_max_radius = int(
+            self.get_parameter('ir_max_radius').value)
+        self.ir_circularity_min = float(
+            self.get_parameter('ir_circularity_min').value)
+        self.ir_brightness_percentile = int(
+            self.get_parameter('ir_brightness_percentile').value)
+        self.hybrid_roi_margin = int(
+            self.get_parameter('hybrid_roi_margin').value)
+
+        self.hsv_lower = [int(v) for v in
+                          self.get_parameter('hsv_lower').value]
+        self.hsv_upper = [int(v) for v in
+                          self.get_parameter('hsv_upper').value]
+        self.color_match_threshold = float(
+            self.get_parameter('color_match_threshold').value)
+        self.color_circularity_min = float(
+            self.get_parameter('color_circularity_min').value)
         self.camera_tilt_deg = self.get_parameter('camera_tilt_deg').value
         self.use_undistort = self.get_parameter('use_undistort').value
         self.print_every = self.get_parameter('print_every').value
         self.realsense_fps = self.get_parameter('realsense_fps').value
+        self.use_realsense_hw_timestamp = bool(
+            self.get_parameter('use_realsense_hw_timestamp').value)
+        self.use_depth_sensor = bool(
+            self.get_parameter('use_depth_sensor').value)
+        self.depth_neighborhood_px = int(
+            self.get_parameter('depth_neighborhood_px').value)
+        # Set on the RealSense profile once the depth stream is opened; used to
+        # convert z16 counts -> mm in the detector.
+        self._depth_scale = 0.001
+        # Clock-domain offset (ns) calibrated on the first frame when
+        # use_realsense_hw_timestamp is on: offset_ns = ros_t_ns - rs_t_ms*1e6.
+        # Then per-frame: ros_t_ns = rs_t_ms*1e6 + offset_ns. None => uncalibrated.
+        self._rs_time_offset_ns = None
+        # rs.align(color) instance + per-frame numpy depth handoff.
+        self._rs_align = None
 
         # FOV-loss compensator parameters (read once; the compensator
         # itself is built lazily on first detector frame so it can match
@@ -322,6 +596,74 @@ class PingPongControllerNode(Node):
         self._fov_loss_log_last_wall = 0.0
         self._fov_loss_last_predicts_emitted = 0
         self._fov_loss_last_state: Optional[str] = None
+
+        # Ball-state estimator parameters (read once; the estimator is built
+        # lazily on the first detector frame so it can match the detector's
+        # output_frame and grab R_base_camera for anisotropic depth noise).
+        self.enable_ball_state_estimator = bool(
+            self.get_parameter('enable_ball_state_estimator').value)
+        # The estimator and the FOV-loss compensator both fill in the ball
+        # state across a toss; running both would propagate the arc twice
+        # (once at 60 Hz in the vision callback, once at 200 Hz in the control
+        # tick). The estimator is the more complete of the two, so it wins:
+        # disable the FOV compensator whenever the estimator is on.
+        if self.enable_ball_state_estimator and self.enable_fov_loss_compensation:
+            self.get_logger().warn(
+                'Both enable_ball_state_estimator and '
+                'enable_fov_loss_compensation are true; these overlap and '
+                'would double-propagate the toss. Disabling the FOV-loss '
+                'compensator in favor of the ball-state estimator.')
+            self.enable_fov_loss_compensation = False
+        self.ball_estimator_max_extrapolation_s = float(
+            self.get_parameter('ball_estimator_max_extrapolation_s').value)
+        self.ball_estimator_trust_loss_s = float(
+            self.get_parameter('ball_estimator_trust_loss_s').value)
+        self.ball_estimator_degrade_loss_s = float(
+            self.get_parameter('ball_estimator_degrade_loss_s').value)
+        self.ball_estimator_invalid_after_s = float(
+            self.get_parameter('ball_estimator_invalid_after_s').value)
+        self.ball_estimator_prediction_horizon_s = float(
+            self.get_parameter('ball_estimator_prediction_horizon_s').value)
+        self.ball_estimator_r_lateral_mm = float(
+            self.get_parameter('ball_estimator_r_lateral_mm').value)
+        self.ball_estimator_r_depth_mm = float(
+            self.get_parameter('ball_estimator_r_depth_mm').value)
+        self.ball_estimator_enable_aero_drag = bool(
+            self.get_parameter('ball_estimator_enable_aero_drag').value)
+        self.ball_estimator_drag_k_per_mm = float(
+            self.get_parameter('ball_estimator_drag_k_per_mm').value)
+        self.ball_estimator_enable_magnus = bool(
+            self.get_parameter('ball_estimator_enable_magnus').value)
+        self.ball_estimator_magnus_k = float(
+            self.get_parameter('ball_estimator_magnus_k').value)
+        self.ball_estimator_table_z_mm = float(
+            self.get_parameter('ball_estimator_table_z_mm').value)
+        self.ball_estimator_log_period_s = float(
+            self.get_parameter('ball_estimator_log_period_s').value)
+        self._ball_estimator = None
+        self._ball_estimator_lock = threading.Lock()
+        self._ball_estimator_log_last_wall = 0.0
+        # 200 Hz estimator debug recorder.
+        self.save_estimator_log = bool(
+            self.get_parameter('save_estimator_log').value)
+        self.estimator_log_path = str(
+            self.get_parameter('estimator_log_path').value).strip()
+        self._estimator_log_rows: list = []
+        self._estimator_log_lock = threading.Lock()
+
+        # 200 Hz RL policy obs/action debug recorder.
+        self.save_policy_log = bool(
+            self.get_parameter('save_policy_log').value)
+        self.policy_log_path = str(
+            self.get_parameter('policy_log_path').value).strip()
+        self._policy_log_rows: list = []
+        self._policy_log_lock = threading.Lock()
+        self._policy_step_counter = 0
+
+        # Most recent raw 60 Hz detection (position mm in output_frame), cached
+        # so each 200 Hz estimator row can sit next to the measurement it was
+        # built from for offline comparison.
+        self._latest_raw_detection = None
 
         self.override_fx = self.get_parameter('camera_fx').value
         self.override_fy = self.get_parameter('camera_fy').value
@@ -357,6 +699,29 @@ class PingPongControllerNode(Node):
         self.rl_policy_device = self.get_parameter('rl_policy_device').value
         self.rl_ball_obs_age_clip = float(
             self.get_parameter('rl_ball_obs_age_clip').value)
+        self.enable_delay_conditioning = bool(
+            self.get_parameter('enable_delay_conditioning').value)
+
+        # Safety limiter enable flag
+        self.enable_safety_limiter = bool(
+            self.get_parameter('enable_safety_limiter').value)
+
+        # Replay mode parameters
+        self.enable_replay_mode = bool(
+            self.get_parameter('enable_replay_mode').value)
+        self.replay_csv_path = self.get_parameter('replay_csv_path').value
+        self.replay_loop = bool(self.get_parameter('replay_loop').value)
+        self.replay_auto_exit = bool(self.get_parameter('replay_auto_exit').value)
+        self._replay_data = None
+        self._replay_idx = 0
+        self._replay_start_time = None
+
+        # Simulation ball state input parameters
+        self.enable_sim_ball_input = bool(
+            self.get_parameter('enable_sim_ball_input').value)
+        self.sim_ball_topic = self.get_parameter('sim_ball_topic').value
+        self._sim_ball_state = None
+        self._sim_ball_lock = threading.Lock()
 
         # Ball-lost failsafe parameters.
         self.enable_ball_lost_failsafe = bool(
@@ -415,6 +780,7 @@ class PingPongControllerNode(Node):
                             robot_xml_path=self.robot_xml_path,
                             logger=self.get_logger(),
                             align_with_checkpoint=True,
+                            enable_delay_conditioning=self.enable_delay_conditioning,
                         )
                     else:  # sb3
                         self.get_logger().info(
@@ -426,6 +792,7 @@ class PingPongControllerNode(Node):
                             device=self.rl_policy_device,
                             robot_xml_path=self.robot_xml_path,
                             logger=self.get_logger(),
+                            enable_delay_conditioning=self.enable_delay_conditioning,
                         )
                     self._last_safe_joint_positions = \
                         self.rl_controller.current_arm_cmd_q().astype(
@@ -436,6 +803,10 @@ class PingPongControllerNode(Node):
                         f'RLPolicyController ready '
                         f'(backend={self.policy_backend}, '
                         f'model={self.rl_model_path})')
+
+                    # Initialize actuator delay compensator if enabled
+                    self._init_compensator()
+
                 except Exception as exc:
                     self.get_logger().error(
                         f'Failed to initialize RLPolicyController: {exc}; '
@@ -457,11 +828,41 @@ class PingPongControllerNode(Node):
         )
         self.safety_limiter = RightArmCommandSafetyLimiter(
             initial_safe_cmd, dt=self.control_dt)
-        self.get_logger().info(
-            f'Safety limiter active: dt={self.control_dt:.4f}s '
-            f'(control_rate_hz={self.control_rate_hz:.1f})')
+        if self.enable_safety_limiter:
+            self.get_logger().info(
+                f'Safety limiter ENABLED: dt={self.control_dt:.4f}s '
+                f'(control_rate_hz={self.control_rate_hz:.1f})')
+        else:
+            self.get_logger().warn(
+                f'Safety limiter DISABLED: raw RL commands will be published directly! '
+                f'Only use in simulation.')
         self._safety_log_period_s = 1.0
         self._safety_log_last_wall = time.time()
+
+        # Coordinate frame transform: real base_link -> simulation frame.
+        #
+        # Transform formula (from code analysis):
+        #   Simulation (mjx_juggle_env._point_to_base):
+        #     Returns [x_rel, y_rel, z_world] - z is NOT relative to base!
+        #   Real system (via T_base_camera):
+        #     Returns [x_rel, y_rel, z_rel] - all relative to base_link
+        #   Therefore: z_world = z_base_link + BASE_LINK_HEIGHT_IN_WORLD
+        #
+        # BASE_LINK_HEIGHT_IN_WORLD parameter:
+        #   Physical height of base_link frame origin above ground when robot
+        #   is in TARGET_DEGREES posture (腿腰姿态固定). This value is the
+        #   kinematic result of LegWaist joints at TARGET angles.
+        #
+        #   Ideally computed via forward kinematics from URDF + TARGET_DEGREES.
+        #   In practice, validated from real/sim ball position comparison at
+        #   identical robot posture: sim_z=1372mm, real_z=-376mm => 1.748m.
+        #   Rounded to 1.75m. Conversion error < 20mm validates correctness.
+        #
+        #   IMPORTANT: This value is posture-dependent. If robot posture changes
+        #   from TARGET_DEGREES, this parameter must be recalibrated.
+        self.declare_parameter('sim_base_height_m', 1.75)
+        self._sim_base_height_m = float(
+            self.get_parameter('sim_base_height_m').value)
 
         # Resolve the ball-lost failsafe target posture now that the RL
         # initial posture (used as fallback) is available.
@@ -481,6 +882,8 @@ class PingPongControllerNode(Node):
             self.get_parameter('enable_init_pose').value)
         self.init_pose_duration_s = float(
             self.get_parameter('init_pose_duration_s').value)
+        self.require_enter_confirm = bool(
+            self.get_parameter('require_enter_confirm').value)
         self.right_arm_mu_idx = int(
             self.get_parameter('right_arm_mu_idx').value)
         self.left_arm_mu_idx = int(
@@ -496,6 +899,15 @@ class PingPongControllerNode(Node):
         self._init_pose_active = bool(
             self.enable_init_pose and self.init_pose_duration_s > 0.0)
         self._init_pose_start_wall: Optional[float] = None
+        # After the init-pose ramp completes, optionally hold at the start pose
+        # and wait for the operator to press Enter before starting RL (mirrors
+        # pingpong_replay's require_enter_confirm gate). A daemon thread reads
+        # stdin and sets an Event; the timer polls it non-blockingly.
+        self._await_enter = bool(
+            self.enable_init_pose and self.require_enter_confirm)
+        self._enter_event = threading.Event()
+        self._enter_thread_started = False
+        self._enter_prompted = False
         if self._init_pose_active:
             self.get_logger().info(
                 f'Init-pose phase enabled: driving full body to TARGET for '
@@ -508,6 +920,14 @@ class PingPongControllerNode(Node):
         # Latest BallState cached by image callbacks; control timer consumes it.
         self._latest_ball_state = None
         self._latest_ball_lock = threading.Lock()
+
+        # Replay mode: load CSV data if enabled
+        if self.enable_replay_mode:
+            self._init_replay_mode()
+
+        # Simulation ball state input: subscribe to ball state from simulation
+        if self.enable_sim_ball_input:
+            self._init_sim_ball_input()
 
         # Latest real joint feedback from /joint_states; control timer + init
         # pose logic consume it. Values are indexed by joint name.
@@ -677,6 +1097,23 @@ class PingPongControllerNode(Node):
         self._raw_video_writer_thread = None
         self._raw_video_writer_running = False
         self._raw_video_queue_max_size = 360  # ~6 seconds at 60fps buffer
+        # Aligned-depth recording sidecars (see save_depth_frames). The depth
+        # frames go into a sibling directory of the raw mp4 and per-frame
+        # timestamps into a CSV; both keyed by the same frame index the RGB
+        # video uses so the offline tool pairs them positionally.
+        self._depth_frames_dir = None
+        self._depth_frames_written = 0
+        self._timestamps_csv_path = None
+        self._timestamps_file = None
+        self._recording_index = 0  # shared RGB/depth/timestamp frame counter
+        self._depth_disabled_runtime = False
+        # IR-frame recording sidecar (hybrid mode; see save_ir_frames). Mirrors
+        # the depth sidecar: one ir_<idx>.npy per RGB frame + a one-shot
+        # camera_params JSON, keyed by the same _recording_index.
+        self._ir_frames_dir = None
+        self._ir_frames_written = 0
+        self._ir_disabled_runtime = False
+        self._camera_params_written = False
 
         if self.enable_visualization:
             self.get_logger().info(
@@ -694,6 +1131,23 @@ class PingPongControllerNode(Node):
                 'recording is only supported in direct_realsense mode. '
                 'Disabling raw video recording.')
             self.save_raw_video = False
+        # Depth recording rides on the raw-video path and needs hardware depth.
+        if self.save_depth_frames and not (
+                self.save_raw_video and self.use_depth_sensor):
+            self.get_logger().warn(
+                'save_depth_frames=true requires save_raw_video=true and '
+                'use_depth_sensor=true (direct_realsense mode). Disabling '
+                'depth-frame recording.')
+            self.save_depth_frames = False
+        # IR recording rides on the raw-video path and needs the hybrid detector
+        # (that is what owns the IR stream and the intrinsics/extrinsics).
+        if self.save_ir_frames and not (
+                self.save_raw_video and self.use_hybrid_detector):
+            self.get_logger().warn(
+                'save_ir_frames=true requires save_raw_video=true and '
+                'use_hybrid_detector=true (direct_realsense mode). Disabling '
+                'IR-frame recording.')
+            self.save_ir_frames = False
         if self.save_raw_video:
             raw_fps_text = (
                 f'{self.raw_video_fps:.1f}'
@@ -702,6 +1156,17 @@ class PingPongControllerNode(Node):
                 'Raw video recording enabled: saving unprocessed RealSense '
                 f'RGB stream (fps={raw_fps_text}); file resolved on first '
                 'frame. Post-process with tools/annotate_raw_video.py.')
+        if self.save_depth_frames:
+            self.get_logger().info(
+                'Depth-frame recording enabled: saving aligned 16-bit depth '
+                'frames (.npy) + per-frame timestamp CSV alongside the raw '
+                'video, for offline hardware-depth replay validation.')
+        if self.save_ir_frames:
+            self.get_logger().info(
+                'IR-frame recording enabled: saving IR (infrared-1) frames '
+                '(.npy) + a camera_params JSON alongside the raw video, for '
+                'offline hybrid detection with '
+                'tools/annotate_raw_video_hybrid.py.')
 
         # --- Branch on input mode ---
         if self.use_direct_realsense:
@@ -709,7 +1174,13 @@ class PingPongControllerNode(Node):
             self.get_logger().info(
                 'Note: realsense2_camera ROS driver should NOT be running '
                 'when use_direct_realsense=True')
-            self._init_direct_realsense()
+            if self.use_hybrid_detector:
+                self.get_logger().info(
+                    'Using HybridBallDetector: camera managed by detector, '
+                    'starting hybrid detector reader loop')
+                self._init_hybrid_detector_loop()
+            else:
+                self._init_direct_realsense()
         else:
             self.get_logger().info('Image input mode: ros_topic')
             if self.calibration_data is not None:
@@ -742,6 +1213,15 @@ class PingPongControllerNode(Node):
             undistort_text = str(actual_undistort)
         self.get_logger().info(
             f'Use undistort: {undistort_text}, Use Kalman: {self.use_kalman}')
+        self.get_logger().info(
+            f'Ellipse-fit radius: {self.enable_ellipse_fit}, '
+            f'Temporal tracker: {self.enable_temporal_tracker} '
+            f'(bridge<={self.tracker_max_miss_bridge}, '
+            f'gate={self.tracker_gate_px:.0f}px)')
+        self.get_logger().info(
+            f'Color gate: HSV {self.hsv_lower}-{self.hsv_upper}, '
+            f'match>={self.color_match_threshold:.2f}, '
+            f'circularity>={self.color_circularity_min:.2f}')
         self.get_logger().info(f'Print every: {self.print_every} frames')
         if self.detector is not None:
             self.get_logger().info('Detector ready, waiting for images...')
@@ -864,69 +1344,164 @@ class PingPongControllerNode(Node):
 
     def _init_detector_from_calibration(self):
         """Initialize detector using calibration JSON data."""
+        detector_type = "HybridBallDetector" if self.use_hybrid_detector else "PingPongBallDetector"
         self.get_logger().info(
-            'Initializing PingPongBallDetector with CalibrationData...')
+            f'Initializing {detector_type} with CalibrationData...')
         try:
-            self.detector = PingPongBallDetector(
-                yolo_model_path=self.yolo_model_path,
-                ball_diameter_mm=40.0,
-                width=self.calibration_data.image_width,
-                height=self.calibration_data.image_height,
-                fps=60,
-                conf_threshold=self.conf_threshold,
-                target_class=self.target_class,
-                camera_tilt_deg=self.camera_tilt_deg,
-                use_kalman=self.use_kalman,
-                infer_imgsz=self.infer_imgsz,
-                device=self.device,
-                half=self.half,
-                use_undistort=True,
-                print_every=999999,
-                profile_every=0,
-                use_camera=False,
-                calibration_data=self.calibration_data,
-                output_frame='base_link'
-            )
+            if self.use_hybrid_detector:
+                # 使用Hybrid检测器（灰色反光球）
+                self.detector = HybridBallDetectorAdapter(
+                    yolo_model_path=self.yolo_model_path,
+                    ball_diameter_mm=40.0,
+                    width=self.calibration_data.image_width,
+                    height=self.calibration_data.image_height,
+                    fps=60,
+                    yolo_interval=self.yolo_interval,
+                    yolo_conf=self.conf_threshold,
+                    target_class=self.target_class,
+                    ir_params_json=self.ir_params_json,  # 优先从JSON加载
+                    ir_threshold=self.ir_threshold,
+                    use_adaptive=self.use_adaptive_ir,
+                    min_radius=self.ir_min_radius,
+                    max_radius=self.ir_max_radius,
+                    circularity_min=self.ir_circularity_min,
+                    laser_power=self.ir_laser_power,
+                    exposure=self.ir_exposure,
+                    gain=self.ir_gain,
+                    brightness_percentile=self.ir_brightness_percentile,
+                    roi_margin=self.hybrid_roi_margin,
+                    calibration_data=self.calibration_data,
+                    output_frame='base_link',
+                    print_every=999999,
+                    use_undistort=True,
+                    depth_scale=self._depth_scale,
+                    depth_correction_model_path=self.depth_correction_model_path,  # 新增
+                    depth_neighborhood_px=self.depth_neighborhood_px,
+                    # 灰色球禁用颜色筛选
+                    color_match_threshold=0.0,
+                    color_circularity_min=0.0,
+                )
+            else:
+                # 使用传统检测器（橙色球）
+                self.detector = PingPongBallDetector(
+                    yolo_model_path=self.yolo_model_path,
+                    ball_diameter_mm=40.0,
+                    width=self.calibration_data.image_width,
+                    height=self.calibration_data.image_height,
+                    fps=60,
+                    conf_threshold=self.conf_threshold,
+                    target_class=self.target_class,
+                    camera_tilt_deg=self.camera_tilt_deg,
+                    use_kalman=self.use_kalman,
+                    infer_imgsz=self.infer_imgsz,
+                    device=self.device,
+                    half=self.half,
+                    use_undistort=True,
+                    print_every=999999,
+                    profile_every=0,
+                    use_camera=False,
+                    calibration_data=self.calibration_data,
+                    output_frame='base_link',
+                    enable_ellipse_fit=self.enable_ellipse_fit,
+                    enable_temporal_tracker=self.enable_temporal_tracker,
+                    tracker_max_miss_bridge=self.tracker_max_miss_bridge,
+                    tracker_gate_px=self.tracker_gate_px,
+                    hsv_lower=self.hsv_lower,
+                    hsv_upper=self.hsv_upper,
+                    color_match_threshold=self.color_match_threshold,
+                    color_circularity_min=self.color_circularity_min,
+                    use_depth_sensor=self.use_depth_sensor,
+                    depth_scale=self._depth_scale,
+                    depth_neighborhood_px=self.depth_neighborhood_px,
+                )
             self.camera_info_received = True
             self.get_logger().info(
-                'PingPongBallDetector initialized (output: base_link)')
+                f'{detector_type} initialized (output: base_link)')
         except Exception as e:
             self.get_logger().error(f'Failed to initialize detector: {e}')
             raise
 
     def _init_detector_from_realsense_intrinsics(self, intrinsics):
         """Initialize detector using intrinsics from RealSense profile."""
+        detector_type = "HybridBallDetector" if self.use_hybrid_detector else "PingPongBallDetector"
         self.get_logger().info(
-            'Initializing PingPongBallDetector with RealSense intrinsics...')
+            f'Initializing {detector_type} with RealSense intrinsics...')
         dist_coeffs = list(intrinsics.coeffs)
         try:
-            self.detector = PingPongBallDetector(
-                yolo_model_path=self.yolo_model_path,
-                ball_diameter_mm=40.0,
-                width=intrinsics.width,
-                height=intrinsics.height,
-                fps=self.realsense_fps,
-                conf_threshold=self.conf_threshold,
-                target_class=self.target_class,
-                camera_tilt_deg=self.camera_tilt_deg,
-                use_kalman=self.use_kalman,
-                infer_imgsz=self.infer_imgsz,
-                device=self.device,
-                half=self.half,
-                use_undistort=self.use_undistort,
-                print_every=999999,
-                profile_every=0,
-                use_camera=False,
-                camera_fx=intrinsics.fx,
-                camera_fy=intrinsics.fy,
-                camera_cx=intrinsics.ppx,
-                camera_cy=intrinsics.ppy,
-                camera_dist_coeffs=dist_coeffs,
-                output_frame='camera'
-            )
+            if self.use_hybrid_detector:
+                # Hybrid检测器（灰色球）
+                # 注意：hybrid_detector内部会直接从RealSense读取IR和depth
+                # 这里不需要传camera_fx等参数，它会自己获取
+                self.detector = HybridBallDetectorAdapter(
+                    yolo_model_path=self.yolo_model_path,
+                    ball_diameter_mm=40.0,
+                    width=intrinsics.width,
+                    height=intrinsics.height,
+                    fps=self.realsense_fps,
+                    yolo_interval=self.yolo_interval,
+                    yolo_conf=self.conf_threshold,
+                    target_class=self.target_class,
+                    ir_params_json=self.ir_params_json,  # 优先从JSON加载
+                    ir_threshold=self.ir_threshold,
+                    use_adaptive=self.use_adaptive_ir,
+                    min_radius=self.ir_min_radius,
+                    max_radius=self.ir_max_radius,
+                    circularity_min=self.ir_circularity_min,
+                    laser_power=self.ir_laser_power,
+                    exposure=self.ir_exposure,
+                    gain=self.ir_gain,
+                    brightness_percentile=self.ir_brightness_percentile,
+                    roi_margin=self.hybrid_roi_margin,
+                    calibration_data=None,  # camera模式不用标定
+                    output_frame='camera',
+                    print_every=999999,
+                    use_undistort=self.use_undistort,
+                    depth_scale=self._depth_scale,
+                    depth_neighborhood_px=self.depth_neighborhood_px,
+                    # 灰色球禁用颜色筛选
+                    color_match_threshold=0.0,
+                    color_circularity_min=0.0,
+                )
+            else:
+                # 传统检测器（橙色球）
+                self.detector = PingPongBallDetector(
+                    yolo_model_path=self.yolo_model_path,
+                    ball_diameter_mm=40.0,
+                    width=intrinsics.width,
+                    height=intrinsics.height,
+                    fps=self.realsense_fps,
+                    conf_threshold=self.conf_threshold,
+                    target_class=self.target_class,
+                    camera_tilt_deg=self.camera_tilt_deg,
+                    use_kalman=self.use_kalman,
+                    infer_imgsz=self.infer_imgsz,
+                    device=self.device,
+                    half=self.half,
+                    use_undistort=self.use_undistort,
+                    print_every=999999,
+                    profile_every=0,
+                    use_camera=False,
+                    camera_fx=intrinsics.fx,
+                    camera_fy=intrinsics.fy,
+                    camera_cx=intrinsics.ppx,
+                    camera_cy=intrinsics.ppy,
+                    camera_dist_coeffs=dist_coeffs,
+                    output_frame='camera',
+                    enable_ellipse_fit=self.enable_ellipse_fit,
+                    enable_temporal_tracker=self.enable_temporal_tracker,
+                    tracker_max_miss_bridge=self.tracker_max_miss_bridge,
+                    tracker_gate_px=self.tracker_gate_px,
+                    hsv_lower=self.hsv_lower,
+                    hsv_upper=self.hsv_upper,
+                    color_match_threshold=self.color_match_threshold,
+                    color_circularity_min=self.color_circularity_min,
+                    use_depth_sensor=self.use_depth_sensor,
+                    depth_scale=self._depth_scale,
+                    depth_neighborhood_px=self.depth_neighborhood_px,
+                )
             self.camera_info_received = True
             self.get_logger().info(
-                'PingPongBallDetector initialized (output: camera)')
+                f'{detector_type} initialized (output: camera)')
         except Exception as e:
             self.get_logger().error(f'Failed to initialize detector: {e}')
             raise
@@ -936,13 +1511,17 @@ class PingPongControllerNode(Node):
     # ------------------------------------------------------------------
 
     def _start_color_stream(self, width, height, fps,
-                            allow_resolution_fallback=False):
+                            allow_resolution_fallback=False,
+                            enable_depth=False):
         """Start RealSense color stream with fallback modes.
 
         Args:
             allow_resolution_fallback: If False, only fps fallback is allowed
                 (resolution stays at width x height). If True, 640x480 is
                 tried as a last resort.
+            enable_depth: Also enable the depth stream at the same resolution
+                (for use_depth_sensor). The depth stream is added to each
+                candidate config so it shares the color stream's fallback.
         """
         candidate_modes = [
             (width, height, fps),
@@ -960,6 +1539,9 @@ class PingPongControllerNode(Node):
             w, h, f = mode
             config = rs.config()
             config.enable_stream(rs.stream.color, w, h, rs.format.bgr8, f)
+            if enable_depth:
+                # Depth at the same WxH so align(color) is a clean 1:1 map.
+                config.enable_stream(rs.stream.depth, w, h, rs.format.z16, f)
             try:
                 profile = self._rs_pipeline.start(config)
                 if mode != (width, height, fps):
@@ -994,7 +1576,35 @@ class PingPongControllerNode(Node):
 
         profile = self._start_color_stream(
             target_w, target_h, self.realsense_fps,
-            allow_resolution_fallback=allow_fallback)
+            allow_resolution_fallback=allow_fallback,
+            enable_depth=self.use_depth_sensor)
+
+        # Set up depth->color alignment and read the depth scale (z16 -> m).
+        if self.use_depth_sensor:
+            try:
+                self._rs_align = rs.align(rs.stream.color)
+                depth_sensor = profile.get_device().first_depth_sensor()
+                self._depth_scale = float(depth_sensor.get_depth_scale())
+                # The calibration-mode detector is built in __init__ (before
+                # this runs) with the default scale; push the real device scale
+                # and enable flag onto it now so they can't drift apart.
+                if self.detector is not None:
+                    self.detector.use_depth_sensor = True
+                    self.detector.depth_scale = self._depth_scale
+                    self.detector.depth_neighborhood_px = \
+                        self.depth_neighborhood_px
+                self.get_logger().info(
+                    f'Hardware depth ENABLED: depth_scale={self._depth_scale} '
+                    f'm/count, aligned to color, neighborhood='
+                    f'{self.depth_neighborhood_px}px')
+            except Exception as exc:  # noqa: BLE001
+                self.get_logger().error(
+                    f'Failed to set up depth alignment ({exc}); '
+                    'disabling hardware depth, falling back to monocular')
+                self.use_depth_sensor = False
+                self._rs_align = None
+                if self.detector is not None:
+                    self.detector.use_depth_sensor = False
 
         color_stream = profile.get_stream(rs.stream.color)
         video_profile = color_stream.as_video_stream_profile()
@@ -1002,6 +1612,15 @@ class PingPongControllerNode(Node):
         self.get_logger().info(
             f'RealSense stream: {rs_intrinsics.width}x{rs_intrinsics.height}'
             f'@{video_profile.fps()}fps')
+        if self.use_realsense_hw_timestamp:
+            self.get_logger().info(
+                'Timestamp mode: RealSense hardware exposure time (offset '
+                'calibrated on first frame; includes exposure+USB latency in '
+                'perception de-aging).')
+        else:
+            self.get_logger().info(
+                'Timestamp mode: ROS reader-loop clock (exposure+USB latency '
+                'NOT included in perception de-aging).')
 
         if self.calibration_data is not None:
             if (rs_intrinsics.width != self.calibration_data.image_width
@@ -1047,6 +1666,19 @@ class PingPongControllerNode(Node):
                         throttle_duration_sec=1.0)
                 continue
 
+            # Align depth to color and extract the depth image when hardware
+            # depth is enabled. align.process gives a frameset whose depth is
+            # registered to the color pixels (same WxH).
+            depth_image = None
+            if self.use_depth_sensor and self._rs_align is not None:
+                try:
+                    aligned = self._rs_align.process(frames)
+                    depth_frame = aligned.get_depth_frame()
+                    if depth_frame:
+                        depth_image = np.asanyarray(depth_frame.get_data())
+                except RuntimeError:
+                    depth_image = None  # transient; fall back to monocular
+
             color_frame = frames.get_color_frame()
             if not color_frame:
                 continue
@@ -1057,15 +1689,63 @@ class PingPongControllerNode(Node):
             if len(color_image.shape) != 3:
                 continue
 
+            # One capture timestamp for this frame, shared by the recorder
+            # sidecar and the detection path so the offline replay times line
+            # up with what the live node actually saw. When use_realsense_hw_
+            # timestamp is on, use the color frame's hardware timestamp
+            # (exposure ms) and map into ROS clock domain via the first-frame
+            # calibrated offset; this captures the true image-capture instant
+            # and includes exposure+USB latency in latency de-aging. When off
+            # or the HW time is unavailable, fall back to the reader-loop clock.
+            stamp = self._stamp_frame(color_frame)
+
             # Record the raw frame BEFORE detection/visualization touch it, so
             # the saved video is the true native-rate RealSense stream. This
             # only enqueues (a non-blocking O(1) handoff to the raw writer
-            # thread); the actual encode happens off this thread.
+            # thread); the actual encode happens off this thread. When depth
+            # recording is on, RGB+depth+timestamp travel as one bundle so a
+            # dropped frame drops the whole bundle and indices never desync.
             if self.save_raw_video and not self._raw_video_disabled_runtime:
-                self._enqueue_raw_video_frame(color_image)
+                rec_depth = (depth_image if self.save_depth_frames
+                             and not self._depth_disabled_runtime else None)
+                t_capture = stamp.sec + stamp.nanosec * 1e-9
+                self._enqueue_raw_video_frame(
+                    color_image, depth_image=rec_depth, t_capture=t_capture)
 
-            stamp = self.get_clock().now().to_msg()
-            self._handle_cv_image(color_image, stamp)
+            self._handle_cv_image(color_image, stamp, depth_image=depth_image)
+
+    def _stamp_frame(self, color_frame) -> Time:
+        """Return the frame timestamp: hardware exposure time or reader-loop clock.
+
+        When ``use_realsense_hw_timestamp`` is on, reads the frame's hardware
+        timestamp (ms), maps it to ROS clock (ns) via the offset calibrated on
+        the first frame, and returns a Time message. The offset is calibrated
+        by taking the first frame's hardware timestamp and the node clock at
+        that instant, computing offset = ros_t_ns - (rs_t_ms * 1e6). Every
+        subsequent frame is then ros_t_ns = rs_t_ms*1e6 + offset. This bakes in
+        drift over the entire run, but the alternative (per-frame clock reads
+        for offset) defeats the purpose. If the hardware timestamp is
+        unavailable or the feature is off, falls back to the reader-loop clock.
+        """
+        if self.use_realsense_hw_timestamp:
+            try:
+                hw_ms = color_frame.get_timestamp()
+                if self._rs_time_offset_ns is None:
+                    # First-frame calibration: offset = ROS now - HW now.
+                    ros_now_ns = self.get_clock().now().nanoseconds
+                    self._rs_time_offset_ns = ros_now_ns - int(hw_ms * 1e6)
+                    self.get_logger().info(
+                        f'RealSense HW timestamp enabled: first-frame '
+                        f'calibration offset = {self._rs_time_offset_ns} ns. '
+                        f'Hardware exposure time is now used for detection '
+                        f'timestamping (includes exposure+USB latency in '
+                        f'perception de-aging).')
+                ros_ns = int(hw_ms * 1e6) + self._rs_time_offset_ns
+                return Time(nanoseconds=ros_ns)
+            except Exception:  # noqa: BLE001 - fallback on any RS API failure
+                pass
+        # Fallback: the reader-loop clock (as before).
+        return self.get_clock().now().to_msg()
 
     def _shutdown_realsense(self):
         """Stop RealSense pipeline and reader thread."""
@@ -1080,6 +1760,168 @@ class PingPongControllerNode(Node):
                 self.get_logger().info('RealSense pipeline stopped')
             except Exception as e:
                 self.get_logger().warn(f'Error stopping pipeline: {e}')
+
+    def _init_hybrid_detector_loop(self):
+        """Initialize reader loop for HybridBallDetector (camera managed by detector)."""
+        # HybridBallDetector已经启动了RealSense，我们只需要启动reader loop
+        # 从detector的get_observation()读取帧和检测结果
+
+        self.get_logger().info('Starting HybridBallDetector reader loop...')
+
+        # 启动reader线程
+        self._rs_running = True
+        self._rs_thread = threading.Thread(
+            target=self._hybrid_reader_loop, daemon=True)
+        self._rs_thread.start()
+
+        self.get_logger().info('HybridBallDetector reader loop started')
+
+    def _hybrid_reader_loop(self):
+        """Reader loop for HybridBallDetector: get observations and feed to vision callback."""
+        self.get_logger().info('Hybrid reader loop: entering main loop')
+
+        # 直接访问HybridBallDetector的pipeline
+        pipeline = self.detector.detector.pipeline
+
+        loop_count = 0
+        while self._rs_running:
+            try:
+                loop_count += 1
+
+                # 等待新帧（直接从pipeline，不通过HybridBallDetector）
+                try:
+                    frames = pipeline.wait_for_frames(timeout_ms=1000)
+                except RuntimeError as e:
+                    self.get_logger().warn(f'wait_for_frames timeout: {e}', throttle_duration_sec=1.0)
+                    continue
+
+                # 获取RGB和IR图像
+                color_frame = frames.get_color_frame()
+                ir_frame = frames.get_infrared_frame(1)
+
+                if not color_frame:
+                    continue
+
+                rgb_image = np.asanyarray(color_frame.get_data())
+                if rgb_image is None or rgb_image.size == 0:
+                    continue
+
+                ir_image = None
+                if ir_frame:
+                    ir_image = np.asanyarray(ir_frame.get_data())
+
+                # 创建时间戳
+                stamp = self.get_clock().now().to_msg()
+
+                # 保存原始视频（hybrid 模式额外存 IR/depth，供离线混合检测）
+                if self.save_raw_video and not self._raw_video_disabled_runtime:
+                    t_capture = stamp.sec + stamp.nanosec * 1e-9
+                    rec_depth = None
+                    if self.save_depth_frames:
+                        depth_frame = frames.get_depth_frame()
+                        if depth_frame:
+                            rec_depth = np.asanyarray(depth_frame.get_data())
+                    rec_ir = ir_image if self.save_ir_frames else None
+                    self._enqueue_raw_video_frame(
+                        rgb_image, depth_image=rec_depth, ir_image=rec_ir,
+                        t_capture=t_capture)
+
+                # 调用HybridBallDetector的get_observation处理这一帧
+                observation = self.detector.detector.get_observation(frames=frames)
+
+                if observation is None:
+                    observation = {'detected': False, 'position': [0, 0, 0], 'velocity': [0, 0, 0]}
+
+                # Hybrid可视化
+                if self.enable_visualization and ir_image is not None:
+                    try:
+                        viz_image = self.detector.detector._render_visualization(rgb_image, ir_image, observation)
+                        if viz_image is not None:
+                            # 直接发送渲染好的图像到可视化worker
+                            # 创建一个假的observation，标记为hybrid_viz_rendered
+                            hybrid_obs_for_viz = observation.copy()
+                            hybrid_obs_for_viz['_hybrid_viz_rendered'] = True
+                            self._publish_visualization_frame(viz_image, hybrid_obs_for_viz)
+                    except Exception as e:
+                        self.get_logger().error(f'Visualization error: {e}', throttle_duration_sec=5.0)
+
+                # 传递给后处理流程
+                self._handle_hybrid_cv_image(rgb_image, stamp, observation)
+
+                if loop_count == 1:
+                    self.get_logger().info('Hybrid reader loop: first frame processed!')
+
+                if loop_count % 100 == 0:
+                    self.get_logger().info(f'Hybrid reader loop: {loop_count} frames processed')
+
+            except Exception as e:
+                self.get_logger().error(f'Hybrid reader loop error: {e}', throttle_duration_sec=1.0)
+                import traceback
+                self.get_logger().error(f'Traceback: {traceback.format_exc()}', throttle_duration_sec=5.0)
+                time.sleep(0.1)
+                continue
+
+        self.get_logger().info('Hybrid reader loop: exited')
+
+    def _handle_hybrid_cv_image(self, image, stamp, hybrid_observation):
+        """处理HybridBallDetector的结果，复用原有的后处理流程。
+
+        与_handle_cv_image的区别：
+        - 不调用detector.get_observation()（已经有结果了）
+        - 直接使用hybrid_observation
+        - 其他流程（estimator、FOV补偿、可视化、记录）完全相同
+        """
+        now_wall = time.time()
+        if self.last_callback_time is not None:
+            dt = now_wall - self.last_callback_time
+            self.callback_times.append(dt)
+            if len(self.callback_times) > 30:
+                self.callback_times.pop(0)
+        self.last_callback_time = now_wall
+
+        stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        observation = hybrid_observation  # 直接使用hybrid检测结果
+
+        # Optional ball-state estimator
+        if self.enable_ball_state_estimator:
+            self._feed_ball_state_estimator(observation, stamp_sec)
+
+        # Optional FOV-loss compensation
+        if self.enable_fov_loss_compensation:
+            observation = self._apply_fov_loss_compensation(
+                observation, stamp_sec)
+
+        self.frame_count += 1
+
+        if observation['detected']:
+            is_predicted = bool(observation.get('predicted', False))
+            if not is_predicted:
+                self.detection_count += 1
+            ball_state = BallState(
+                position=np.array(observation['position']),
+                velocity=np.array(observation['velocity']),
+                stamp=stamp, valid=True,
+                raw_measurement=observation.get('raw_measurement'))
+            if not is_predicted:
+                self._record_base_trajectory(stamp_sec, ball_state)
+        else:
+            ball_state = BallState(
+                position=np.zeros(3), velocity=np.zeros(3),
+                stamp=stamp, valid=False,
+                raw_measurement=observation.get('raw_measurement'))
+
+        if self.frame_count % self.print_every == 0:
+            self._log_detection_results(ball_state)
+
+        # Publish ball state debug topic
+        self._publish_ball_state_debug(ball_state)
+
+        # 可视化已经在_hybrid_reader_loop中处理了，这里跳过
+        # （hybrid检测器有自己的渲染逻辑，显示RGB+IR双图）
+
+        # Cache latest BallState
+        with self._latest_ball_lock:
+            self._latest_ball_state = ball_state
 
     # ------------------------------------------------------------------
     # ROS topic mode callbacks
@@ -1134,7 +1976,15 @@ class PingPongControllerNode(Node):
                 camera_fx=fx, camera_fy=fy,
                 camera_cx=cx, camera_cy=cy,
                 camera_dist_coeffs=dist_coeffs,
-                output_frame=output_frame
+                output_frame=output_frame,
+                enable_ellipse_fit=self.enable_ellipse_fit,
+                enable_temporal_tracker=self.enable_temporal_tracker,
+                tracker_max_miss_bridge=self.tracker_max_miss_bridge,
+                tracker_gate_px=self.tracker_gate_px,
+                hsv_lower=self.hsv_lower,
+                hsv_upper=self.hsv_upper,
+                color_match_threshold=self.color_match_threshold,
+                color_circularity_min=self.color_circularity_min,
             )
             if extrinsics_calibration is not None:
                 # Keep CameraInfo intrinsics, but use matching JSON extrinsics
@@ -1177,8 +2027,14 @@ class PingPongControllerNode(Node):
     # Shared detection logic
     # ------------------------------------------------------------------
 
-    def _handle_cv_image(self, image: np.ndarray, stamp: Time):
-        """Process a BGR image through the detector and update stats/logs."""
+    def _handle_cv_image(self, image: np.ndarray, stamp: Time,
+                         depth_image: np.ndarray = None):
+        """Process a BGR image through the detector and update stats/logs.
+
+        depth_image: optional aligned depth frame (direct_realsense +
+        use_depth_sensor). None in ROS-topic mode or when hardware depth is
+        off; the detector then uses monocular geometry.
+        """
         now_wall = time.time()
         if self.last_callback_time is not None:
             dt = now_wall - self.last_callback_time
@@ -1189,7 +2045,16 @@ class PingPongControllerNode(Node):
 
         stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
         observation = self.detector.get_observation(
-            image, observation_time=stamp_sec)
+            image, observation_time=stamp_sec, depth_image=depth_image)
+
+        # Optional ball-state estimator: fuse this REAL detection, stamped at
+        # its image time (stamp_sec == t_img). Fed before FOV compensation so
+        # the filter only ever ingests genuine measurements, never the FOV
+        # compensator's own ballistic predictions. The 200 Hz control loop
+        # reads predict_to() separately; here we only push the measurement in.
+        # Default OFF.
+        if self.enable_ball_state_estimator:
+            self._feed_ball_state_estimator(observation, stamp_sec)
 
         # Optional FOV-loss compensation. Switch is default OFF; when on,
         # this swaps the detector's invalid output for a ballistic
@@ -1246,6 +2111,121 @@ class PingPongControllerNode(Node):
     # ------------------------------------------------------------------
     # Logging / control helpers
     # ------------------------------------------------------------------
+
+    def _ensure_ball_state_estimator(self) -> Optional[BallStateEstimator]:
+        """Lazily build the ball-state estimator from detector outputs.
+
+        Waits until the detector exists and has settled its ``output_frame``
+        so the gravity vector and the anisotropic depth-noise rotation match
+        the space position/velocity arrive in. Returns the cached estimator,
+        or ``None`` if the detector is not ready yet.
+        """
+        if self._ball_estimator is not None:
+            return self._ball_estimator
+        if self.detector is None:
+            return None
+
+        output_frame = getattr(self.detector, 'output_frame', 'camera')
+        if output_frame == 'base_link':
+            gravity = estimator_gravity_for_base_link()
+            # R_base_camera rotates camera-frame measurement noise into base.
+            frame_rotation = getattr(self.detector, 'R_base_camera', None)
+        else:
+            gravity = estimator_gravity_for_camera_frame(self.camera_tilt_deg)
+            # Already in camera frame: no rotation needed.
+            frame_rotation = None
+
+        table_z = self.ball_estimator_table_z_mm
+        table_z = None if (table_z is None or not np.isfinite(table_z)) else float(
+            table_z)
+
+        config = BallStateEstimatorConfig(
+            gravity_mm_s2=gravity,
+            r_lateral_mm=self.ball_estimator_r_lateral_mm,
+            r_depth_mm=self.ball_estimator_r_depth_mm,
+            max_extrapolation_s=self.ball_estimator_max_extrapolation_s,
+            trust_loss_s=self.ball_estimator_trust_loss_s,
+            degrade_loss_s=self.ball_estimator_degrade_loss_s,
+            invalid_after_s=self.ball_estimator_invalid_after_s,
+            prediction_horizon_s=self.ball_estimator_prediction_horizon_s,
+            enable_aero_drag=self.ball_estimator_enable_aero_drag,
+            drag_k_per_mm=self.ball_estimator_drag_k_per_mm,
+            enable_magnus=self.ball_estimator_enable_magnus,
+            magnus_k=self.ball_estimator_magnus_k,
+            table_z_mm=table_z,
+        )
+        self._ball_estimator = BallStateEstimator(
+            config, frame_rotation=frame_rotation)
+        self.get_logger().info(
+            'Ball-state estimator enabled: '
+            f'frame={output_frame}, gravity_mm_s2={gravity}, '
+            f'max_extrap={self.ball_estimator_max_extrapolation_s:.3f}s, '
+            f'loss(trust/degrade/invalid)='
+            f'{self.ball_estimator_trust_loss_s:.2f}/'
+            f'{self.ball_estimator_degrade_loss_s:.2f}/'
+            f'{self.ball_estimator_invalid_after_s:.2f}s, '
+            f'pred_horizon={self.ball_estimator_prediction_horizon_s:.3f}s '
+            '(0 => execution latency handled by RL actuator model), '
+            f'aero_drag={"on" if self.ball_estimator_enable_aero_drag else "off"}'
+            f'(k={self.ball_estimator_drag_k_per_mm:.3e}/mm), '
+            f'magnus={"on" if self.ball_estimator_enable_magnus else "off"}, '
+            f'table_z_mm={table_z}, '
+            f'R_base_camera={"set" if frame_rotation is not None else "none"}')
+        return self._ball_estimator
+
+    def _feed_ball_state_estimator(self, observation: dict,
+                                   stamp_sec: float) -> None:
+        """Push one REAL detection into the estimator, stamped at t_img.
+
+        Only genuine, non-rejected detections are fused. The detector tags a
+        gated/rejected observation with raw_measurement['filter_rejected'];
+        we skip those so the estimator's own innovation gate sees a clean
+        stream (it has its own outlier handling, but feeding it the detector's
+        own rejects would be redundant noise). A miss simply isn't fed — the
+        estimator ages it out via predict_to() on the control side.
+        """
+        comp = self._ensure_ball_state_estimator()
+        if comp is None:
+            return
+        if not bool(observation.get('detected', False)):
+            return
+        # Skip detector-flagged outliers (innovation gate rejects); the
+        # estimator should fuse only trustworthy measurements.
+        raw = observation.get('raw_measurement') or {}
+        if raw.get('filter_rejected', False):
+            return
+        position = observation.get('position')
+        # Cache the raw measurement (position + its image time) so the 200 Hz
+        # estimator recorder can put each prediction next to the detection it
+        # came from. Done regardless of the fuse below so the debug log shows
+        # the freshest measurement even on the tick it arrives.
+        if self.save_estimator_log:
+            try:
+                # Carry the monocular depth cue (circle radius -> depth) so the
+                # offline analysis can separate "depth wrong" from "pixel wrong"
+                # and compare against the D455 hardware depth later.
+                raw_radius = raw.get('radius_px', float('nan'))
+                raw_depth = raw.get('depth_mm', float('nan'))
+                with self._estimator_log_lock:
+                    self._latest_raw_detection = (
+                        float(stamp_sec),
+                        [float(position[0]), float(position[1]),
+                         float(position[2])],
+                        float(raw_radius) if raw_radius is not None
+                        else float('nan'),
+                        float(raw_depth) if raw_depth is not None
+                        else float('nan'))
+            except (TypeError, IndexError, ValueError):
+                pass
+        try:
+            with self._ball_estimator_lock:
+                comp.update(position, stamp_sec)
+        except Exception as exc:  # noqa: BLE001 - keep callback alive
+            self.get_logger().error(
+                f'Ball-state estimator update failed: {exc}; '
+                'disabling estimator for run')
+            self.enable_ball_state_estimator = False
+            self._ball_estimator = None
 
     def _ensure_fov_loss_compensator(self) -> Optional[FovLossCompensator]:
         """Lazily build the FOV-loss compensator using detector outputs.
@@ -1486,6 +2466,15 @@ class PingPongControllerNode(Node):
                 f'Callback: {callback_hz:.1f} Hz | '
                 f'Detection: NO ({detection_rate:.1f}%)')
 
+    def _stdin_enter_thread(self):
+        """Daemon thread: wait for stdin Enter and set the event."""
+        try:
+            input()  # blocks until Enter
+            self._enter_event.set()
+        except (EOFError, OSError):
+            # Non-TTY / headless: auto-continue
+            self._enter_event.set()
+
     def _control_timer_callback(self):
         """Fixed-rate (control_rate_hz) control loop.
 
@@ -1501,43 +2490,102 @@ class PingPongControllerNode(Node):
         before being published.
         """
         now_wall = time.time()
-        with self._latest_ball_lock:
-            ball_state = self._latest_ball_state
 
-        if ball_state is None:
-            ball_state = BallState(
-                position=np.zeros(3), velocity=np.zeros(3),
-                stamp=self.get_clock().now().to_msg(), valid=False)
-
+        # Phase 0: init-pose ramp (if enabled). Hold at TARGET_DEGREES until
+        # time/tolerance condition is met. Do NOT start the replay clock yet.
         if self._init_pose_active:
             if self._init_pose_start_wall is None:
                 self._init_pose_start_wall = now_wall
             elapsed = now_wall - self._init_pose_start_wall
-            # Once real /joint_states arrives, re-anchor the safety limiter
-            # to the current right-arm position so the first post-init
-            # command does not jump. Called at most once.
             self._maybe_sync_safety_limiter_to_joint_state()
-            # During init, right-arm target is the RL initial posture (the
-            # same thing the limiter was seeded with). This keeps the arm
-            # still while the other units reach TARGET.
+            # Right-arm holds the RL initial posture
             raw_cmd = (
                 self.rl_controller.current_arm_cmd_q().astype(np.float64)
                 if self.rl_controller is not None
                 else np.asarray(target_right_arm_q_rad(), dtype=np.float64)
             )
             self._last_raw_joint_positions = raw_cmd.copy()
-            # Publish only right arm (matching hardware setup where only the
-            # right arm is powered during juggling experiments).
-            self._publish_right_arm_init_pose(raw_cmd, ball_state.stamp)
+            self._publish_right_arm_init_pose(raw_cmd, self.get_clock().now().to_msg())
             time_up = elapsed >= self.init_pose_duration_s
             pose_reached = self._init_pose_reached()
             if time_up or pose_reached:
                 self._init_pose_active = False
                 reason = 'pose_reached' if pose_reached else 'duration_elapsed'
                 self.get_logger().info(
-                    f'Init-pose phase done after {elapsed:.2f}s '
-                    f'({reason}); switching to RL control')
+                    f'Init-pose phase done after {elapsed:.2f}s ({reason})')
+                # Transition to Enter-wait if configured
+                if self._await_enter:
+                    self.get_logger().info(
+                        'Waiting for operator to press Enter before starting RL...')
             return
+
+        # Phase 0.5: Enter-wait (if require_enter_confirm is on). Keep holding
+        # the init pose. Do NOT start the replay clock yet. A daemon thread
+        # listens on stdin and sets _enter_event when Enter is pressed.
+        if self._await_enter:
+            if not self._enter_event.is_set():
+                # Start the input thread once
+                if not self._enter_thread_started:
+                    threading.Thread(target=self._stdin_enter_thread, daemon=True).start()
+                    self._enter_thread_started = True
+                # Prompt once
+                if not self._enter_prompted:
+                    print("\n=== Press Enter to start RL control ===", flush=True)
+                    self._enter_prompted = True
+                # Keep holding the init pose
+                raw_cmd = (
+                    self.rl_controller.current_arm_cmd_q().astype(np.float64)
+                    if self.rl_controller is not None
+                    else np.asarray(target_right_arm_q_rad(), dtype=np.float64)
+                )
+                self._last_raw_joint_positions = raw_cmd.copy()
+                self._publish_right_arm_init_pose(raw_cmd, self.get_clock().now().to_msg())
+                return
+            else:
+                # Enter was pressed; transition to RL
+                self.get_logger().info('Enter pressed, starting RL control')
+                self._await_enter = False  # only log once
+
+                # Reset compensator with current arm position
+                if self.compensator is not None:
+                    try:
+                        current_q, _ = self._get_right_arm_feedback()
+                        if current_q is None and self.rl_controller is not None:
+                            current_q = self.rl_controller.current_arm_cmd_q()
+                        if current_q is not None:
+                            self.compensator.reset(current_q.astype(np.float32))
+                            self.get_logger().info(
+                                '✅ Compensator reset with current arm position')
+                    except Exception as e:
+                        self.get_logger().warn(f'Failed to reset compensator: {e}')
+
+        # NOW start fetching the ball state (so the replay clock only advances
+        # once we're past init + Enter).
+        # Get ball state from different sources based on mode
+        if self.enable_replay_mode:
+            # Replay mode: get ball state from CSV
+            ball_state = self._get_replay_ball_state()
+            if ball_state is None:
+                # Replay finished
+                self.get_logger().info('Replay finished, stopping control timer')
+                self.control_timer.cancel()
+                if self.replay_auto_exit:
+                    self.get_logger().info('Auto-exit enabled, shutting down node')
+                    threading.Thread(target=self._shutdown_after_replay, daemon=True).start()
+                return
+        elif self.enable_sim_ball_input:
+            # Simulation ball input mode: get ball state from simulation topic
+            with self._sim_ball_lock:
+                ball_state = self._sim_ball_state
+        else:
+            # Normal mode: get from vision
+            with self._latest_ball_lock:
+                ball_state = self._latest_ball_state
+
+        if ball_state is None:
+            ball_state = BallState(
+                position=np.zeros(3), velocity=np.zeros(3),
+                stamp=self.get_clock().now().to_msg(), valid=False)
 
         # Phase 2: always run RL, even on invalid detections. The RL
         # policy's hold-last/dropout logic (see RLPolicyController.predict)
@@ -1547,6 +2595,15 @@ class PingPongControllerNode(Node):
         # RL tick does not jump.
         self._maybe_sync_safety_limiter_to_joint_state()
 
+        # When the ball-state estimator is on, replace the (possibly stale,
+        # 60 Hz) cached detection with a fresh state extrapolated to *now*.
+        # This bridges 60->200 Hz and de-ages the measurement past the
+        # perception latency in one step. The graded age it reports overrides
+        # the wall-clock age compute_action would otherwise derive. When off,
+        # ball_state passes through unchanged and age_override stays None.
+        ball_state, ball_age_override = self._resolve_control_ball_state(
+            ball_state)
+
         # Ball-lost failsafe: if the ball has been undetected for longer than
         # the timeout, stop running the RL policy and command the fixed safe
         # init posture instead. The safety limiter ramps the right arm toward
@@ -1555,13 +2612,270 @@ class PingPongControllerNode(Node):
             self._run_ball_lost_failsafe(ball_state.stamp)
             return
 
-        raw_cmd = self.compute_action(ball_state)
+        raw_cmd = self.compute_action(ball_state, age_override=ball_age_override)
         self._last_raw_joint_positions = np.asarray(
             raw_cmd, dtype=np.float64).reshape(-1).copy()
         # Publish RL joint command debug (reflects 200 Hz control cadence).
         self._publish_rl_joint_cmd_debug()
         self._publish_right_arm_command(
             self._last_raw_joint_positions, ball_state.stamp)
+
+    def _resolve_control_ball_state(
+            self, ball_state: BallState) -> 'tuple[BallState, Optional[float]]':
+        """Return the ball state the control loop should act on this tick.
+
+        With the estimator off (default), this is a no-op: the cached detector
+        BallState passes through and the age override is None, so behavior is
+        byte-for-byte the prior path. With the estimator on, we extrapolate the
+        committed filter state to *now* (same clock domain the image stamps
+        live in, so the elapsed time absorbs the perception latency) and return
+        a synthesized BallState plus the estimator's graded age for the policy.
+        """
+        if not self.enable_ball_state_estimator:
+            return ball_state, None
+        est = self._ensure_ball_state_estimator()
+        if est is None:
+            return ball_state, None
+
+        now_time = self.get_clock().now()
+        t_now_sec = now_time.nanoseconds * 1e-9
+        try:
+            with self._ball_estimator_lock:
+                out = est.predict_to(t_now_sec)
+        except Exception as exc:  # noqa: BLE001 - keep control loop alive
+            self.get_logger().error(
+                f'Ball-state estimator predict failed: {exc}; '
+                'disabling estimator for run')
+            self.enable_ball_state_estimator = False
+            self._ball_estimator = None
+            return ball_state, None
+
+        self._maybe_log_ball_estimator_status(est, out)
+        if self.save_estimator_log:
+            self._record_estimator_log(t_now_sec, out)
+
+        if not bool(out.get('valid', False)):
+            # Estimator gave up (loss past invalid_after_s) or never tracked:
+            # report an invalid BallState so the failsafe path takes over.
+            invalid = BallState(
+                position=np.zeros(3), velocity=np.zeros(3),
+                stamp=now_time.to_msg(), valid=False,
+                raw_measurement={'ball_estimator': out})
+            return invalid, None
+
+        est_state = BallState(
+            position=np.array(out['position'], dtype=float),
+            velocity=np.array(out['velocity'], dtype=float),
+            stamp=now_time.to_msg(), valid=True,
+            raw_measurement={'ball_estimator': out})
+        return est_state, float(out.get('age_s', 0.0))
+
+    def _maybe_log_ball_estimator_status(self, est: BallStateEstimator,
+                                         out: dict) -> None:
+        """Throttled visibility into the estimator state and counters."""
+        now_wall = time.time()
+        if (now_wall - self._ball_estimator_log_last_wall
+                < max(self.ball_estimator_log_period_s, 0.1)):
+            return
+        self._ball_estimator_log_last_wall = now_wall
+        diag = est.diagnostics()
+        self.get_logger().info(
+            f'BallEstimator: state={out.get("state")} '
+            f'valid={out.get("valid")} loss={out.get("loss_s", 0.0) * 1e3:.0f}ms '
+            f'extrap={out.get("extrapolation_s", 0.0) * 1e3:.0f}ms '
+            f'age={out.get("age_s", 0.0) * 1e3:.0f}ms '
+            f'acc={diag["updates_accepted"]} rej={diag["updates_rejected"]} '
+            f'reinit={diag["reinits"]} bounce={diag["bounces_detected"]}')
+
+    def _record_estimator_log(self, t_now_sec: float, out: dict) -> None:
+        """Append one 200 Hz estimator row for offline debug (in-memory).
+
+        Each row pairs the estimator's extrapolated/de-aged state at this
+        control tick with the most recent raw 60 Hz detection, so the offline
+        comparison can show how far the bridge moved the state and whether the
+        prediction lined up with the next measurement. Rows are flushed to CSV
+        on shutdown by ``save_estimator_log_file``.
+        """
+        with self._estimator_log_lock:
+            raw = self._latest_raw_detection
+        raw_t = raw[0] if raw is not None else float('nan')
+        raw_p = raw[1] if raw is not None else [float('nan')] * 3
+        # radius_px / depth_mm were appended to the cached tuple so the offline
+        # analysis can separate monocular-depth error from pixel error and
+        # compare against the D455 hardware depth. Tolerate the old 2-field
+        # tuple shape (no radius/depth) so stale caches don't crash.
+        raw_radius = raw[2] if (raw is not None and len(raw) > 2) else float('nan')
+        raw_depth = raw[3] if (raw is not None and len(raw) > 3) else float('nan')
+        pos = out.get('position', [float('nan')] * 3)
+        vel = out.get('velocity', [float('nan')] * 3)
+        row = {
+            't_now': float(t_now_sec),
+            'valid': int(bool(out.get('valid', False))),
+            'predicted': int(bool(out.get('predicted', False))),
+            'state': str(out.get('state', '')),
+            'x_mm': float(pos[0]), 'y_mm': float(pos[1]), 'z_mm': float(pos[2]),
+            'vx_mm_s': float(vel[0]), 'vy_mm_s': float(vel[1]),
+            'vz_mm_s': float(vel[2]),
+            'age_s': float(out.get('age_s', 0.0)),
+            'loss_s': float(out.get('loss_s', 0.0)),
+            'extrapolation_s': float(out.get('extrapolation_s', 0.0)),
+            'clamped': int(bool(out.get('clamped', False))),
+            # Latest raw 60 Hz detection (image-stamped) for side-by-side cmp.
+            'raw_t_img': float(raw_t),
+            'raw_x_mm': float(raw_p[0]), 'raw_y_mm': float(raw_p[1]),
+            'raw_z_mm': float(raw_p[2]),
+            # Monocular depth cue from the detection: circle radius -> depth.
+            'raw_radius_px': float(raw_radius),
+            'raw_depth_mm': float(raw_depth),
+        }
+        with self._estimator_log_lock:
+            self._estimator_log_rows.append(row)
+
+    def save_estimator_log_file(self) -> None:
+        """Write the buffered 200 Hz estimator rows to CSV (called on shutdown)."""
+        if not self.save_estimator_log:
+            return
+        with self._estimator_log_lock:
+            rows = list(self._estimator_log_rows)
+        if not rows:
+            self.get_logger().info(
+                'Estimator log empty; skipping save (was the estimator '
+                'enabled and did the ball get detected?)')
+            return
+        path = self.estimator_log_path
+        if not path:
+            ts = time.strftime('%Y%m%d_%H%M%S')
+            path = os.path.join(
+                self.source_module_dir, 'outputs', 'rl_sim',
+                f'estimator_log_{ts}.csv')
+        path = os.path.expandvars(os.path.expanduser(path))
+        try:
+            out_dir = os.path.dirname(path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            with open(path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+            self.get_logger().info(
+                f'Saved {len(rows)} estimator rows (200 Hz) to: {path}')
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'Failed to save estimator log: {exc}')
+
+    def _record_policy_log(
+            self, ball_pos_m: np.ndarray, ball_vel_m_s: np.ndarray,
+            ball_valid: bool, age_s: float,
+            arm_q: Optional[np.ndarray], arm_dq: Optional[np.ndarray]) -> None:
+        """Append one 200 Hz policy step (obs + action) for offline analysis.
+
+        Records the policy input (observation vector) and output (action vector)
+        at each control tick for comparison against reference traces from
+        simulation validation runs.
+        """
+        if self.rl_controller is None:
+            return
+
+        # Get the latest obs and action from the RL controller
+        try:
+            obs_action = self.rl_controller.latest_obs_and_action()
+            obs = obs_action['obs']
+            action = obs_action['action']
+        except Exception:  # noqa: BLE001
+            return
+
+        # Build the row with metadata + obs + action
+        row = {
+            'step': int(self._policy_step_counter),
+            'time_sec': float(self._policy_step_counter * self.control_dt),
+            'ball_valid': int(ball_valid),
+            'ball_age_s': float(age_s),
+            'ball_pos_x_m': float(ball_pos_m[0]),
+            'ball_pos_y_m': float(ball_pos_m[1]),
+            'ball_pos_z_m': float(ball_pos_m[2]),
+            'ball_vel_x_m_s': float(ball_vel_m_s[0]),
+            'ball_vel_y_m_s': float(ball_vel_m_s[1]),
+            'ball_vel_z_m_s': float(ball_vel_m_s[2]),
+        }
+
+        # Add arm feedback if available
+        if arm_q is not None:
+            for i, joint_name in enumerate(
+                    ['RightArm-0', 'RightArm-1', 'RightArm-2',
+                     'RightArm-3', 'RightArm-4', 'RightArm-5', 'RightArm-6']):
+                row[f'arm_q/{joint_name}'] = float(arm_q[i])
+        else:
+            for joint_name in ['RightArm-0', 'RightArm-1', 'RightArm-2',
+                               'RightArm-3', 'RightArm-4', 'RightArm-5', 'RightArm-6']:
+                row[f'arm_q/{joint_name}'] = float('nan')
+
+        if arm_dq is not None:
+            for i, joint_name in enumerate(
+                    ['RightArm-0', 'RightArm-1', 'RightArm-2',
+                     'RightArm-3', 'RightArm-4', 'RightArm-5', 'RightArm-6']):
+                row[f'arm_dq/{joint_name}'] = float(arm_dq[i])
+        else:
+            for joint_name in ['RightArm-0', 'RightArm-1', 'RightArm-2',
+                               'RightArm-3', 'RightArm-4', 'RightArm-5', 'RightArm-6']:
+                row[f'arm_dq/{joint_name}'] = float('nan')
+
+        # Add observation vector (obs/000, obs/001, ...)
+        for i in range(len(obs)):
+            row[f'obs/{i:03d}'] = float(obs[i])
+
+        # Add action vector
+        for i, joint_name in enumerate(
+                ['RightArm-0', 'RightArm-1', 'RightArm-2',
+                 'RightArm-3', 'RightArm-4', 'RightArm-5', 'RightArm-6']):
+            row[f'action/{joint_name}'] = float(action[i])
+
+        with self._policy_log_lock:
+            self._policy_log_rows.append(row)
+        self._policy_step_counter += 1
+
+    def save_policy_log_file(self) -> None:
+        """Write the buffered 200 Hz policy rows to CSV (called on shutdown)."""
+        if not self.save_policy_log:
+            return
+        with self._policy_log_lock:
+            rows = list(self._policy_log_rows)
+        if not rows:
+            self.get_logger().info(
+                'Policy log empty; skipping save (was the RL policy enabled?)')
+            return
+        path = self.policy_log_path
+        if not path:
+            ts = time.strftime('%Y%m%d_%H%M%S')
+            path = os.path.join(
+                self.source_module_dir, 'outputs', 'rl_sim',
+                f'policy_obs_trace_{ts}.csv')
+        path = os.path.expandvars(os.path.expanduser(path))
+        try:
+            out_dir = os.path.dirname(path)
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
+            with open(path, 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                writer.writeheader()
+                writer.writerows(rows)
+            self.get_logger().info(
+                f'Saved {len(rows)} policy rows (200 Hz) to: {path}')
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'Failed to save policy log: {exc}')
+
+    def _shutdown_after_replay(self) -> None:
+        """Shutdown node gracefully after replay completes (called in a thread)."""
+        import time
+        # Give the control loop a moment to finish cleanly
+        time.sleep(0.5)
+        # Save logs before shutting down
+        self.save_estimator_log_file()
+        self.save_policy_log_file()
+        # Request shutdown
+        try:
+            rclpy.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+
 
     def _should_engage_ball_lost_failsafe(
             self, ball_state: BallState, now_wall: float) -> bool:
@@ -1708,6 +3022,273 @@ class PingPongControllerNode(Node):
             dq = None
         return q, dq
 
+    # ------------------------------------------------------------------
+    # Replay mode helpers
+    # ------------------------------------------------------------------
+
+    def _init_compensator(self):
+        """Initialize actuator delay compensator.
+
+        The compensator pre-distorts joint commands to cancel the real actuator's
+        transport delay + first-order lag. This must match the compensation used
+        during training (inverse_mpc with 72ms delay, tau=0.074s).
+        """
+        self.compensator = None
+
+        enable_comp = bool(self.get_parameter('enable_compensation').value)
+
+        if not enable_comp:
+            self.get_logger().info('Actuator compensation DISABLED')
+            return
+
+        if not _COMPENSATION_AVAILABLE or CommandCompensator is None:
+            self.get_logger().error(
+                'CommandCompensator not available (pingpong_replay not installed). '
+                'Actuator compensation DISABLED.')
+            return
+
+        if self.rl_controller is None:
+            self.get_logger().warn(
+                'Cannot initialize compensator: RL controller not available')
+            return
+
+        try:
+            # Get compensation parameters from ROS params
+            comp_mode = str(self.get_parameter('compensation_mode').value)
+
+            # Get joint limits from RL controller
+            q_low = self.rl_controller.arm_q_low
+            q_high = self.rl_controller.arm_q_high
+
+            self.compensator = CommandCompensator(
+                n_joints=7,
+                dt=self.control_dt,
+                mode=comp_mode,
+                delay_ms=float(self.get_parameter('comp_delay_ms').value),
+                actuator_tau_s=float(self.get_parameter('comp_actuator_tau_s').value),
+                actuator_gain=float(self.get_parameter('comp_actuator_gain').value),
+                command_buffer_extra_steps=int(
+                    self.get_parameter('comp_buffer_extra_steps').value),
+                delay_conditioning=bool(
+                    self.get_parameter('comp_delay_conditioning').value),
+                # inverse-MPC parameters
+                mpc_beta=float(self.get_parameter('comp_mpc_beta').value),
+                mpc_delay_scale=float(self.get_parameter('comp_mpc_delay_scale').value),
+                mpc_tau_scale=float(self.get_parameter('comp_mpc_tau_scale').value),
+                mpc_horizon_steps=int(self.get_parameter('comp_mpc_horizon_steps').value),
+                mpc_tracking_weight=float(
+                    self.get_parameter('comp_mpc_tracking_weight').value),
+                mpc_nominal_weight=float(
+                    self.get_parameter('comp_mpc_nominal_weight').value),
+                mpc_delta_weight=float(self.get_parameter('comp_mpc_delta_weight').value),
+                mpc_max_delta_rad=float(
+                    self.get_parameter('comp_mpc_max_delta_rad').value),
+                q_low=q_low,
+                q_high=q_high,
+            )
+
+            self.get_logger().info(
+                f'✅ Actuator compensation initialized: mode={comp_mode}, '
+                f'delay={self.compensator.delay_ms:.1f}ms, '
+                f'tau={self.compensator.actuator_tau_s:.3f}s, '
+                f'buffer_len={self.compensator.command_buffer_len}')
+
+        except Exception as e:
+            self.get_logger().error(
+                f'Failed to initialize compensator: {e}')
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+            self.compensator = None
+
+    def _init_replay_mode(self):
+        """Initialize replay mode: load CSV data."""
+        import pandas as pd
+
+        if not self.replay_csv_path:
+            self.get_logger().error('Replay mode enabled but replay_csv_path is empty!')
+            self.enable_replay_mode = False
+            return
+
+        try:
+            self._replay_data = pd.read_csv(self.replay_csv_path)
+            self._replay_idx = 0
+            self._replay_start_time = None
+
+            self.get_logger().info(
+                f'✅ Replay mode enabled: loaded {len(self._replay_data)} frames from {self.replay_csv_path}')
+            self.get_logger().info(
+                f'   Duration: {self._replay_data["t_rel"].max():.2f}s, '
+                f'Loop: {self.replay_loop}')
+
+            # FIX: Initialize RL controller state from replay data to match MJX
+            # validation baseline. This ensures the first observation uses actual
+            # values instead of zeros, matching the MJX environment's reset().
+            if self.enable_rl_policy and self.rl_controller is not None:
+                self._init_rl_controller_from_replay_data()
+
+        except Exception as e:
+            self.get_logger().error(f'Failed to load replay CSV: {e}')
+            self.enable_replay_mode = False
+
+    def _init_rl_controller_from_replay_data(self):
+        """Initialize RL controller state from the first frame of replay data.
+
+        This matches how MJX environment initializes at reset(), ensuring the
+        first predict() call produces observations identical to the validation
+        baseline rather than using default zero-initialized states.
+        """
+        self.get_logger().info('🔧 Attempting to initialize RL controller from MJX reference data...')
+
+        if self._replay_data is None or len(self._replay_data) == 0:
+            self.get_logger().warn('Replay data is None or empty, skipping RL controller initialization')
+            return
+
+        # CRITICAL: The replay CSV (mjx_ball_replay.csv) only contains ball state,
+        # NOT joint velocities. We need to load from the reference observation CSV
+        # to get the initial joint velocities for proper initialization.
+
+        # Load reference observation trace that contains full state
+        # Try multiple possible paths (source vs install)
+        module_dir = os.path.dirname(__file__)
+        source_module_dir = self._resolve_source_module_dir(module_dir)
+
+        reference_obs_path = os.path.join(
+            source_module_dir,
+            'data/rl_sim/validate_obs_trace/validate_obs_trace.csv'
+        )
+
+        if not os.path.isfile(reference_obs_path):
+            self.get_logger().warn(
+                f'Reference observation trace not found: {reference_obs_path}. '
+                'Cannot initialize joint velocities from MJX baseline.')
+            return
+
+        try:
+            import pandas as pd
+            reference_df = pd.read_csv(reference_obs_path)
+            first_row = reference_df.iloc[0]
+
+            # Initialize joint velocity estimate from MJX validation data
+            # This avoids the 5-7 step finite-difference warmup delay
+            arm_dq_cols = [f'obs_arm_dq_rad_s/RightArm-{i}' for i in range(7)]
+            if all(col in reference_df.columns for col in arm_dq_cols):
+                initial_dq = np.array([
+                    first_row[col] for col in arm_dq_cols
+                ], dtype=np.float32)
+
+                # Directly set the attribute (lock not yet created during __init__)
+                self._estimated_right_arm_dq = initial_dq
+                self.get_logger().info(
+                    f'✅ Initialized arm velocities from MJX reference (rad/s): '
+                    f'{np.round(initial_dq, 4).tolist()}')
+            else:
+                self.get_logger().warn(
+                    'Reference CSV missing obs_arm_dq_rad_s columns. '
+                    'Joint velocity initialization skipped.')
+
+            # Initialize joint position estimate as well for consistency
+            arm_q_cols = [f'obs_arm_q_rad/RightArm-{i}' for i in range(7)]
+            if all(col in reference_df.columns for col in arm_q_cols):
+                initial_q = np.array([
+                    first_row[col] for col in arm_q_cols
+                ], dtype=np.float32)
+
+                # Directly set the attributes (lock not yet created during __init__)
+                self._prev_right_arm_q_for_dq = initial_q.copy()
+                self._prev_right_arm_stamp_for_dq = time.time()
+
+                self.get_logger().info(
+                    f'✅ Initialized arm positions from MJX reference (rad): '
+                    f'{np.round(initial_q, 4).tolist()}')
+
+            self.get_logger().info(
+                '✅ RL controller state initialized from MJX validation baseline')
+
+        except Exception as e:
+            self.get_logger().error(
+                f'Failed to initialize from reference observation trace: {e}')
+            import traceback
+            self.get_logger().error(traceback.format_exc())
+
+    def _init_sim_ball_input(self):
+        """Initialize simulation ball state input: subscribe to sim ball topic."""
+        from nav_msgs.msg import Odometry
+
+        self.create_subscription(
+            Odometry,
+            self.sim_ball_topic,
+            self._sim_ball_callback,
+            10
+        )
+        self.get_logger().info(
+            f'✅ Simulation ball input enabled: subscribing to "{self.sim_ball_topic}"')
+
+    def _sim_ball_callback(self, msg) -> None:
+        """Callback for simulation ball state (Odometry message)."""
+        # Extract position (in meters, convert to mm for consistency)
+        pos_mm = np.array([
+            msg.pose.pose.position.x * 1000.0,
+            msg.pose.pose.position.y * 1000.0,
+            msg.pose.pose.position.z * 1000.0
+        ], dtype=np.float32)
+
+        # Extract velocity (in m/s, convert to mm/s)
+        vel_mm_s = np.array([
+            msg.twist.twist.linear.x * 1000.0,
+            msg.twist.twist.linear.y * 1000.0,
+            msg.twist.twist.linear.z * 1000.0
+        ], dtype=np.float32)
+
+        # Create BallState
+        ball_state = BallState(
+            position=pos_mm,
+            velocity=vel_mm_s,
+            stamp=msg.header.stamp,
+            valid=True
+        )
+
+        with self._sim_ball_lock:
+            self._sim_ball_state = ball_state
+
+    def _get_replay_ball_state(self) -> Optional[BallState]:
+        """Generate BallState from replay CSV data."""
+        if self._replay_data is None or len(self._replay_data) == 0:
+            return None
+
+        # Initialize start time on first call
+        if self._replay_start_time is None:
+            self._replay_start_time = time.time()
+
+        # Calculate current replay time
+        elapsed = time.time() - self._replay_start_time
+
+        # Handle loop mode
+        duration = self._replay_data['t_rel'].max()
+        if elapsed > duration:
+            if self.replay_loop:
+                elapsed = elapsed % duration
+                self._replay_idx = 0
+            else:
+                # Replay finished
+                return None
+
+        # Find the closest frame
+        df = self._replay_data
+        idx = (df['t_rel'] - elapsed).abs().argmin()
+        row = df.iloc[idx]
+
+        # Create BallState with current ROS time
+        now_time = self.get_clock().now()
+        state = BallState(
+            valid=bool(row['valid']),
+            position=np.array([row['x_mm'], row['y_mm'], row['z_mm']], dtype=np.float64),
+            velocity=np.array([row['vx_mm_s'], row['vy_mm_s'], row['vz_mm_s']], dtype=np.float64),
+            stamp=now_time.to_msg(),
+        )
+
+        self._replay_idx = idx
+        return state
+
     def _init_pose_reached(self) -> bool:
         """True when every non-base joint is within tolerance of TARGET.
 
@@ -1757,7 +3338,8 @@ class PingPongControllerNode(Node):
             'Safety limiter anchored to real right-arm /joint_states '
             f'(deg={np.rad2deg(q).round(2).tolist()})')
 
-    def compute_action(self, ball_state: BallState) -> np.ndarray:
+    def compute_action(self, ball_state: BallState,
+                       age_override: Optional[float] = None) -> np.ndarray:
         """Compute right-arm joint targets (rad) using the RL policy.
 
         Always invoked from the control timer, including when the detection
@@ -1765,24 +3347,54 @@ class PingPongControllerNode(Node):
         observation internally and reports the age, matching the training
         env's dropout/hold-last behavior. The safety limiter, not this
         function, is responsible for clamping the output before publish.
+
+        ``age_override`` (seconds), when provided, is the ball-observation age
+        the policy should see. The ball-state estimator passes its graded age
+        here: a freshly de-aged extrapolation reports ~0, and a stale one
+        reports a growing age so the policy discounts it. When None (estimator
+        off) the age is derived from the wall-clock gap exactly as before.
         """
         if not self.enable_rl_policy or self.rl_controller is None:
             return self._last_raw_joint_positions.astype(np.float64)
 
         now_wall = time.time()
         if ball_state.valid:
-            age_s = 0.0
+            # A valid ball (real detection or trusted estimator extrapolation)
+            # refreshes the loss clock the failsafe reads.
             self._last_valid_ball_wall_time = now_wall
+            age_s = age_override if age_override is not None else 0.0
+        elif age_override is not None:
+            age_s = age_override
         elif self._last_valid_ball_wall_time is not None:
             age_s = max(0.0, now_wall - self._last_valid_ball_wall_time)
         else:
             age_s = self.rl_ball_obs_age_clip
+        age_s = float(max(0.0, age_s))
 
         # BallState carries mm / mm/s; the RL policy expects m / m/s.
         ball_pos_m = np.asarray(
             ball_state.position, dtype=np.float32) * 1e-3
         ball_vel_m_s = np.asarray(
             ball_state.velocity, dtype=np.float32) * 1e-3
+
+        # CRITICAL: Transform ball coordinates from real system (base_link) to
+        # simulation frame to match training observations.
+        #
+        # Simulation coordinate system (MJX):
+        #   - Uses _point_to_base() which returns [x_rel, y_rel, z_world]
+        #   - x, y: relative to base, rotated by yaw
+        #   - z: ABSOLUTE world frame z (NOT relative to base!)
+        #
+        # Real system coordinate system:
+        #   - Ball position is in base_link frame via T_base_camera transform
+        #   - x, y, z: ALL relative to base_link origin
+        #
+        # The issue: simulation's z is world-absolute (~1.4m), real's z is
+        # base-relative (~-0.4m). From data analysis:
+        #   base_z_in_world ≈ 1.75m (base_link origin height in world frame)
+        #
+        # Transform: z_sim = z_real + BASE_HEIGHT_IN_WORLD
+        ball_pos_m = self._transform_ball_pos_to_sim_frame(ball_pos_m)
 
         # Real right-arm feedback for the RL observation. If it's missing,
         # predict() falls back to arm_cmd_q/arm_cmd_qvel internally, which
@@ -1806,6 +3418,13 @@ class PingPongControllerNode(Node):
                 arm_q=right_arm_q,
                 arm_dq=right_arm_dq,
             )
+
+            # Record policy obs and action for debugging
+            if self.save_policy_log:
+                self._record_policy_log(
+                    ball_pos_m, ball_vel_m_s, ball_state.valid,
+                    age_s, right_arm_q, right_arm_dq)
+
         except Exception as exc:
             self.get_logger().error(
                 f'RL policy predict failed: {exc}; '
@@ -1821,6 +3440,34 @@ class PingPongControllerNode(Node):
                 'returning last raw command',
                 throttle_duration_sec=1.0)
             return self._last_raw_joint_positions.astype(np.float64)
+
+        # Apply actuator delay compensation if enabled.
+        # This pre-distorts the nominal command to cancel the real actuator's
+        # transport delay + first-order lag, matching what the training env did.
+        if self.compensator is not None and self.compensator.enabled:
+            try:
+                # Get nominal command derivatives from RL controller
+                cmd_state = self.rl_controller.latest_command_state()
+                nominal_qvel = cmd_state['velocity']
+                nominal_qdd = cmd_state['acceleration']
+
+                # Get actual feedback (or use nominal if not available)
+                actual_q, _ = self._get_right_arm_feedback()
+                applied_q = (actual_q if actual_q is not None
+                            else joint_cmd)
+
+                # Apply compensation
+                joint_cmd = self.compensator.step(
+                    q_cmd=joint_cmd.astype(np.float32),
+                    qdot_cmd=nominal_qvel,
+                    qdd_cmd=nominal_qdd,
+                    applied_q=applied_q.astype(np.float32),
+                ).astype(np.float64)
+
+            except Exception as e:
+                self.get_logger().error(
+                    f'Compensation failed: {e}; using uncompensated command',
+                    throttle_duration_sec=1.0)
 
         return joint_cmd
 
@@ -1866,9 +3513,16 @@ class PingPongControllerNode(Node):
             return
 
         raw = np.asarray(joint_positions, dtype=np.float64).reshape(-1)
-        safe_cmd = self.safety_limiter.filter(raw)
+
+        # Apply safety limiter if enabled
+        if self.enable_safety_limiter:
+            safe_cmd = self.safety_limiter.filter(raw)
+            self._maybe_log_safety_counts()
+        else:
+            # Bypass safety limiter - use raw command directly
+            safe_cmd = raw.copy()
+
         self._last_safe_joint_positions = safe_cmd.copy()
-        self._maybe_log_safety_counts()
 
         cmd = self._make_unit_cmd(self.right_arm_mu_idx, safe_cmd.tolist())
         self._publish_cmd_array([cmd], stamp)
@@ -1916,9 +3570,16 @@ class PingPongControllerNode(Node):
             return
 
         raw = np.asarray(right_arm_raw_q, dtype=np.float64).reshape(-1)
-        safe_cmd = self.safety_limiter.filter(raw)
+
+        # Apply safety limiter if enabled
+        if self.enable_safety_limiter:
+            safe_cmd = self.safety_limiter.filter(raw)
+            self._maybe_log_safety_counts()
+        else:
+            # Bypass safety limiter - use raw command directly
+            safe_cmd = raw.copy()
+
         self._last_safe_joint_positions = safe_cmd.copy()
-        self._maybe_log_safety_counts()
 
         cmds = [
             self._make_unit_cmd(self.right_arm_mu_idx, safe_cmd.tolist()),
@@ -2186,20 +3847,30 @@ class PingPongControllerNode(Node):
     # writer thread does the encoding so the reader never blocks on disk.
     # ------------------------------------------------------------------
 
-    def _enqueue_raw_video_frame(self, raw_bgr: np.ndarray) -> None:
-        """Hand one raw RealSense frame to the raw-video writer thread.
+    def _enqueue_raw_video_frame(self, raw_bgr: np.ndarray,
+                                 depth_image: np.ndarray = None,
+                                 ir_image: np.ndarray = None,
+                                 t_capture: float = None) -> None:
+        """Hand one raw RealSense frame bundle to the writer thread.
 
-        Called from the RealSense reader loop. O(1) non-blocking: copies the
-        frame (the RealSense buffer is recycled after the callback) and pushes
-        it onto the writer queue, dropping the frame only if the queue is full
-        (disk/encoder can't keep up).
+        Called from the RealSense/hybrid reader loop. O(1) non-blocking: copies
+        the frame(s) (the RealSense buffer is recycled after the callback) and
+        pushes them onto the writer queue as one bundle, dropping the whole
+        bundle only if the queue is full (disk/encoder can't keep up). Bundling
+        RGB+depth+IR+timestamp keeps their frame indices locked together.
         """
         if self._raw_video_writer_thread is None:
             self._start_raw_video_writer_thread()
         if self._raw_video_queue is None:
             return
+        item = {
+            'bgr': raw_bgr.copy(),
+            'depth': depth_image.copy() if depth_image is not None else None,
+            'ir': ir_image.copy() if ir_image is not None else None,
+            't_capture': t_capture,
+        }
         try:
-            self._raw_video_queue.put(raw_bgr.copy(), block=False)
+            self._raw_video_queue.put(item, block=False)
         except Full:
             self.get_logger().warn(
                 f'Raw video queue full ({self._raw_video_queue_max_size} '
@@ -2219,11 +3890,11 @@ class PingPongControllerNode(Node):
         self.get_logger().info('Raw video writer thread started')
 
     def _raw_video_writer_loop(self) -> None:
-        """Dedicated thread: drain the queue and encode raw frames."""
+        """Dedicated thread: drain the queue and encode raw frame bundles."""
         while self._raw_video_writer_running:
             try:
-                frame = self._raw_video_queue.get(timeout=0.1)
-                self._write_raw_video_frame(frame)
+                item = self._raw_video_queue.get(timeout=0.1)
+                self._write_raw_video_frame(item)
             except Empty:
                 continue
             except Exception as exc:  # noqa: BLE001 - keep node alive
@@ -2233,13 +3904,23 @@ class PingPongControllerNode(Node):
                 self._raw_video_disabled_runtime = True
                 break
 
-    def _write_raw_video_frame(self, raw_bgr: np.ndarray) -> None:
-        """Open the raw writer lazily and append one BGR frame.
+    def _write_raw_video_frame(self, item) -> None:
+        """Open the writers lazily and append one RGB(+depth+timestamp) bundle.
 
         Runs on the raw-video writer thread. The first frame fixes resolution
         and fps for the whole file. Any failure disables raw recording for the
-        rest of the run without killing the thread.
+        rest of the run without killing the thread. ``item`` is the bundle dict
+        produced by ``_enqueue_raw_video_frame`` (or a bare ndarray for
+        backward-compat). RGB, depth, and timestamp share one frame index
+        (``_recording_index``) so the offline tool pairs them positionally.
         """
+        if isinstance(item, dict):
+            raw_bgr = item.get('bgr')
+            depth_image = item.get('depth')
+            ir_image = item.get('ir')
+            t_capture = item.get('t_capture')
+        else:  # backward-compat: a bare BGR frame
+            raw_bgr, depth_image, ir_image, t_capture = item, None, None, None
         if raw_bgr is None or raw_bgr.size == 0:
             return
         height, width = raw_bgr.shape[:2]
@@ -2257,7 +3938,16 @@ class PingPongControllerNode(Node):
                     return
             try:
                 self._raw_video_writer.write(frame)
+                idx = self._recording_index
+                # Depth + IR + timestamp sidecars, keyed by this RGB frame index.
+                if self.save_depth_frames and not self._depth_disabled_runtime:
+                    self._write_depth_sidecar(idx, depth_image)
+                if self.save_ir_frames and not self._ir_disabled_runtime:
+                    self._write_ir_sidecar(idx, ir_image)
+                if t_capture is not None:
+                    self._write_timestamp_sidecar(idx, t_capture)
                 self._raw_video_frames_written += 1
+                self._recording_index += 1
             except Exception as exc:  # noqa: BLE001 - keep thread alive
                 self.get_logger().warn(
                     f'Raw video write failed: {exc}; disabling raw recording',
@@ -2318,7 +4008,147 @@ class PingPongControllerNode(Node):
         self.get_logger().info(
             f'Recording raw video -> {path} '
             f'({width}x{height}@{fps:.1f} fps)')
+        if not self._open_recording_sidecars(path):
+            # Sidecar failure must not kill RGB recording; just disable depth.
+            self.save_depth_frames = False
+            self._depth_disabled_runtime = True
         return True
+
+    def _open_recording_sidecars(self, video_path: str) -> bool:
+        """Create the timestamp CSV and depth-frame dir next to the raw video.
+
+        The depth directory and the timestamp CSV are named from the raw video
+        stem so a recording's three artifacts (``*.mp4``, ``*_timestamps.csv``,
+        ``*_depth/``) stay grouped. Caller holds ``_raw_video_lock``. The
+        timestamp CSV is always opened (it costs nothing and helps the offline
+        replay even for RGB-only runs); the depth dir only when recording depth.
+        Returns False only on a depth-dir failure the caller should act on.
+        """
+        stem = os.path.splitext(video_path)[0]
+        # Per-frame timestamp sidecar (always; one row per written RGB frame).
+        try:
+            self._timestamps_csv_path = stem + '_timestamps.csv'
+            self._timestamps_file = open(
+                self._timestamps_csv_path, 'w', buffering=1)
+            self._timestamps_file.write('frame_idx,t_capture_sec\n')
+        except OSError as exc:
+            self.get_logger().warn(
+                f'Cannot open timestamp sidecar {self._timestamps_csv_path}: '
+                f'{exc}; offline replay will fall back to constant fps')
+            self._timestamps_file = None
+            self._timestamps_csv_path = None
+        # Depth frame directory (only when recording hardware depth).
+        if self.save_depth_frames:
+            self._depth_frames_dir = stem + '_depth'
+            try:
+                os.makedirs(self._depth_frames_dir, exist_ok=True)
+                self._depth_frames_written = 0
+                self.get_logger().info(
+                    f'Recording aligned depth frames -> '
+                    f'{self._depth_frames_dir}/ (16-bit .npy per frame)')
+            except OSError as exc:
+                self.get_logger().error(
+                    f'Cannot create depth frame dir {self._depth_frames_dir}: '
+                    f'{exc}; depth recording disabled')
+                self._depth_frames_dir = None
+                return False
+        # IR frame directory + camera_params JSON (only in hybrid IR recording).
+        if self.save_ir_frames:
+            self._ir_frames_dir = stem + '_ir'
+            try:
+                os.makedirs(self._ir_frames_dir, exist_ok=True)
+                self._ir_frames_written = 0
+                self.get_logger().info(
+                    f'Recording IR frames -> '
+                    f'{self._ir_frames_dir}/ (uint8 .npy per frame)')
+            except OSError as exc:
+                self.get_logger().error(
+                    f'Cannot create IR frame dir {self._ir_frames_dir}: '
+                    f'{exc}; IR recording disabled')
+                self._ir_frames_dir = None
+                self._ir_disabled_runtime = True
+            self._write_camera_params_sidecar(stem)
+        return True
+
+    def _write_camera_params_sidecar(self, stem: str) -> None:
+        """Dump the hybrid detector's intrinsics/extrinsics to <stem>_camera_params.json.
+
+        Written once. The offline hybrid tool rebuilds rs.intrinsics /
+        rs.extrinsics from this so its projection math matches the live run.
+        Requires the hybrid detector (which owns the IR/RGB intrinsics and the
+        IR->RGB extrinsics read from the live RealSense profile).
+        """
+        if self._camera_params_written:
+            return
+        inner = getattr(self.detector, 'detector', None)
+        if inner is None or not hasattr(inner, 'export_camera_params'):
+            self.get_logger().warn(
+                'save_ir_frames set but detector has no export_camera_params; '
+                'offline hybrid replay will be missing camera_params JSON.')
+            return
+        try:
+            params = inner.export_camera_params()
+            path = stem + '_camera_params.json'
+            with open(path, 'w') as fh:
+                json.dump(params, fh, indent=2)
+            self._camera_params_written = True
+            self.get_logger().info(f'Wrote camera params -> {path}')
+        except Exception as exc:  # noqa: BLE001 - non-fatal for recording
+            self.get_logger().warn(
+                f'Failed to write camera_params JSON: {exc}; offline hybrid '
+                'replay will be missing it.')
+
+    def _write_ir_sidecar(self, idx: int, ir_image) -> None:
+        """Save one IR frame as ``ir_<idx>.npy``. Holds the lock.
+
+        A missing IR frame is skipped (no file); the offline tool treats an
+        absent ir_<idx>.npy as 'no detection this frame' so indices stay aligned
+        with the RGB video.
+        """
+        if self._ir_frames_dir is None or ir_image is None:
+            return
+        try:
+            np.save(
+                os.path.join(self._ir_frames_dir, f'ir_{idx:06d}.npy'),
+                np.ascontiguousarray(ir_image))
+            self._ir_frames_written += 1
+        except Exception as exc:  # noqa: BLE001 - keep recording alive
+            self.get_logger().warn(
+                f'IR frame write failed at idx {idx}: {exc}; '
+                'disabling IR recording',
+                throttle_duration_sec=2.0)
+            self._ir_disabled_runtime = True
+
+    def _write_depth_sidecar(self, idx: int, depth_image) -> None:
+        """Save one aligned depth frame as ``depth_<idx>.npy``. Holds the lock.
+
+        A missing depth frame (transient align failure) is written as an empty
+        marker so the frame index stays aligned with the RGB video; the offline
+        tool treats a zero-size / absent depth frame as 'no hardware depth this
+        frame' and falls back to monocular.
+        """
+        if self._depth_frames_dir is None or depth_image is None:
+            return
+        try:
+            np.save(
+                os.path.join(self._depth_frames_dir, f'depth_{idx:06d}.npy'),
+                np.ascontiguousarray(depth_image))
+            self._depth_frames_written += 1
+        except Exception as exc:  # noqa: BLE001 - keep recording alive
+            self.get_logger().warn(
+                f'Depth frame write failed at idx {idx}: {exc}; '
+                'disabling depth recording',
+                throttle_duration_sec=2.0)
+            self._depth_disabled_runtime = True
+
+    def _write_timestamp_sidecar(self, idx: int, t_capture: float) -> None:
+        """Append one ``frame_idx,t_capture_sec`` row. Caller holds the lock."""
+        if self._timestamps_file is None:
+            return
+        try:
+            self._timestamps_file.write(f'{idx},{t_capture:.6f}\n')
+        except Exception:  # noqa: BLE001 - non-fatal; stop timestamp logging
+            self._timestamps_file = None
 
     def _release_raw_video_writer_locked(self) -> None:
         """Release the raw writer and log a summary. Caller holds the lock."""
@@ -2337,6 +4167,21 @@ class PingPongControllerNode(Node):
             self.get_logger().warn(
                 'Raw video recording produced no frames; file may be empty: '
                 f'{self._raw_video_path_resolved}')
+        # Close the depth + timestamp sidecars in lockstep with the video.
+        if self._timestamps_file is not None:
+            try:
+                self._timestamps_file.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._timestamps_file = None
+        if self._depth_frames_dir is not None:
+            self.get_logger().info(
+                f'Saved aligned depth frames: {self._depth_frames_dir}/ '
+                f'({self._depth_frames_written} frames)')
+        if self._ir_frames_dir is not None:
+            self.get_logger().info(
+                f'Saved IR frames: {self._ir_frames_dir}/ '
+                f'({self._ir_frames_written} frames)')
 
     def _stop_raw_video_recording(self) -> None:
         """Stop the raw writer thread, flush the queue, finalize the file."""
@@ -2352,10 +4197,10 @@ class PingPongControllerNode(Node):
                         f'Flushing {remaining} remaining raw video frames...')
                 while True:
                     try:
-                        frame = self._raw_video_queue.get_nowait()
+                        item = self._raw_video_queue.get_nowait()
                     except Empty:
                         break
-                    self._write_raw_video_frame(frame)
+                    self._write_raw_video_frame(item)
             self._raw_video_writer_thread = None
             self._raw_video_queue = None
         with self._raw_video_lock:
@@ -2370,6 +4215,10 @@ class PingPongControllerNode(Node):
         draw identical overlays. All node-specific state (frame counters,
         callback rate, output frame) is gathered here and passed in.
         """
+        # Hybrid detector已经完成渲染，直接返回
+        if observation.get('_hybrid_viz_rendered', False):
+            return frame
+
         if len(self.callback_times) > 0:
             avg_dt = sum(self.callback_times) / len(self.callback_times)
             callback_hz = 1.0 / avg_dt if avg_dt > 0 else 0.0
@@ -2440,6 +4289,41 @@ class PingPongControllerNode(Node):
         msg.effort = state["acceleration"].astype(float).tolist()
         self.rl_joint_cmd_state_pub.publish(msg)
 
+    def _transform_ball_pos_to_sim_frame(self, ball_pos_m: np.ndarray) -> np.ndarray:
+        """Transform ball position from real base_link frame to simulation frame.
+
+        Coordinate system difference (from code analysis):
+
+        Simulation (mjx_juggle_env._point_to_base):
+            def _point_to_base(self, point, base_q):
+                ...
+                return jnp.stack([x_rot, y_rot, point[:, 2]], axis=-1)
+                                                  ^^^^^^^^^^
+            Key: z directly returns point[:, 2] WITHOUT subtracting base_q's z!
+            Result: [x_rel, y_rel, z_world_absolute]
+
+        Real system (via T_base_camera transformation):
+            All coordinates relative to base_link origin.
+            Result: [x_rel, y_rel, z_base_link_relative]
+
+        Transform:
+            z_world = z_base_link + BASE_LINK_HEIGHT_IN_WORLD
+
+        where BASE_LINK_HEIGHT_IN_WORLD is the physical height of base_link
+        frame origin above ground when robot is in TARGET_DEGREES posture.
+        This is a kinematic constant for the given posture, validated from
+        data: sim_z=1372mm, real_z=-376mm => 1.748m ≈ 1.75m (error < 20mm).
+
+        Args:
+            ball_pos_m: Ball position in base_link frame [x, y, z] in meters
+
+        Returns:
+            Ball position in simulation frame [x, y, z_world] in meters
+        """
+        transformed = ball_pos_m.copy()
+        transformed[2] = ball_pos_m[2] + self._sim_base_height_m
+        return transformed
+
     def _maybe_log_safety_counts(self):
         """Throttled log of safety limiter activity (once per second)."""
         now_wall = time.time()
@@ -2497,6 +4381,8 @@ def main(args=None):
             node._stop_raw_video_recording()
             node._shutdown_visualization()
             node.save_trajectory_plot()
+            node.save_estimator_log_file()
+            node.save_policy_log_file()
             if executor is not None:
                 executor.shutdown()
             node.destroy_node()

@@ -15,7 +15,9 @@ from dataclasses import dataclass
 from typing import Optional
 import time
 import os
+import sys
 import threading
+from collections import deque
 from queue import Queue, Full, Empty
 import glob
 import multiprocessing as mp
@@ -33,14 +35,19 @@ from rclpy.node import Node
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import CompressedImage, CameraInfo, JointState
+from std_msgs.msg import Empty as EmptyMsg
 from builtin_interfaces.msg import Time
 from mc_core_interface.msg import MechUnitCmd, MechUnitCmdArray
 from nav_msgs.msg import Odometry
+from rcl_interfaces.msg import ParameterDescriptor
 
 from pingpong_controller.ball_detector import PingPongBallDetector
 from pingpong_controller.hybrid_ball_detector_adapter import HybridBallDetectorAdapter
 from pingpong_controller.calibration_loader import load_calibration
-from pingpong_controller.viz_render import render_detection_overlay
+from pingpong_controller.viz_render import (
+    render_detection_overlay,
+    draw_sim_done_overlay,
+)
 from pingpong_controller.fov_loss_compensator import (
     FovLossCompensator,
     FovLossCompensatorConfig,
@@ -53,8 +60,13 @@ from pingpong_controller.ball_state_estimator import (
     gravity_for_base_link as estimator_gravity_for_base_link,
     gravity_for_camera_frame as estimator_gravity_for_camera_frame,
 )
-from pingpong_controller.mjx_rl_policy import MjxRLPolicyController
+from pingpong_controller.mjx_rl_policy import (
+    MjxRLPolicyController,
+    inspect_mjx_checkpoint_metadata,
+)
 from pingpong_controller.rl_policy import (
+    EXPECTED_OBS_DIM,
+    EXPECTED_OBS_DIM_WITH_DELAY,
     HEAD_JOINTS,
     LEFT_ARM_JOINTS,
     LEG_WAIST_JOINTS,
@@ -67,6 +79,16 @@ from pingpong_controller.rl_policy import (
     target_right_arm_q_rad,
 )
 from pingpong_controller.safety_limiter import RightArmCommandSafetyLimiter
+from pingpong_controller.done_condition_monitor import DoneConditionMonitor
+
+# Optional MuJoCo FK for the racket anchor (used by the viz done-condition
+# overlay independent of the RL policy, so it works with enable_rl_policy:=false).
+try:
+    import mujoco as _mj
+    _MUJOCO_AVAILABLE = True
+except ImportError:
+    _MUJOCO_AVAILABLE = False
+    _mj = None
 
 # Import compensation from pingpong_replay
 try:
@@ -105,6 +127,79 @@ class PingPongControllerNode(Node):
             if os.path.isdir(source_module_dir):
                 return source_module_dir
         return module_dir
+
+    def _resolve_rl_model_path(self, requested_path: str) -> str:
+        """Resolve an RL model file; MJX paths may point at a log directory."""
+        path = os.path.expandvars(os.path.expanduser(str(requested_path)))
+        if self.policy_backend != 'mjx' or not os.path.isdir(path):
+            return path
+
+        candidates = sorted(glob.glob(os.path.join(path, '*.pkl')))
+        if not candidates:
+            self.get_logger().warn(
+                f'MJX rl_model_path is a directory but contains no .pkl: {path}')
+            return path
+
+        preferred = [
+            p for p in candidates
+            if 'curriculum_last' not in os.path.basename(p)
+            and 'safety_stop' not in os.path.basename(p)
+        ]
+        pool = preferred or candidates
+        selected = max(pool, key=lambda p: os.path.getmtime(p))
+        self.get_logger().info(
+            f'MJX rl_model_path directory resolved to checkpoint: {selected}')
+        return selected
+
+    def _configure_policy_observation_path(self) -> None:
+        """Select 50D or 67D policy observations before loading the controller."""
+        requested_dim = int(self.get_parameter('policy_obs_dim').value)
+        if requested_dim in (EXPECTED_OBS_DIM, EXPECTED_OBS_DIM_WITH_DELAY):
+            self.enable_delay_conditioning = (
+                requested_dim == EXPECTED_OBS_DIM_WITH_DELAY)
+            self.policy_obs_dim = requested_dim
+            self.get_logger().info(
+                f'Policy observation path forced by policy_obs_dim='
+                f'{requested_dim}: '
+                f'delay_conditioning={self.enable_delay_conditioning}')
+            return
+        if requested_dim not in (0,):
+            self.get_logger().warn(
+                f'Invalid policy_obs_dim={requested_dim}; expected 0, '
+                f'{EXPECTED_OBS_DIM}, or {EXPECTED_OBS_DIM_WITH_DELAY}. '
+                'Falling back to enable_delay_conditioning.')
+
+        self.policy_obs_dim = (
+            EXPECTED_OBS_DIM_WITH_DELAY if self.enable_delay_conditioning
+            else EXPECTED_OBS_DIM)
+        if self.policy_backend != 'mjx':
+            return
+
+        try:
+            meta = inspect_mjx_checkpoint_metadata(self.rl_model_path)
+            checkpoint_dim = int(meta.get('obs_dim', 0) or 0)
+        except Exception as exc:  # noqa: BLE001 - keep old path usable
+            self.get_logger().warn(
+                f'Could not inspect MJX checkpoint obs_dim from '
+                f'{self.rl_model_path}: {exc}; using '
+                f'enable_delay_conditioning={self.enable_delay_conditioning}')
+            return
+
+        if checkpoint_dim not in (EXPECTED_OBS_DIM, EXPECTED_OBS_DIM_WITH_DELAY):
+            self.get_logger().warn(
+                f'MJX checkpoint has unexpected obs_dim={checkpoint_dim}; '
+                f'using enable_delay_conditioning={self.enable_delay_conditioning}')
+            return
+
+        self.enable_delay_conditioning = (
+            checkpoint_dim == EXPECTED_OBS_DIM_WITH_DELAY)
+        self.policy_obs_dim = checkpoint_dim
+        mode = (
+            '67D delay-conditioned'
+            if self.enable_delay_conditioning else '50D legacy')
+        self.get_logger().info(
+            f'MJX checkpoint obs_dim={checkpoint_dim}; using {mode} '
+            'policy observation path')
 
     def __init__(self):
         super().__init__('pingpong_controller')
@@ -195,6 +290,10 @@ class PingPongControllerNode(Node):
         # 18_stage4g_strong_contact_dr_inverse_mpc.pkl); set to False for
         # legacy 50-dim checkpoints. Default True for new deployments.
         self.declare_parameter('enable_delay_conditioning', True)
+        # Explicit policy observation dimension. 0 means auto for MJX
+        # checkpoints (read obs_dim from the .pkl); 50 forces the legacy
+        # no-delay path; 67 forces delay conditioning.
+        self.declare_parameter('policy_obs_dim', 0)
 
         # Replicate simulation bug for validation: the training environment has a bug
         # where racket_vel ≈ 0 due to using already-updated prev_racket_pos. Set True
@@ -225,6 +324,7 @@ class PingPongControllerNode(Node):
         self.declare_parameter('enable_replay_mode', False)
         self.declare_parameter('replay_csv_path', '')
         self.declare_parameter('replay_loop', False)
+        self.declare_parameter('replay_data_is_sim_frame', False)  # True if replay CSV is already in sim coordinates
         self.declare_parameter('replay_auto_exit', True)
 
         # Simulation ball state input: subscribe to ball state from simulation
@@ -233,17 +333,69 @@ class PingPongControllerNode(Node):
         self.declare_parameter('enable_sim_ball_input', False)
         self.declare_parameter('sim_ball_topic', '/sim/ball_state')
 
+        # Motion capture ball state input: receive ball state from mocap system
+        # via UDP. Requires prior calibration using mocap_calibration.py.
+        self.declare_parameter('enable_mocap_input', False)
+        self.declare_parameter('mocap_bind_host', '0.0.0.0')
+        self.declare_parameter('mocap_udp_port', 9870)
+        self.declare_parameter('mocap_calibration_path', '')
+        self.declare_parameter('mocap_timeout_s', 0.5)
+        self.declare_parameter('mocap_marker_id', 1)
+        self.declare_parameter('mocap_position_unit', 'auto')
+        self.declare_parameter('mocap_timestamp_unit', 's')
+        self.declare_parameter('mocap_velocity_alpha', 0.35)
+        self.declare_parameter('mocap_max_velocity_m_s', 20.0)
+
         # Safety limiter: can be disabled for simulation/testing
         self.declare_parameter('enable_safety_limiter', True)
 
+        # Done condition monitoring: replicate sim termination conditions
+        self.declare_parameter('enable_done_monitoring', True)
+        self.declare_parameter('done_ball_z_floor_m', 0.8)
+        self.declare_parameter('done_ball_z_ceiling_m', 1.9)
+        self.declare_parameter('done_ball_x_range_m', 0.5)
+        self.declare_parameter('done_ball_y_range_m', 0.5)
+        self.declare_parameter('done_racket_anchor_distance_m', 1.1)
+        self.declare_parameter('done_racket_z_high_offset_m', 0.24)
+        self.declare_parameter('done_racket_z_low_offset_m', -0.12)
+        # End-effector workspace limits (optional hard constraints, base frame)
+        # Set to empty list to disable; otherwise [min, max] in meters
+        dynamic_array_param = ParameterDescriptor(dynamic_typing=True)
+        self.declare_parameter(
+            'done_ee_x_limits_m', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_y_limits_m', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_z_limits_m', [], dynamic_array_param)
+        self.declare_parameter('done_log_period_s', 2.0)
+
         # Whole-body init pose publishing.
         self.declare_parameter('enable_init_pose', True)
-        self.declare_parameter('init_pose_duration_s', 3.0)
+        self.declare_parameter('init_pose_duration_s', 6.0)
         self.declare_parameter('init_pose_tolerance_rad', 0.05)
         # After reaching the init pose, hold and wait for the operator to press
-        # Enter on stdin before starting RL (mirrors pingpong_replay). Ignored
-        # for headless/non-TTY runs (auto-continues).
+        # Enter on stdin or publish Empty to start_confirm_topic before
+        # starting RL (mirrors pingpong_replay, with a hardware-safe ROS topic
+        # fallback for GUI/headless runs).
         self.declare_parameter('require_enter_confirm', False)
+        self.declare_parameter('start_confirm_topic', '/pingpong/start_control')
+        # For hardware safety, stdin EOF/non-TTY does not confirm start unless
+        # this is explicitly enabled. Use start_confirm_topic for headless runs.
+        self.declare_parameter('auto_continue_on_stdin_eof', False)
+        self.declare_parameter('enter_prompt_log_period_s', 1.0)
+        # After Enter is confirmed, keep holding the init pose for this many
+        # seconds before the policy is allowed to run. This gives the operator
+        # time to step clear / prepare the first toss on hardware.
+        self.declare_parameter('post_enter_start_delay_s', 0.0)
+        # Formal run duration after init + Enter + post-enter delay. <=0 means
+        # unlimited. When it expires, park at the safe init pose and keep
+        # publishing that pose instead of abruptly stopping command output.
+        self.declare_parameter('run_duration_s', 0.0)
+        # Optional auto-exit for scripted real experiments. Keep disabled by
+        # default so manual hardware sessions can continue parking until the
+        # operator stops the node.
+        self.declare_parameter('shutdown_after_run_duration', False)
+        self.declare_parameter('shutdown_after_run_duration_delay_s', 1.0)
         # Mechanical unit indices. All four MechUnitCmd streams share
         # command_topic (default /mx_mix_command). TODO(jacky): set these to
         # real unit ids before deployment.
@@ -251,6 +403,8 @@ class PingPongControllerNode(Node):
         self.declare_parameter('left_arm_mu_idx', 1)
         self.declare_parameter('leg_waist_mu_idx', 2)
         self.declare_parameter('head_mu_idx', 3)
+        self.declare_parameter('warn_no_command_subscriber', True)
+        self.declare_parameter('command_subscriber_warn_period_s', 2.0)
 
         # Ball detector parameters
         module_dir = os.path.dirname(os.path.abspath(__file__))
@@ -283,6 +437,19 @@ class PingPongControllerNode(Node):
         # So the arm holds the toss out and only parks if the ball is truly
         # gone past the estimator's window.
         self.declare_parameter('enable_ball_lost_failsafe', True)
+        self.declare_parameter('enable_ball_capture_gate', True)
+        # Release gate: after the operator confirms start and a valid ball is
+        # visible, keep parking until the held ball is actually released. A
+        # hand-held static ball is a valid observation, but it should not start
+        # RL. Release is detected from fresh downward motion over a short
+        # window, then RL/compensation are re-anchored before the first policy
+        # tick.
+        self.declare_parameter('enable_ball_release_gate', True)
+        self.declare_parameter('ball_release_min_downward_velocity_m_s', 0.15)
+        self.declare_parameter('ball_release_min_z_drop_m', 0.015)
+        self.declare_parameter('ball_release_window_s', 0.12)
+        self.declare_parameter('ball_release_required_consecutive_ticks', 3)
+        self.declare_parameter('ball_release_max_obs_age_s', 0.08)
         self.declare_parameter('ball_lost_failsafe_timeout_s', 0.4)
         self.declare_parameter(
             'safe_init_pose_csv_path', default_safe_init_pose_csv)
@@ -333,8 +500,12 @@ class PingPongControllerNode(Node):
         self.declare_parameter('hsv_upper', [30, 255, 255])
         self.declare_parameter('color_match_threshold', 0.3)
         self.declare_parameter('color_circularity_min', 0.4)
-        self.declare_parameter('camera_tilt_deg', 40.0)
+        self.declare_parameter('camera_tilt_deg', 50.33)
         self.declare_parameter('use_undistort', True)
+        # Suppress non-critical vision status logs for hardware runs. Errors
+        # and throttled warnings still print.
+        self.declare_parameter('quiet_vision_logs', False)
+        # <=0 disables per-frame detection result logging.
         self.declare_parameter('print_every', 1)
         self.declare_parameter('realsense_fps', 60)
         # Use the RealSense hardware frame timestamp (exposure time) instead of
@@ -402,8 +573,19 @@ class PingPongControllerNode(Node):
         self.declare_parameter('ball_estimator_degrade_loss_s', 0.40)
         self.declare_parameter('ball_estimator_invalid_after_s', 0.60)
         self.declare_parameter('ball_estimator_prediction_horizon_s', 0.0)
+        # Master switch for the ballistic extrapolation in predict_to(). Default
+        # True keeps the full behavior (60->200 Hz bridge + perception-latency
+        # de-aging). Set False for "no prediction, just hold the latest fused
+        # ball state and publish it at 200 Hz": the Kalman filter still fuses and
+        # smooths each real detection at the camera rate, but the control loop
+        # sees the held measurement between frames instead of a forward-propagated
+        # one. Mirrors a sim whose ball state updates at the camera rate (e.g.
+        # 50/60 Hz) and is merely re-issued at 200 Hz. See ball_state_estimator.py.
+        self.declare_parameter('ball_estimator_enable_prediction', True)
         self.declare_parameter('ball_estimator_r_lateral_mm', 20.0)
         self.declare_parameter('ball_estimator_r_depth_mm', 60.0)
+        self.declare_parameter('ball_estimator_q_depth_pos_mult', 0.50)
+        self.declare_parameter('ball_estimator_q_depth_vel_mult', 0.20)
         # Aerodynamic drag in the ballistic propagation. A 2.7 g / 40 mm ball
         # has a high drag-to-mass ratio; a no-drag model overshoots a fast ball
         # by ~80 mm over a 150 ms detector dropout. Default ON. The coefficient
@@ -555,7 +737,11 @@ class PingPongControllerNode(Node):
             self.get_parameter('color_circularity_min').value)
         self.camera_tilt_deg = self.get_parameter('camera_tilt_deg').value
         self.use_undistort = self.get_parameter('use_undistort').value
-        self.print_every = self.get_parameter('print_every').value
+        self.quiet_vision_logs = bool(
+            self.get_parameter('quiet_vision_logs').value)
+        requested_print_every = int(self.get_parameter('print_every').value)
+        self.print_every = 0 if self.quiet_vision_logs else max(
+            0, requested_print_every)
         self.realsense_fps = self.get_parameter('realsense_fps').value
         self.use_realsense_hw_timestamp = bool(
             self.get_parameter('use_realsense_hw_timestamp').value)
@@ -624,10 +810,16 @@ class PingPongControllerNode(Node):
             self.get_parameter('ball_estimator_invalid_after_s').value)
         self.ball_estimator_prediction_horizon_s = float(
             self.get_parameter('ball_estimator_prediction_horizon_s').value)
+        self.ball_estimator_enable_prediction = bool(
+            self.get_parameter('ball_estimator_enable_prediction').value)
         self.ball_estimator_r_lateral_mm = float(
             self.get_parameter('ball_estimator_r_lateral_mm').value)
         self.ball_estimator_r_depth_mm = float(
             self.get_parameter('ball_estimator_r_depth_mm').value)
+        self.ball_estimator_q_depth_pos_mult = float(
+            self.get_parameter('ball_estimator_q_depth_pos_mult').value)
+        self.ball_estimator_q_depth_vel_mult = float(
+            self.get_parameter('ball_estimator_q_depth_vel_mult').value)
         self.ball_estimator_enable_aero_drag = bool(
             self.get_parameter('ball_estimator_enable_aero_drag').value)
         self.ball_estimator_drag_k_per_mm = float(
@@ -660,9 +852,10 @@ class PingPongControllerNode(Node):
         self._policy_log_lock = threading.Lock()
         self._policy_step_counter = 0
 
-        # Most recent raw 60 Hz detection (position mm in output_frame), cached
-        # so each 200 Hz estimator row can sit next to the measurement it was
-        # built from for offline comparison.
+        # Most recent raw 60 Hz detection (position mm in detector output_frame).
+        # Cached unconditionally so estimator logs and done-condition warnings
+        # can compare the control/estimator state against the latest detector
+        # measurement.
         self._latest_raw_detection = None
 
         self.override_fx = self.get_parameter('camera_fx').value
@@ -687,6 +880,7 @@ class PingPongControllerNode(Node):
                 f'Invalid policy_backend={self.policy_backend}; must be '
                 '"sb3" or "mjx". Falling back to sb3.')
             self.policy_backend = 'sb3'
+        self.rl_model_path = self._resolve_rl_model_path(self.rl_model_path)
         self.rl_policy_dt = float(self.get_parameter('rl_policy_dt').value)
         self.control_rate_hz = float(
             self.get_parameter('control_rate_hz').value)
@@ -701,20 +895,54 @@ class PingPongControllerNode(Node):
             self.get_parameter('rl_ball_obs_age_clip').value)
         self.enable_delay_conditioning = bool(
             self.get_parameter('enable_delay_conditioning').value)
+        self.policy_obs_dim = (
+            EXPECTED_OBS_DIM_WITH_DELAY if self.enable_delay_conditioning
+            else EXPECTED_OBS_DIM)
+        self._configure_policy_observation_path()
 
         # Safety limiter enable flag
         self.enable_safety_limiter = bool(
             self.get_parameter('enable_safety_limiter').value)
+
+        # Done condition monitoring parameters
+        self.enable_done_monitoring = bool(
+            self.get_parameter('enable_done_monitoring').value)
+        self.done_ball_z_floor_m = float(
+            self.get_parameter('done_ball_z_floor_m').value)
+        self.done_ball_z_ceiling_m = float(
+            self.get_parameter('done_ball_z_ceiling_m').value)
+        self.done_ball_x_range_m = float(
+            self.get_parameter('done_ball_x_range_m').value)
+        self.done_ball_y_range_m = float(
+            self.get_parameter('done_ball_y_range_m').value)
+        self.done_racket_anchor_distance_m = float(
+            self.get_parameter('done_racket_anchor_distance_m').value)
+        self.done_racket_z_high_offset_m = float(
+            self.get_parameter('done_racket_z_high_offset_m').value)
+        self.done_racket_z_low_offset_m = float(
+            self.get_parameter('done_racket_z_low_offset_m').value)
+        # Parse workspace limits (empty list => None)
+        ee_x_raw = self.get_parameter('done_ee_x_limits_m').value
+        ee_y_raw = self.get_parameter('done_ee_y_limits_m').value
+        ee_z_raw = self.get_parameter('done_ee_z_limits_m').value
+        self.done_ee_x_limits_m = tuple(ee_x_raw) if len(ee_x_raw) == 2 else None
+        self.done_ee_y_limits_m = tuple(ee_y_raw) if len(ee_y_raw) == 2 else None
+        self.done_ee_z_limits_m = tuple(ee_z_raw) if len(ee_z_raw) == 2 else None
+        self.done_log_period_s = float(
+            self.get_parameter('done_log_period_s').value)
 
         # Replay mode parameters
         self.enable_replay_mode = bool(
             self.get_parameter('enable_replay_mode').value)
         self.replay_csv_path = self.get_parameter('replay_csv_path').value
         self.replay_loop = bool(self.get_parameter('replay_loop').value)
+        self.replay_data_is_sim_frame = bool(
+            self.get_parameter('replay_data_is_sim_frame').value)
         self.replay_auto_exit = bool(self.get_parameter('replay_auto_exit').value)
         self._replay_data = None
         self._replay_idx = 0
         self._replay_start_time = None
+        self._last_replay_estimator_idx = None
 
         # Simulation ball state input parameters
         self.enable_sim_ball_input = bool(
@@ -723,9 +951,53 @@ class PingPongControllerNode(Node):
         self._sim_ball_state = None
         self._sim_ball_lock = threading.Lock()
 
+        # Motion capture ball state input parameters
+        self.enable_mocap_input = bool(
+            self.get_parameter('enable_mocap_input').value)
+        self.mocap_bind_host = str(
+            self.get_parameter('mocap_bind_host').value)
+        self.mocap_udp_port = int(
+            self.get_parameter('mocap_udp_port').value)
+        self.mocap_calibration_path = self.get_parameter(
+            'mocap_calibration_path').value
+        self.mocap_timeout_s = float(
+            self.get_parameter('mocap_timeout_s').value)
+        self.mocap_marker_id = int(
+            self.get_parameter('mocap_marker_id').value)
+        self.mocap_position_unit = str(
+            self.get_parameter('mocap_position_unit').value)
+        self.mocap_timestamp_unit = str(
+            self.get_parameter('mocap_timestamp_unit').value)
+        self.mocap_velocity_alpha = float(
+            self.get_parameter('mocap_velocity_alpha').value)
+        self.mocap_max_velocity_m_s = float(
+            self.get_parameter('mocap_max_velocity_m_s').value)
+        self._mocap_detector = None
+        self._mocap_ball_state = None
+        self._mocap_ball_lock = threading.Lock()
+        self._last_mocap_estimator_packet_count = 0
+        self._last_mocap_recorded_packet_count = 0
+
         # Ball-lost failsafe parameters.
         self.enable_ball_lost_failsafe = bool(
             self.get_parameter('enable_ball_lost_failsafe').value)
+        self.enable_ball_capture_gate = bool(
+            self.get_parameter('enable_ball_capture_gate').value)
+        self.enable_ball_release_gate = bool(
+            self.get_parameter('enable_ball_release_gate').value)
+        self.ball_release_min_downward_velocity_m_s = float(
+            self.get_parameter(
+                'ball_release_min_downward_velocity_m_s').value)
+        self.ball_release_min_z_drop_m = float(
+            self.get_parameter('ball_release_min_z_drop_m').value)
+        self.ball_release_window_s = max(
+            0.02, float(self.get_parameter('ball_release_window_s').value))
+        self.ball_release_required_consecutive_ticks = max(
+            1, int(self.get_parameter(
+                'ball_release_required_consecutive_ticks').value))
+        self.ball_release_max_obs_age_s = max(
+            0.0, float(self.get_parameter(
+                'ball_release_max_obs_age_s').value))
         self.ball_lost_failsafe_timeout_s = float(
             self.get_parameter('ball_lost_failsafe_timeout_s').value)
         self.safe_init_pose_csv_path = self.get_parameter(
@@ -745,6 +1017,14 @@ class PingPongControllerNode(Node):
 
         self.rl_controller = None
         self._last_valid_ball_wall_time = None
+        self._has_captured_valid_ball = False
+        self._ball_capture_gate_active = False
+        self._has_released_ball = False
+        self._ball_release_gate_active = False
+        self._ball_release_candidate_ticks = 0
+        self._ball_release_samples = deque()
+        self._ball_release_gate_log_last_wall = 0.0
+        self._ball_release_last_debug = {}
         # Post-safety-limiter command (what was last actually published).
         self._last_safe_joint_positions = np.array(
             self.default_joint_positions, dtype=np.float64)
@@ -839,28 +1119,41 @@ class PingPongControllerNode(Node):
         self._safety_log_period_s = 1.0
         self._safety_log_last_wall = time.time()
 
-        # Coordinate frame transform: real base_link -> simulation frame.
+        # Coordinate frame transform: real Cartesian frame -> simulation frame.
         #
         # Transform formula (from code analysis):
         #   Simulation (mjx_juggle_env._point_to_base):
-        #     Returns [x_rel, y_rel, z_world] - z is NOT relative to base!
+        #     Returns [x_rel, y_rel, z_world] - z is world absolute height
         #   Real system (via T_base_camera):
-        #     Returns [x_rel, y_rel, z_rel] - all relative to base_link
-        #   Therefore: z_world = z_base_link + BASE_LINK_HEIGHT_IN_WORLD
+        #     Returns [x_rel, y_rel, z_rel] relative to the robot Cartesian
+        #     frame; on this robot that frame corresponds to moz1_pd.xml's
+        #     waist02 body.
+        #   Therefore: p_sim = p_waist02 + waist02_origin_in_sim_base
         #
-        # BASE_LINK_HEIGHT_IN_WORLD parameter:
-        #   Physical height of base_link frame origin above ground when robot
-        #   is in TARGET_DEGREES posture (腿腰姿态固定). This value is the
-        #   kinematic result of LegWaist joints at TARGET angles.
+        # Cartesian-frame origin parameters:
+        #   waist02 origin in the simulation base-yaw frame when the robot is in
+        #   TARGET_DEGREES posture [0, 60, -90, 30, 0, 0].
         #
-        #   Ideally computed via forward kinematics from URDF + TARGET_DEGREES.
-        #   In practice, validated from real/sim ball position comparison at
-        #   identical robot posture: sim_z=1372mm, real_z=-376mm => 1.748m.
-        #   Rounded to 1.75m. Conversion error < 20mm validates correctness.
+        #   Computed via forward kinematics from moz1_pd.xml + TARGET_DEGREES:
+        #   - The real Cartesian frame is the waist02 body.
+        #   - In TARGET_DEGREES posture:
+        #       waist02 relative to sim base = [0.0, 23.583, 847.396] mm
+        #       waist02 world height       = 0.947396 m (base z is 0.1 m)
+        #
+        #   Coordinate transformation:
+        #     x_sim = x_real + 0.0 m
+        #     y_sim = y_real + 0.023583 m
+        #     z_sim = z_real + 0.947396 m
         #
         #   IMPORTANT: This value is posture-dependent. If robot posture changes
         #   from TARGET_DEGREES, this parameter must be recalibrated.
-        self.declare_parameter('sim_base_height_m', 1.75)
+        self.declare_parameter('sim_cartesian_x_offset_m', 0.0)
+        self.declare_parameter('sim_cartesian_y_offset_m', 0.023583)
+        self.declare_parameter('sim_base_height_m', 0.947396)
+        self._sim_cartesian_x_offset_m = float(
+            self.get_parameter('sim_cartesian_x_offset_m').value)
+        self._sim_cartesian_y_offset_m = float(
+            self.get_parameter('sim_cartesian_y_offset_m').value)
         self._sim_base_height_m = float(
             self.get_parameter('sim_base_height_m').value)
 
@@ -876,6 +1169,61 @@ class PingPongControllerNode(Node):
         else:
             self.get_logger().info(
                 'Ball-lost failsafe disabled (enable_ball_lost_failsafe=False)')
+        if self.enable_ball_capture_gate:
+            self.get_logger().info(
+                'Ball-capture gate enabled: RL stays parked at safe pose until '
+                'the first valid ball state is available')
+        if self.enable_ball_release_gate:
+            self.get_logger().info(
+                'Ball-release gate enabled: after capture, RL stays parked '
+                'until fresh downward ball motion is observed '
+                f'(vz<-{self.ball_release_min_downward_velocity_m_s:.2f}m/s, '
+                f'z_drop>{self.ball_release_min_z_drop_m:.3f}m over '
+                f'{self.ball_release_window_s:.2f}s, '
+                f'{self.ball_release_required_consecutive_ticks} ticks, '
+                f'age<={self.ball_release_max_obs_age_s:.3f}s)')
+        else:
+            self.get_logger().info(
+                'Ball-release gate disabled (enable_ball_release_gate=False)')
+
+        # Done condition monitor: replicate sim termination conditions
+        self.done_monitor = None
+        self._done_failsafe_active = False
+        self._done_log_last_wall = time.time()
+        if self.enable_done_monitoring:
+            self.done_monitor = DoneConditionMonitor(
+                ball_z_floor=self.done_ball_z_floor_m,
+                ball_z_ceiling=self.done_ball_z_ceiling_m,
+                ball_x_range=self.done_ball_x_range_m,
+                ball_y_range=self.done_ball_y_range_m,
+                racket_anchor_distance_limit=self.done_racket_anchor_distance_m,
+                racket_z_high_offset=self.done_racket_z_high_offset_m,
+                racket_z_low_offset=self.done_racket_z_low_offset_m,
+                ee_x_limits=self.done_ee_x_limits_m,
+                ee_y_limits=self.done_ee_y_limits_m,
+                ee_z_limits=self.done_ee_z_limits_m,
+            )
+            ee_limits_msg = []
+            if self.done_ee_x_limits_m:
+                ee_limits_msg.append(f'x={self.done_ee_x_limits_m}m')
+            if self.done_ee_y_limits_m:
+                ee_limits_msg.append(f'y={self.done_ee_y_limits_m}m')
+            if self.done_ee_z_limits_m:
+                ee_limits_msg.append(f'z={self.done_ee_z_limits_m}m')
+            ee_limits_str = ', '.join(ee_limits_msg) if ee_limits_msg else 'none'
+            self.get_logger().info(
+                'Done-condition monitoring ENABLED: '
+                f'ball_z=[{self.done_ball_z_floor_m}, {self.done_ball_z_ceiling_m}]m, '
+                f'ball_xy_range={self.done_ball_x_range_m}m, '
+                f'racket_anchor_dist<{self.done_racket_anchor_distance_m}m, '
+                f'EE workspace limits: {ee_limits_str}')
+        else:
+            self.get_logger().info(
+                'Done-condition monitoring DISABLED (enable_done_monitoring=False)')
+
+        # Standalone racket-anchor FK for the viz done-condition overlay, so the
+        # sim-frame ball state + done status show even with enable_rl_policy:=false.
+        self._init_viz_fk()
 
         # Init pose state (whole-body drive to TARGET_DEGREES before RL runs).
         self.enable_init_pose = bool(
@@ -884,6 +1232,22 @@ class PingPongControllerNode(Node):
             self.get_parameter('init_pose_duration_s').value)
         self.require_enter_confirm = bool(
             self.get_parameter('require_enter_confirm').value)
+        self.start_confirm_topic = str(
+            self.get_parameter('start_confirm_topic').value).strip()
+        if not self.start_confirm_topic:
+            self.start_confirm_topic = '/pingpong/start_control'
+        self.auto_continue_on_stdin_eof = bool(
+            self.get_parameter('auto_continue_on_stdin_eof').value)
+        self.enter_prompt_log_period_s = max(0.1, float(
+            self.get_parameter('enter_prompt_log_period_s').value))
+        self.post_enter_start_delay_s = max(0.0, float(
+            self.get_parameter('post_enter_start_delay_s').value))
+        self.run_duration_s = max(0.0, float(
+            self.get_parameter('run_duration_s').value))
+        self.shutdown_after_run_duration = bool(
+            self.get_parameter('shutdown_after_run_duration').value)
+        self.shutdown_after_run_duration_delay_s = max(0.0, float(
+            self.get_parameter('shutdown_after_run_duration_delay_s').value))
         self.right_arm_mu_idx = int(
             self.get_parameter('right_arm_mu_idx').value)
         self.left_arm_mu_idx = int(
@@ -891,6 +1255,11 @@ class PingPongControllerNode(Node):
         self.leg_waist_mu_idx = int(
             self.get_parameter('leg_waist_mu_idx').value)
         self.head_mu_idx = int(self.get_parameter('head_mu_idx').value)
+        self.warn_no_command_subscriber = bool(
+            self.get_parameter('warn_no_command_subscriber').value)
+        self.command_subscriber_warn_period_s = max(
+            0.5, float(
+                self.get_parameter('command_subscriber_warn_period_s').value))
         self.get_logger().info(
             f'MechUnitCmdArray -> "{command_topic}" '
             f'(right={self.right_arm_mu_idx}, left={self.left_arm_mu_idx}, '
@@ -899,6 +1268,8 @@ class PingPongControllerNode(Node):
         self._init_pose_active = bool(
             self.enable_init_pose and self.init_pose_duration_s > 0.0)
         self._init_pose_start_wall: Optional[float] = None
+        self._init_pose_start_q: Optional[np.ndarray] = None
+        self._init_pose_start_source = ''
         # After the init-pose ramp completes, optionally hold at the start pose
         # and wait for the operator to press Enter before starting RL (mirrors
         # pingpong_replay's require_enter_confirm gate). A daemon thread reads
@@ -906,16 +1277,38 @@ class PingPongControllerNode(Node):
         self._await_enter = bool(
             self.enable_init_pose and self.require_enter_confirm)
         self._enter_event = threading.Event()
+        self._enter_event_source = ''
         self._enter_thread_started = False
         self._enter_prompted = False
+        self._enter_prompt_last_wall = 0.0
+        self._stdin_is_tty = bool(getattr(sys.stdin, 'isatty', lambda: False)())
+        self._start_confirm_ignored_last_wall = 0.0
+        self._post_enter_delay_until_wall: Optional[float] = None
+        self._formal_run_start_wall: Optional[float] = None
+        self._run_duration_elapsed = False
+        self._run_duration_shutdown_started = False
+        self._last_done_debug = {}
         if self._init_pose_active:
             self.get_logger().info(
-                f'Init-pose phase enabled: driving full body to TARGET for '
+                f'Init-pose phase enabled: smoothly driving right arm to TARGET for '
                 f'{self.init_pose_duration_s:.2f}s before starting RL policy')
         else:
             self.get_logger().info(
                 'Init-pose phase disabled (enable_init_pose=False or '
                 'init_pose_duration_s<=0); RL policy starts immediately')
+        if self._await_enter and self.post_enter_start_delay_s > 0.0:
+            self.get_logger().info(
+                f'After Enter confirmation, holding init pose for '
+                f'{self.post_enter_start_delay_s:.2f}s before formal start')
+        if self._await_enter:
+            self.get_logger().info(
+                f'Start confirmation enabled: press Enter in this terminal '
+                f'or publish std_msgs/Empty to "{self.start_confirm_topic}" '
+                'after the init pose is reached')
+        if self.run_duration_s > 0.0:
+            self.get_logger().info(
+                f'Run duration limit enabled: formal control will run for '
+                f'{self.run_duration_s:.2f}s, then park at safe init pose')
 
         # Latest BallState cached by image callbacks; control timer consumes it.
         self._latest_ball_state = None
@@ -928,6 +1321,10 @@ class PingPongControllerNode(Node):
         # Simulation ball state input: subscribe to ball state from simulation
         if self.enable_sim_ball_input:
             self._init_sim_ball_input()
+
+        # Motion capture ball state input: start mocap receiver
+        if self.enable_mocap_input:
+            self._init_mocap_input()
 
         # Latest real joint feedback from /joint_states; control timer + init
         # pose logic consume it. Values are indexed by joint name.
@@ -943,7 +1340,9 @@ class PingPongControllerNode(Node):
         # hardware bringups).
         self._prev_right_arm_q_for_dq: Optional[np.ndarray] = None
         self._prev_right_arm_stamp_for_dq: Optional[float] = None
-        self._estimated_right_arm_dq = np.zeros(7, dtype=np.float32)
+        # Initialize to zeros; may be overridden by replay mode initialization
+        if not hasattr(self, '_estimated_right_arm_dq'):
+            self._estimated_right_arm_dq = np.zeros(7, dtype=np.float32)
         # Hard cap for the finite-difference dq so a single noisy JointState
         # frame cannot feed unbounded dq into the RL obs.
         # Limits match RightArmCommandSafetyLimiter.VEL_LIMIT_DEG_S.
@@ -967,6 +1366,19 @@ class PingPongControllerNode(Node):
             callback_group=self.state_callback_group)
         self.get_logger().info(
             f'Subscribed to joint states: "{joint_state_topic}"')
+        self.start_confirm_sub = None
+        if self._await_enter:
+            self.start_confirm_sub = self.create_subscription(
+                EmptyMsg, self.start_confirm_topic,
+                self._start_confirm_callback, 10,
+                callback_group=self.state_callback_group)
+            self.get_logger().info(
+                f'Subscribed to start confirmation: "{self.start_confirm_topic}"')
+            if not self._stdin_is_tty and not self.auto_continue_on_stdin_eof:
+                self.get_logger().warn(
+                    'stdin is not an interactive TTY; Enter confirmation will '
+                    f'not work here. Start with: ros2 topic pub --once '
+                    f'{self.start_confirm_topic} std_msgs/msg/Empty "{{}}"')
 
         # --- Load full calibration JSON only for direct RealSense mode.
         # ROS topic mode waits for CameraInfo, then loads the matching JSON
@@ -1012,6 +1424,16 @@ class PingPongControllerNode(Node):
         self.trajectory_lock = threading.Lock()
         self._warned_non_base_trajectory = False
 
+        # --- Sim-frame ball state (for visualization done-condition overlay) ---
+        # Stashed by _compute_rl_command each control tick: the ball state in
+        # meters, sim base frame (MJX _point_to_base convention: base yaw + world z),
+        # that was passed into rl_controller.predict(). The viz HUD reads these to
+        # display sim-frame pos/vel and evaluate the sim done-conditions so the user
+        # can see when the ball would terminate a training episode.
+        self._last_sim_ball_pos_m = None
+        self._last_sim_ball_vel_m_s = None
+        self._last_sim_ball_valid = False
+
         # --- Publisher (created before any thread starts) ---
         # MechUnitCmdArray publisher on command_topic (default
         # /mx_mix_command). The real downstream (MCControlNode) subscribes to
@@ -1021,6 +1443,7 @@ class PingPongControllerNode(Node):
         # This mirrors the on-hardware-verified pingpong_replay publisher.
         self.cmd_pub = self.create_publisher(
             MechUnitCmdArray, command_topic, 10)
+        self._last_cmd_pub_no_sub_warn_wall = 0.0
 
         # Debug/monitoring publishers under /pingpong namespace.
         self.ball_state_pub = self.create_publisher(
@@ -1222,7 +1645,13 @@ class PingPongControllerNode(Node):
             f'Color gate: HSV {self.hsv_lower}-{self.hsv_upper}, '
             f'match>={self.color_match_threshold:.2f}, '
             f'circularity>={self.color_circularity_min:.2f}')
-        self.get_logger().info(f'Print every: {self.print_every} frames')
+        if self.print_every > 0:
+            self.get_logger().info(
+                f'Print every: {self.print_every} frames')
+        else:
+            self.get_logger().info(
+                'Per-frame vision logs disabled '
+                '(quiet_vision_logs=true or print_every<=0)')
         if self.detector is not None:
             self.get_logger().info('Detector ready, waiting for images...')
         elif not self.use_direct_realsense:
@@ -1457,6 +1886,7 @@ class PingPongControllerNode(Node):
                     print_every=999999,
                     use_undistort=self.use_undistort,
                     depth_scale=self._depth_scale,
+                    depth_correction_model_path=self.depth_correction_model_path,
                     depth_neighborhood_px=self.depth_neighborhood_px,
                     # 灰色球禁用颜色筛选
                     color_match_threshold=0.0,
@@ -1812,10 +2242,18 @@ class PingPongControllerNode(Node):
 
                 # 创建时间戳
                 stamp = self.get_clock().now().to_msg()
+                # One capture time (s) shared by the recorder sidecar (t_capture
+                # -> timestamps.csv) and the detector. Passing it into
+                # get_observation makes the detector compute velocity from the
+                # SAME capture-time series that the offline tool replays, so the
+                # record->annotate and live-juggle paths derive velocity
+                # identically instead of the live path using wall-clock
+                # (time.time()) at processing time.
+                stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
 
                 # 保存原始视频（hybrid 模式额外存 IR/depth，供离线混合检测）
                 if self.save_raw_video and not self._raw_video_disabled_runtime:
-                    t_capture = stamp.sec + stamp.nanosec * 1e-9
+                    t_capture = stamp_sec
                     rec_depth = None
                     if self.save_depth_frames:
                         depth_frame = frames.get_depth_frame()
@@ -1827,7 +2265,8 @@ class PingPongControllerNode(Node):
                         t_capture=t_capture)
 
                 # 调用HybridBallDetector的get_observation处理这一帧
-                observation = self.detector.detector.get_observation(frames=frames)
+                observation = self.detector.detector.get_observation(
+                    observation_time=stamp_sec, frames=frames)
 
                 if observation is None:
                     observation = {'detected': False, 'position': [0, 0, 0], 'velocity': [0, 0, 0]}
@@ -1848,10 +2287,10 @@ class PingPongControllerNode(Node):
                 # 传递给后处理流程
                 self._handle_hybrid_cv_image(rgb_image, stamp, observation)
 
-                if loop_count == 1:
+                if loop_count == 1 and not self.quiet_vision_logs:
                     self.get_logger().info('Hybrid reader loop: first frame processed!')
 
-                if loop_count % 100 == 0:
+                if loop_count % 100 == 0 and not self.quiet_vision_logs:
                     self.get_logger().info(f'Hybrid reader loop: {loop_count} frames processed')
 
             except Exception as e:
@@ -1910,7 +2349,7 @@ class PingPongControllerNode(Node):
                 stamp=stamp, valid=False,
                 raw_measurement=observation.get('raw_measurement'))
 
-        if self.frame_count % self.print_every == 0:
+        if self.print_every > 0 and self.frame_count % self.print_every == 0:
             self._log_detection_results(ball_state)
 
         # Publish ball state debug topic
@@ -2088,7 +2527,7 @@ class PingPongControllerNode(Node):
                 stamp=stamp, valid=False,
                 raw_measurement=observation.get('raw_measurement'))
 
-        if self.frame_count % self.print_every == 0:
+        if self.print_every > 0 and self.frame_count % self.print_every == 0:
             self._log_detection_results(ball_state)
 
         # Publish ball state debug topic (reflects vision detection cadence).
@@ -2122,14 +2561,28 @@ class PingPongControllerNode(Node):
         """
         if self._ball_estimator is not None:
             return self._ball_estimator
-        if self.detector is None:
+        if (self.detector is None
+                and not self.enable_mocap_input
+                and not self.enable_replay_mode):
             return None
 
-        output_frame = getattr(self.detector, 'output_frame', 'camera')
-        if output_frame == 'base_link':
+        if self.enable_replay_mode:
+            output_frame = (
+                'sim_frame' if self.replay_data_is_sim_frame else 'base_link')
+        else:
+            output_frame = (
+                'base_link'
+                if self.enable_mocap_input
+                else getattr(self.detector, 'output_frame', 'camera'))
+        if output_frame in ('base_link', 'sim_frame'):
             gravity = estimator_gravity_for_base_link()
             # R_base_camera rotates camera-frame measurement noise into base.
-            frame_rotation = getattr(self.detector, 'R_base_camera', None)
+            frame_rotation = (
+                getattr(self.detector, 'R_base_camera', None)
+                if (self.detector is not None
+                    and not self.enable_mocap_input
+                    and not self.enable_replay_mode)
+                else None)
         else:
             gravity = estimator_gravity_for_camera_frame(self.camera_tilt_deg)
             # Already in camera frame: no rotation needed.
@@ -2138,16 +2591,24 @@ class PingPongControllerNode(Node):
         table_z = self.ball_estimator_table_z_mm
         table_z = None if (table_z is None or not np.isfinite(table_z)) else float(
             table_z)
+        q_depth_pos_mult = self.ball_estimator_q_depth_pos_mult
+        q_depth_vel_mult = self.ball_estimator_q_depth_vel_mult
+        if output_frame in ('base_link', 'sim_frame') and frame_rotation is None:
+            q_depth_pos_mult = 1.0
+            q_depth_vel_mult = 1.0
 
         config = BallStateEstimatorConfig(
             gravity_mm_s2=gravity,
             r_lateral_mm=self.ball_estimator_r_lateral_mm,
             r_depth_mm=self.ball_estimator_r_depth_mm,
+            q_depth_pos_mult=q_depth_pos_mult,
+            q_depth_vel_mult=q_depth_vel_mult,
             max_extrapolation_s=self.ball_estimator_max_extrapolation_s,
             trust_loss_s=self.ball_estimator_trust_loss_s,
             degrade_loss_s=self.ball_estimator_degrade_loss_s,
             invalid_after_s=self.ball_estimator_invalid_after_s,
             prediction_horizon_s=self.ball_estimator_prediction_horizon_s,
+            enable_prediction=self.ball_estimator_enable_prediction,
             enable_aero_drag=self.ball_estimator_enable_aero_drag,
             drag_k_per_mm=self.ball_estimator_drag_k_per_mm,
             enable_magnus=self.ball_estimator_enable_magnus,
@@ -2166,10 +2627,13 @@ class PingPongControllerNode(Node):
             f'{self.ball_estimator_invalid_after_s:.2f}s, '
             f'pred_horizon={self.ball_estimator_prediction_horizon_s:.3f}s '
             '(0 => execution latency handled by RL actuator model), '
+            f'prediction={"on" if self.ball_estimator_enable_prediction else "off (hold latest fused state @200Hz, no extrapolation)"}, '
             f'aero_drag={"on" if self.ball_estimator_enable_aero_drag else "off"}'
             f'(k={self.ball_estimator_drag_k_per_mm:.3e}/mm), '
             f'magnus={"on" if self.ball_estimator_enable_magnus else "off"}, '
             f'table_z_mm={table_z}, '
+            f'q_depth_mult(pos/vel)={q_depth_pos_mult:.2f}/'
+            f'{q_depth_vel_mult:.2f}, '
             f'R_base_camera={"set" if frame_rotation is not None else "none"}')
         return self._ball_estimator
 
@@ -2196,27 +2660,27 @@ class PingPongControllerNode(Node):
             return
         position = observation.get('position')
         # Cache the raw measurement (position + its image time) so the 200 Hz
-        # estimator recorder can put each prediction next to the detection it
-        # came from. Done regardless of the fuse below so the debug log shows
-        # the freshest measurement even on the tick it arrives.
-        if self.save_estimator_log:
-            try:
-                # Carry the monocular depth cue (circle radius -> depth) so the
-                # offline analysis can separate "depth wrong" from "pixel wrong"
-                # and compare against the D455 hardware depth later.
-                raw_radius = raw.get('radius_px', float('nan'))
-                raw_depth = raw.get('depth_mm', float('nan'))
-                with self._estimator_log_lock:
-                    self._latest_raw_detection = (
-                        float(stamp_sec),
-                        [float(position[0]), float(position[1]),
-                         float(position[2])],
-                        float(raw_radius) if raw_radius is not None
-                        else float('nan'),
-                        float(raw_depth) if raw_depth is not None
-                        else float('nan'))
-            except (TypeError, IndexError, ValueError):
-                pass
+        # estimator recorder and done warning can put each prediction next to
+        # the detection it came from. Done regardless of the fuse below so the
+        # freshest raw measurement is available even on the tick it arrives.
+        try:
+            raw_radius = raw.get('radius_px', raw.get('radius', float('nan')))
+            raw_depth = raw.get('depth_mm', float('nan'))
+            output_frame = (
+                getattr(self.detector, 'output_frame', 'camera')
+                if self.detector is not None else 'camera')
+            with self._estimator_log_lock:
+                self._latest_raw_detection = (
+                    float(stamp_sec),
+                    [float(position[0]), float(position[1]),
+                     float(position[2])],
+                    float(raw_radius) if raw_radius is not None
+                    else float('nan'),
+                    float(raw_depth) if raw_depth is not None
+                    else float('nan'),
+                    str(output_frame))
+        except (TypeError, IndexError, ValueError):
+            pass
         try:
             with self._ball_estimator_lock:
                 comp.update(position, stamp_sec)
@@ -2309,6 +2773,7 @@ class PingPongControllerNode(Node):
     def _record_base_trajectory(self, stamp_sec, ball_state: BallState):
         """Record valid ball states only when detector output is base_link."""
         output_frame = (
+            'base_link' if self.enable_mocap_input else
             getattr(self.detector, 'output_frame', 'camera')
             if self.detector is not None else 'camera')
         if output_frame != 'base_link':
@@ -2468,21 +2933,78 @@ class PingPongControllerNode(Node):
 
     def _stdin_enter_thread(self):
         """Daemon thread: wait for stdin Enter and set the event."""
+        if not self._stdin_is_tty:
+            if self.auto_continue_on_stdin_eof:
+                self.get_logger().warn(
+                    'stdin is not an interactive TTY; auto-continuing because '
+                    'auto_continue_on_stdin_eof=true')
+                self._confirm_start('stdin EOF auto-continue')
+            else:
+                self.get_logger().warn(
+                    'stdin is not an interactive TTY; waiting for ROS topic '
+                    f'confirmation on "{self.start_confirm_topic}"')
+            return
         try:
             input()  # blocks until Enter
-            self._enter_event.set()
-        except (EOFError, OSError):
-            # Non-TTY / headless: auto-continue
-            self._enter_event.set()
+            self._confirm_start('stdin Enter')
+        except (EOFError, OSError) as exc:
+            if self.auto_continue_on_stdin_eof:
+                self.get_logger().warn(
+                    f'stdin unavailable ({exc}); auto-continuing because '
+                    'auto_continue_on_stdin_eof=true')
+                self._confirm_start('stdin EOF auto-continue')
+            else:
+                self.get_logger().warn(
+                    f'stdin unavailable ({exc}); waiting for ROS topic '
+                    f'confirmation on "{self.start_confirm_topic}"')
+
+    def _confirm_start(self, source: str):
+        """Mark the operator start confirmation as received."""
+        if self._enter_event.is_set():
+            return
+        self._enter_event_source = source
+        self._enter_event.set()
+
+    def _start_confirm_callback(self, _msg: EmptyMsg):
+        """Accept a ROS topic start signal once the init pose has completed."""
+        if not self._await_enter:
+            return
+        now_wall = time.time()
+        if self._init_pose_active:
+            if now_wall - self._start_confirm_ignored_last_wall >= 1.0:
+                self.get_logger().warn(
+                    'Start confirmation ignored because init-pose phase is '
+                    'still active; send it after the init pose is reached')
+                self._start_confirm_ignored_last_wall = now_wall
+            return
+        self.get_logger().info(
+            f'Start confirmation received on "{self.start_confirm_topic}"')
+        self._confirm_start(f'ROS topic {self.start_confirm_topic}')
+
+    def _maybe_log_enter_prompt(self, now_wall: float):
+        """Periodically remind the operator how to release the start gate."""
+        if (self._enter_prompted and
+                now_wall - self._enter_prompt_last_wall <
+                self.enter_prompt_log_period_s):
+            return
+        topic_cmd = (
+            f'ros2 topic pub --once {self.start_confirm_topic} '
+            'std_msgs/msg/Empty "{}"')
+        self.get_logger().warn(
+            'WAITING FOR START: press Enter in this terminal or run: '
+            f'{topic_cmd}')
+        if not self._enter_prompted and self._stdin_is_tty:
+            print("\n=== Press Enter to start RL control ===", flush=True)
+        self._enter_prompted = True
+        self._enter_prompt_last_wall = now_wall
 
     def _control_timer_callback(self):
         """Fixed-rate (control_rate_hz) control loop.
 
-        Phase 1 (init pose, if enabled): publish right-arm TARGET_DEGREES as
-        a single-element MechUnitCmdArray (mu_idx=0 only) on command_topic,
-        matching the hardware setup where only the right arm is powered
-        during juggling experiments. The command passes through the safety
-        limiter.
+        Phase 1 (init pose, if enabled): smoothly ramp the right arm from the
+        measured joint state to TARGET_DEGREES, then publish it as a
+        single-element MechUnitCmdArray on command_topic. This keeps startup
+        gentle even when the runtime safety limiter is disabled for RL tests.
 
         Phase 2 (RL control): every tick we call compute_action() regardless
         of detection validity so the RL policy's internal hold-last / dropout
@@ -2491,8 +3013,9 @@ class PingPongControllerNode(Node):
         """
         now_wall = time.time()
 
-        # Phase 0: init-pose ramp (if enabled). Hold at TARGET_DEGREES until
-        # time/tolerance condition is met. Do NOT start the replay clock yet.
+        # Phase 0: init-pose ramp (if enabled). Move smoothly to TARGET_DEGREES
+        # until the time/tolerance condition is met. Do NOT start the replay
+        # clock yet.
         if self._init_pose_active:
             if self._init_pose_start_wall is None:
                 self._init_pose_start_wall = now_wall
@@ -2504,8 +3027,10 @@ class PingPongControllerNode(Node):
                 if self.rl_controller is not None
                 else np.asarray(target_right_arm_q_rad(), dtype=np.float64)
             )
-            self._last_raw_joint_positions = raw_cmd.copy()
-            self._publish_right_arm_init_pose(raw_cmd, self.get_clock().now().to_msg())
+            init_cmd = self._compute_init_pose_ramp_command(raw_cmd, elapsed)
+            self._last_raw_joint_positions = init_cmd.copy()
+            self._publish_right_arm_init_pose(
+                init_cmd, self.get_clock().now().to_msg())
             time_up = elapsed >= self.init_pose_duration_s
             pose_reached = self._init_pose_reached()
             if time_up or pose_reached:
@@ -2516,7 +3041,7 @@ class PingPongControllerNode(Node):
                 # Transition to Enter-wait if configured
                 if self._await_enter:
                     self.get_logger().info(
-                        'Waiting for operator to press Enter before starting RL...')
+                        'Waiting for operator confirmation before starting RL...')
             return
 
         # Phase 0.5: Enter-wait (if require_enter_confirm is on). Keep holding
@@ -2528,10 +3053,7 @@ class PingPongControllerNode(Node):
                 if not self._enter_thread_started:
                     threading.Thread(target=self._stdin_enter_thread, daemon=True).start()
                     self._enter_thread_started = True
-                # Prompt once
-                if not self._enter_prompted:
-                    print("\n=== Press Enter to start RL control ===", flush=True)
-                    self._enter_prompted = True
+                self._maybe_log_enter_prompt(now_wall)
                 # Keep holding the init pose
                 raw_cmd = (
                     self.rl_controller.current_arm_cmd_q().astype(np.float64)
@@ -2543,24 +3065,50 @@ class PingPongControllerNode(Node):
                 return
             else:
                 # Enter was pressed; transition to RL
-                self.get_logger().info('Enter pressed, starting RL control')
+                source = self._enter_event_source or 'operator confirmation'
+                self.get_logger().info(f'Start confirmed by {source}')
                 self._await_enter = False  # only log once
 
-                # Reset compensator with current arm position
-                if self.compensator is not None:
-                    try:
-                        current_q, _ = self._get_right_arm_feedback()
-                        if current_q is None and self.rl_controller is not None:
-                            current_q = self.rl_controller.current_arm_cmd_q()
-                        if current_q is not None:
-                            self.compensator.reset(current_q.astype(np.float32))
-                            self.get_logger().info(
-                                '✅ Compensator reset with current arm position')
-                    except Exception as e:
-                        self.get_logger().warn(f'Failed to reset compensator: {e}')
+                if self.post_enter_start_delay_s > 0.0:
+                    self._post_enter_delay_until_wall = (
+                        now_wall + self.post_enter_start_delay_s)
+                    self.get_logger().info(
+                        f'Holding init pose for '
+                        f'{self.post_enter_start_delay_s:.2f}s before formal '
+                        'RL start')
+                    raw_cmd = (
+                        self.rl_controller.current_arm_cmd_q().astype(np.float64)
+                        if self.rl_controller is not None
+                        else np.asarray(target_right_arm_q_rad(), dtype=np.float64)
+                    )
+                    self._last_raw_joint_positions = raw_cmd.copy()
+                    self._publish_right_arm_init_pose(
+                        raw_cmd, self.get_clock().now().to_msg())
+                    return
+                self._reset_compensator_to_current_arm()
+
+        # Phase 0.75: post-Enter countdown. Keep holding the init pose until the
+        # configured delay elapses, then reset the compensator right before the
+        # formal run starts so it is anchored to the current hardware feedback.
+        if self._post_enter_delay_until_wall is not None:
+            remaining = self._post_enter_delay_until_wall - now_wall
+            if remaining > 0.0:
+                raw_cmd = (
+                    self.rl_controller.current_arm_cmd_q().astype(np.float64)
+                    if self.rl_controller is not None
+                    else np.asarray(target_right_arm_q_rad(), dtype=np.float64)
+                )
+                self._last_raw_joint_positions = raw_cmd.copy()
+                self._publish_right_arm_init_pose(
+                    raw_cmd, self.get_clock().now().to_msg())
+                return
+            self._post_enter_delay_until_wall = None
+            self.get_logger().info('Post-Enter delay complete; starting formal RL control')
+            self._reset_compensator_to_current_arm()
 
         # NOW start fetching the ball state (so the replay clock only advances
-        # once we're past init + Enter).
+        # once we're past init + Enter). Formal run timing starts later, after
+        # capture/release gates have actually handed control to the policy.
         # Get ball state from different sources based on mode
         if self.enable_replay_mode:
             # Replay mode: get ball state from CSV
@@ -2577,6 +3125,9 @@ class PingPongControllerNode(Node):
             # Simulation ball input mode: get ball state from simulation topic
             with self._sim_ball_lock:
                 ball_state = self._sim_ball_state
+        elif self.enable_mocap_input:
+            # Motion capture input mode: get ball state from mocap detector
+            ball_state = self._get_mocap_ball_state()
         else:
             # Normal mode: get from vision
             with self._latest_ball_lock:
@@ -2604,6 +3155,25 @@ class PingPongControllerNode(Node):
         ball_state, ball_age_override = self._resolve_control_ball_state(
             ball_state)
 
+        if (self.enable_replay_mode
+                or self.enable_sim_ball_input
+                or self.enable_mocap_input):
+            self._publish_ball_state_debug(ball_state)
+
+        # Initial ball-capture gate: before the first trustworthy ball state,
+        # do not feed the policy a synthetic zero/held ball. Stay parked at the
+        # safe init posture until a real or estimator-valid ball is available.
+        if self._should_hold_for_initial_ball_capture(ball_state):
+            self._run_ball_capture_gate(ball_state)
+            return
+
+        # Release gate: the first valid ball may still be in the operator's
+        # hand. Keep parking until the ball is freshly observed moving
+        # downward over a short window, then start the formal policy run.
+        if self._should_hold_for_ball_release(ball_state, ball_age_override):
+            self._run_ball_release_gate(ball_state, ball_age_override)
+            return
+
         # Ball-lost failsafe: if the ball has been undetected for longer than
         # the timeout, stop running the RL policy and command the fixed safe
         # init posture instead. The safety limiter ramps the right arm toward
@@ -2612,9 +3182,43 @@ class PingPongControllerNode(Node):
             self._run_ball_lost_failsafe(ball_state.stamp)
             return
 
+        # Formal run timing starts only once all operator and ball gates have
+        # cleared and the policy is about to be allowed to produce commands.
+        if self._formal_run_start_wall is None:
+            self._formal_run_start_wall = now_wall
+            if self.run_duration_s > 0.0:
+                self.get_logger().info(
+                    f'Formal run started; duration limit '
+                    f'{self.run_duration_s:.2f}s')
+        if self.run_duration_s > 0.0:
+            run_elapsed = now_wall - self._formal_run_start_wall
+            if run_elapsed >= self.run_duration_s:
+                self._run_duration_failsafe(self.get_clock().now().to_msg())
+                return
+
         raw_cmd = self.compute_action(ball_state, age_override=ball_age_override)
         self._last_raw_joint_positions = np.asarray(
             raw_cmd, dtype=np.float64).reshape(-1).copy()
+
+        # Done-condition failsafe: check if RL is operating outside trained
+        # boundaries (ball/racket out of bounds, etc.). If any condition fires,
+        # stop RL and ramp to safe pose, just like ball-lost failsafe.
+        is_done, done_reason, done_conditions = self._should_engage_done_failsafe(
+            ball_state, self._last_sim_ball_pos_m, self._last_sim_ball_vel_m_s)
+        if is_done:
+            self._run_done_failsafe(ball_state.stamp, done_reason)
+            # Log diagnostics periodically
+            self._maybe_log_done_status(done_conditions)
+            return
+        else:
+            # Clear done failsafe if conditions are OK
+            if self._done_failsafe_active:
+                self.get_logger().info(
+                    'Done conditions cleared; resuming RL control')
+                self._done_failsafe_active = False
+            # Log diagnostics periodically
+            self._maybe_log_done_status(done_conditions)
+
         # Publish RL joint command debug (reflects 200 Hz control cadence).
         self._publish_rl_joint_cmd_debug()
         self._publish_right_arm_command(
@@ -2765,7 +3369,8 @@ class PingPongControllerNode(Node):
     def _record_policy_log(
             self, ball_pos_m: np.ndarray, ball_vel_m_s: np.ndarray,
             ball_valid: bool, age_s: float,
-            arm_q: Optional[np.ndarray], arm_dq: Optional[np.ndarray]) -> None:
+            arm_q: Optional[np.ndarray], arm_dq: Optional[np.ndarray],
+            control_mode: str = 'policy') -> None:
         """Append one 200 Hz policy step (obs + action) for offline analysis.
 
         Records the policy input (observation vector) and output (action vector)
@@ -2787,6 +3392,7 @@ class PingPongControllerNode(Node):
         row = {
             'step': int(self._policy_step_counter),
             'time_sec': float(self._policy_step_counter * self.control_dt),
+            'control_mode': str(control_mode),
             'ball_valid': int(ball_valid),
             'ball_age_s': float(age_s),
             'ball_pos_x_m': float(ball_pos_m[0]),
@@ -2876,6 +3482,17 @@ class PingPongControllerNode(Node):
         except Exception:  # noqa: BLE001
             pass
 
+    def _shutdown_after_run_duration(self) -> None:
+        """Shutdown after a timed real run has parked at the safe pose."""
+        import time
+        time.sleep(self.shutdown_after_run_duration_delay_s)
+        self.save_estimator_log_file()
+        self.save_policy_log_file()
+        try:
+            rclpy.shutdown()
+        except Exception:  # noqa: BLE001
+            pass
+
 
     def _should_engage_ball_lost_failsafe(
             self, ball_state: BallState, now_wall: float) -> bool:
@@ -2899,6 +3516,225 @@ class PingPongControllerNode(Node):
         lost_for = now_wall - self._last_valid_ball_wall_time
         return lost_for >= self.ball_lost_failsafe_timeout_s
 
+    def _should_hold_for_initial_ball_capture(
+            self, ball_state: BallState) -> bool:
+        """True while no valid ball has ever reached the control loop."""
+        if not self.enable_ball_capture_gate:
+            return False
+        if ball_state.valid:
+            if not self._has_captured_valid_ball:
+                self.get_logger().info(
+                    'First valid ball state captured; releasing RL control')
+            if self._ball_capture_gate_active:
+                self.get_logger().info(
+                    'Ball-capture gate cleared; RL resumes from safe pose')
+            self._has_captured_valid_ball = True
+            self._ball_capture_gate_active = False
+            return False
+        return not self._has_captured_valid_ball
+
+    def _release_gate_age_s(
+            self, ball_state: BallState,
+            age_override: Optional[float]) -> float:
+        if age_override is not None and np.isfinite(age_override):
+            return max(0.0, float(age_override))
+        if ball_state.valid:
+            return 0.0
+        return self.rl_ball_obs_age_clip
+
+    def _should_hold_for_ball_release(
+            self, ball_state: BallState,
+            age_override: Optional[float]) -> bool:
+        """True until the initially captured ball is actually released."""
+        if not self.enable_ball_release_gate:
+            return False
+        if self._has_released_ball:
+            return False
+
+        now_wall = time.time()
+        age_s = self._release_gate_age_s(ball_state, age_override)
+        debug = {
+            'valid': bool(ball_state.valid),
+            'age_s': float(age_s),
+            'fresh': False,
+            'vz_m_s': float('nan'),
+            'z_drop_m': 0.0,
+            'candidate': False,
+            'candidate_ticks': int(self._ball_release_candidate_ticks),
+        }
+
+        if not ball_state.valid:
+            self._ball_release_samples.clear()
+            self._ball_release_candidate_ticks = 0
+            debug['candidate_ticks'] = 0
+            self._ball_release_last_debug = debug
+            return True
+
+        pos = np.asarray(ball_state.position, dtype=np.float64).reshape(-1)
+        vel = np.asarray(ball_state.velocity, dtype=np.float64).reshape(-1)
+        if (pos.shape[0] != 3 or vel.shape[0] != 3
+                or not np.all(np.isfinite(pos))
+                or not np.all(np.isfinite(vel))):
+            self._ball_release_samples.clear()
+            self._ball_release_candidate_ticks = 0
+            debug['candidate_ticks'] = 0
+            self._ball_release_last_debug = debug
+            return True
+
+        fresh = age_s <= self.ball_release_max_obs_age_s
+        vz_m_s = float(vel[2] * 1e-3)
+        z_mm = float(pos[2])
+        if fresh:
+            self._ball_release_samples.append((now_wall, z_mm, vz_m_s))
+            while (self._ball_release_samples
+                   and now_wall - self._ball_release_samples[0][0]
+                   > self.ball_release_window_s):
+                self._ball_release_samples.popleft()
+        else:
+            self._ball_release_samples.clear()
+
+        z_drop_m = 0.0
+        if self._ball_release_samples:
+            max_z_mm = max(sample[1] for sample in self._ball_release_samples)
+            z_drop_m = max(0.0, (max_z_mm - z_mm) * 1e-3)
+
+        velocity_ok = (
+            vz_m_s <= -abs(self.ball_release_min_downward_velocity_m_s))
+        drop_ok = z_drop_m >= self.ball_release_min_z_drop_m
+        candidate = bool(fresh and velocity_ok and drop_ok)
+        if candidate:
+            self._ball_release_candidate_ticks += 1
+        else:
+            self._ball_release_candidate_ticks = 0
+
+        debug.update({
+            'fresh': bool(fresh),
+            'vz_m_s': float(vz_m_s),
+            'z_drop_m': float(z_drop_m),
+            'candidate': bool(candidate),
+            'candidate_ticks': int(self._ball_release_candidate_ticks),
+        })
+        self._ball_release_last_debug = debug
+
+        if (self._ball_release_candidate_ticks
+                >= self.ball_release_required_consecutive_ticks):
+            self._has_released_ball = True
+            self._ball_release_gate_active = False
+            self._last_valid_ball_wall_time = now_wall
+            self._ball_release_samples.clear()
+            self._ball_release_candidate_ticks = 0
+            self.get_logger().info(
+                'Ball-release gate cleared; starting RL from released ball '
+                f'(vz={vz_m_s:.3f}m/s, z_drop={z_drop_m:.3f}m, '
+                f'age={age_s * 1e3:.0f}ms)')
+            self._sync_rl_integrator_to_last_safe_command()
+            self._reset_compensator_to_current_arm()
+            return False
+
+        return True
+
+    def _sync_rl_integrator_to_last_safe_command(self) -> None:
+        """Pin the RL command integrator to the last published safe command."""
+        if self.rl_controller is None:
+            return
+        self.rl_controller.arm_cmd_q = \
+            self._last_safe_joint_positions.astype(np.float32).copy()
+        self.rl_controller.arm_cmd_qvel = np.zeros(
+            self._rl_expected_joint_count, dtype=np.float32)
+
+    def _reset_compensator_to_current_arm(self) -> None:
+        """Reset actuator compensation from the latest right-arm feedback."""
+        if self.compensator is None:
+            return
+        try:
+            current_q, _ = self._get_right_arm_feedback()
+            if current_q is None and self.rl_controller is not None:
+                current_q = self.rl_controller.current_arm_cmd_q()
+            if current_q is not None:
+                self.compensator.reset(current_q.astype(np.float32))
+                self.get_logger().info(
+                    'Compensator reset with current arm position')
+        except Exception as e:
+            self.get_logger().warn(f'Failed to reset compensator: {e}')
+
+    def _record_policy_hold_log(
+            self, ball_state: BallState,
+            age_s: float,
+            arm_q: Optional[np.ndarray],
+            arm_dq: Optional[np.ndarray],
+            control_mode: str = 'hold') -> None:
+        """Record a 200 Hz row while RL inference is deliberately parked."""
+        if not self.save_policy_log or self.rl_controller is None:
+            return
+        ball_pos_m, ball_vel_m_s = self._ball_state_to_policy_sim_frame(
+            ball_state)
+        try:
+            if hasattr(self.rl_controller, '_build_obs'):
+                obs = self.rl_controller._build_obs(
+                    self.rl_controller._last_valid_ball_pos_m,
+                    self.rl_controller._last_valid_ball_vel_m_s,
+                    float(age_s), self.control_dt,
+                    arm_q=arm_q, arm_dq=arm_dq)
+                self.rl_controller.last_obs = obs.astype(np.float32).copy()
+                self.rl_controller.last_action = np.zeros(
+                    self._rl_expected_joint_count, dtype=np.float32)
+            self._record_policy_log(
+                ball_pos_m, ball_vel_m_s, bool(ball_state.valid),
+                float(age_s), arm_q, arm_dq, control_mode=control_mode)
+        except Exception:  # noqa: BLE001 - logging must not affect safety path
+            pass
+
+    def _run_ball_capture_gate(self, ball_state: BallState) -> None:
+        """Hold safe init pose until the first valid ball state is captured."""
+        if not self._ball_capture_gate_active:
+            self._ball_capture_gate_active = True
+            self.get_logger().warn(
+                'No valid ball captured yet; holding safe init pose and '
+                'skipping RL inference')
+        target = self.safe_init_pose_q
+        self._last_raw_joint_positions = target.copy()
+        self._publish_right_arm_command(target, ball_state.stamp)
+        self._sync_rl_integrator_to_last_safe_command()
+        right_arm_q, right_arm_dq = self._get_right_arm_feedback()
+        self._record_policy_hold_log(
+            ball_state, self.rl_ball_obs_age_clip, right_arm_q, right_arm_dq,
+            control_mode='capture_gate')
+
+    def _run_ball_release_gate(
+            self, ball_state: BallState,
+            age_override: Optional[float]) -> None:
+        """Hold safe init pose until the operator-released ball is moving."""
+        now_wall = time.time()
+        if not self._ball_release_gate_active:
+            self._ball_release_gate_active = True
+            self._ball_release_gate_log_last_wall = now_wall
+            self.get_logger().warn(
+                'Waiting for ball release; holding safe init pose and '
+                'skipping RL inference')
+        elif now_wall - self._ball_release_gate_log_last_wall >= 1.0:
+            dbg = getattr(self, '_ball_release_last_debug', {}) or {}
+            self.get_logger().info(
+                'Ball-release gate waiting: '
+                f"valid={dbg.get('valid')} "
+                f"fresh={dbg.get('fresh')} "
+                f"age={float(dbg.get('age_s', 0.0)) * 1e3:.0f}ms "
+                f"vz={float(dbg.get('vz_m_s', float('nan'))):.3f}m/s "
+                f"z_drop={float(dbg.get('z_drop_m', 0.0)):.3f}m "
+                f"ticks={int(dbg.get('candidate_ticks', 0))}/"
+                f'{self.ball_release_required_consecutive_ticks}')
+            self._ball_release_gate_log_last_wall = now_wall
+
+        target = self.safe_init_pose_q
+        self._last_raw_joint_positions = target.copy()
+        self._publish_right_arm_command(target, ball_state.stamp)
+        self._sync_rl_integrator_to_last_safe_command()
+        right_arm_q, right_arm_dq = self._get_right_arm_feedback()
+        self._record_policy_hold_log(
+            ball_state,
+            self._release_gate_age_s(ball_state, age_override),
+            right_arm_q, right_arm_dq,
+            control_mode='release_gate')
+
     def _run_ball_lost_failsafe(self, stamp: Time) -> None:
         """Pause RL and drive the right arm toward the safe init posture.
 
@@ -2918,14 +3754,176 @@ class PingPongControllerNode(Node):
         target = self.safe_init_pose_q
         self._last_raw_joint_positions = target.copy()
         self._publish_right_arm_command(target, stamp)
-        if self.rl_controller is not None:
-            # Sync the policy integrator to what was actually commanded this
-            # tick (the ramp position) with zero velocity, so a resume does
-            # not snap from a stale state.
-            self.rl_controller.arm_cmd_q = \
-                self._last_safe_joint_positions.astype(np.float32).copy()
-            self.rl_controller.arm_cmd_qvel = np.zeros(
-                self._rl_expected_joint_count, dtype=np.float32)
+        # Sync the policy integrator to what was actually commanded this tick
+        # (the ramp position) with zero velocity, so a resume does not snap.
+        self._sync_rl_integrator_to_last_safe_command()
+
+    def _should_engage_done_failsafe(
+            self, ball_state: BallState, ball_pos_m: np.ndarray,
+            ball_vel_m_s: np.ndarray) -> tuple[bool, str, dict]:
+        """Check done conditions and return (should_engage, reason, conditions).
+
+        Returns (False, "", {}) if done monitoring is disabled or if the policy
+        FK is unavailable. Otherwise evaluates all conditions and returns True
+        if ANY fires.
+        """
+        if not self.enable_done_monitoring or self.done_monitor is None:
+            return False, "", {}
+        if not ball_state.valid:
+            # No ball => cannot evaluate ball-state conditions, skip check.
+            return False, "", {}
+        if self.rl_controller is None:
+            return False, "", {}
+
+        # Get racket position from real feedback when available; replay/headless
+        # paths fall back to the policy's command trajectory.
+        right_arm_q, _ = self._get_right_arm_feedback()
+        racket_q = (
+            right_arm_q if right_arm_q is not None
+            else self.rl_controller.arm_cmd_q)
+        racket_pos_m, fk_ok = self.rl_controller._compute_racket_pose_base(
+            racket_q)
+        if not fk_ok:
+            # FK unavailable => cannot check racket conditions
+            racket_pos_m = None
+        racket_anchor_m = getattr(
+            self.rl_controller, '_racket_anchor_pos_base', None)
+        if racket_anchor_m is None:
+            racket_anchor_m = self._viz_racket_anchor_sim
+        if racket_anchor_m is None:
+            return False, "", {}
+
+        # RLPolicyController FK already uses the MJX base-yaw convention:
+        # x/y are base-relative and z is world/sim height. Do not apply
+        # _transform_ball_pos_to_sim_frame(), which is only for real ball
+        # measurements whose z is base_link-relative.
+        if racket_pos_m is not None:
+            racket_pos_sim = np.asarray(racket_pos_m, dtype=np.float64).reshape(3)
+        else:
+            racket_pos_sim = None
+        racket_anchor_sim = np.asarray(racket_anchor_m, dtype=np.float64).reshape(3)
+
+        # Check done conditions
+        is_done, reason, conditions = self.done_monitor.check_done(
+            ball_pos_m=ball_pos_m,
+            ball_vel_m_s=ball_vel_m_s,
+            racket_pos_m=racket_pos_sim,
+            racket_anchor_m=racket_anchor_sim,
+            base_pos_m=None,  # Stationary base => [0, 0, z]
+        )
+        if is_done:
+            raw_sim_pos = None
+            raw_age_s = None
+            raw_frame = None
+            try:
+                with self._estimator_log_lock:
+                    raw = self._latest_raw_detection
+                if raw is not None and len(raw) >= 2:
+                    raw_t = float(raw[0])
+                    raw_pos_m = (
+                        np.asarray(raw[1], dtype=np.float64).reshape(3) * 1e-3)
+                    raw_frame = str(raw[4]) if len(raw) > 4 else 'base_link'
+                    if raw_frame == 'sim_frame':
+                        raw_sim_pos = raw_pos_m
+                    elif raw_frame == 'base_link':
+                        raw_sim_pos = self._transform_ball_pos_to_sim_frame(raw_pos_m)
+                    raw_age_s = max(
+                        0.0,
+                        self.get_clock().now().nanoseconds * 1e-9 - raw_t)
+            except Exception:  # noqa: BLE001 - diagnostics must not affect safety
+                raw_sim_pos = None
+                raw_age_s = None
+            self._last_done_debug = {
+                'ball_pos_m': np.asarray(ball_pos_m, dtype=np.float64).reshape(3),
+                'ball_vel_m_s': np.asarray(ball_vel_m_s, dtype=np.float64).reshape(3),
+                'raw_ball_pos_m': raw_sim_pos,
+                'raw_ball_age_s': raw_age_s,
+                'raw_ball_frame': raw_frame,
+                'racket_pos_m': (
+                    None if racket_pos_sim is None
+                    else np.asarray(racket_pos_sim, dtype=np.float64).reshape(3)),
+                'racket_anchor_m': racket_anchor_sim,
+                'conditions': dict(conditions),
+            }
+
+        return is_done, reason, conditions
+
+    def _run_done_failsafe(self, stamp: Time, reason: str) -> None:
+        """Pause RL and drive to safe pose when done condition fires.
+
+        Same behavior as ball-lost failsafe: smooth ramp to safe_init_pose_q
+        via the safety limiter, pinning the RL integrator so it can resume
+        cleanly if the violation clears.
+        """
+        if not self._done_failsafe_active:
+            self._done_failsafe_active = True
+            debug = getattr(self, '_last_done_debug', {}) or {}
+            ball = debug.get('ball_pos_m')
+            raw_ball = debug.get('raw_ball_pos_m')
+            raw_age_s = debug.get('raw_ball_age_s')
+            racket = debug.get('racket_pos_m')
+            anchor = debug.get('racket_anchor_m')
+            detail = ''
+            if ball is not None:
+                detail += f' control_ball={np.round(ball, 3).tolist()}m'
+            if raw_ball is not None:
+                detail += f' raw_ball={np.round(raw_ball, 3).tolist()}m'
+                if ball is not None:
+                    dz = float(np.asarray(ball)[2] - np.asarray(raw_ball)[2])
+                    detail += f' dz_control_minus_raw={dz:+.3f}m'
+                if raw_age_s is not None:
+                    detail += f' raw_age={raw_age_s * 1e3:.0f}ms'
+            if racket is not None:
+                detail += f' racket={np.round(racket, 3).tolist()}m'
+            if anchor is not None:
+                detail += f' anchor={np.round(anchor, 3).tolist()}m'
+            self.get_logger().warn(
+                f'Done condition triggered: {reason} - '
+                f'Pausing RL and moving to safe pose.{detail}')
+        target = self.safe_init_pose_q
+        self._last_raw_joint_positions = target.copy()
+        self._publish_right_arm_command(target, stamp)
+        self._sync_rl_integrator_to_last_safe_command()
+
+    def _run_duration_failsafe(self, stamp: Time) -> None:
+        """Park at safe pose after the configured formal run duration expires."""
+        if not self._run_duration_elapsed:
+            self._run_duration_elapsed = True
+            elapsed = 0.0
+            if self._formal_run_start_wall is not None:
+                elapsed = max(0.0, time.time() - self._formal_run_start_wall)
+            self.get_logger().warn(
+                f'Run duration reached ({elapsed:.2f}s >= '
+                f'{self.run_duration_s:.2f}s); parking at safe init pose')
+            if (self.shutdown_after_run_duration
+                    and not self._run_duration_shutdown_started):
+                self._run_duration_shutdown_started = True
+                self.get_logger().info(
+                    'shutdown_after_run_duration=true; shutting down after '
+                    f'{self.shutdown_after_run_duration_delay_s:.2f}s hold')
+                threading.Thread(
+                    target=self._shutdown_after_run_duration,
+                    daemon=True).start()
+        target = self.safe_init_pose_q
+        self._last_raw_joint_positions = target.copy()
+        self._publish_right_arm_command(target, stamp)
+        self._sync_rl_integrator_to_last_safe_command()
+
+    def _maybe_log_done_status(self, conditions: dict) -> None:
+        """Throttled log of done-condition diagnostics."""
+        now_wall = time.time()
+        if (now_wall - self._done_log_last_wall) < self.done_log_period_s:
+            return
+        self._done_log_last_wall = now_wall
+        if self.done_monitor is None:
+            return
+        diag = self.done_monitor.diagnostics()
+        active = [k for k, v in conditions.items() if v]
+        self.get_logger().info(
+            f'DoneMonitor: checks={diag["total_checks"]} '
+            f'violations={diag["total_violations"]} '
+            f'rate={diag["violation_rate"]*100:.1f}% '
+            f'active={active if active else "none"}')
 
     def _joint_state_callback(self, msg: JointState):
         """Cache the latest JointState; values are looked up by name.
@@ -3223,6 +4221,41 @@ class PingPongControllerNode(Node):
         self.get_logger().info(
             f'✅ Simulation ball input enabled: subscribing to "{self.sim_ball_topic}"')
 
+    def _init_mocap_input(self):
+        """Initialize motion capture ball state input: start UDP receiver."""
+        from pingpong_controller.mocap_ball_detector import MocapBallDetector
+
+        try:
+            self._mocap_detector = MocapBallDetector(
+                udp_host=self.mocap_bind_host,
+                udp_port=self.mocap_udp_port,
+                calibration_path=self.mocap_calibration_path if self.mocap_calibration_path else None,
+                timeout_s=self.mocap_timeout_s,
+                marker_id=self.mocap_marker_id,
+                position_unit=self.mocap_position_unit,
+                timestamp_unit=self.mocap_timestamp_unit,
+                velocity_alpha=self.mocap_velocity_alpha,
+                max_velocity_m_s=self.mocap_max_velocity_m_s
+            )
+            self._mocap_detector.start()
+            self.get_logger().info(
+                f'✅ Motion capture input enabled: '
+                f'{self.mocap_bind_host}:{self.mocap_udp_port}, '
+                f'marker {self.mocap_marker_id}, '
+                f'unit={self.mocap_position_unit}, '
+                f'timestamp_unit={self.mocap_timestamp_unit}, '
+                f'timeout {self.mocap_timeout_s}s')
+            if self.mocap_calibration_path:
+                self.get_logger().info(
+                    f'   Calibration: {self.mocap_calibration_path}')
+            else:
+                self.get_logger().warn(
+                    '   No calibration file specified - using identity transform!')
+        except Exception as e:
+            self.get_logger().error(
+                f'Failed to initialize mocap input: {e}')
+            self.enable_mocap_input = False
+
     def _sim_ball_callback(self, msg) -> None:
         """Callback for simulation ball state (Odometry message)."""
         # Extract position (in meters, convert to mm for consistency)
@@ -3249,6 +4282,64 @@ class PingPongControllerNode(Node):
 
         with self._sim_ball_lock:
             self._sim_ball_state = ball_state
+
+    def _get_mocap_ball_state(self) -> Optional[BallState]:
+        """Generate BallState from motion capture detector.
+
+        Returns:
+            BallState with position/velocity in mm/mm_s (robot base_link frame),
+            or None if mocap detector is not available
+        """
+        if self._mocap_detector is None:
+            return None
+
+        # Get ball state from mocap detector
+        pos_m, vel_m_s, valid = self._mocap_detector.get_ball_state()
+        diagnostics = self._mocap_detector.get_diagnostics()
+
+        # Convert from meters to mm for consistency with vision pipeline
+        pos_mm = pos_m * 1000.0
+        vel_mm_s = vel_m_s * 1000.0
+
+        # Create BallState
+        now_time = self.get_clock().now()
+        raw_measurement = {
+            'source': 'mocap',
+            'detection_method': 'mocap_udp',
+            'mocap': diagnostics,
+        }
+        ball_state = BallState(
+            position=pos_mm.astype(np.float64),
+            velocity=vel_mm_s.astype(np.float64),
+            stamp=now_time.to_msg(),
+            valid=valid,
+            raw_measurement=raw_measurement
+        )
+
+        packet_count = int(diagnostics.get('packet_count', 0) or 0)
+        is_new_packet = packet_count > self._last_mocap_estimator_packet_count
+        if valid and is_new_packet:
+            stamp_sec = diagnostics.get('arrival_time_s')
+            if stamp_sec is None or not np.isfinite(float(stamp_sec)):
+                stamp_sec = now_time.nanoseconds * 1e-9
+            else:
+                stamp_sec = float(stamp_sec)
+
+            if self.enable_ball_state_estimator:
+                observation = {
+                    'detected': True,
+                    'position': ball_state.position.tolist(),
+                    'velocity': ball_state.velocity.tolist(),
+                    'raw_measurement': raw_measurement,
+                }
+                self._feed_ball_state_estimator(observation, stamp_sec)
+            self._last_mocap_estimator_packet_count = packet_count
+
+            if packet_count > self._last_mocap_recorded_packet_count:
+                self._record_base_trajectory(stamp_sec, ball_state)
+                self._last_mocap_recorded_packet_count = packet_count
+
+        return ball_state
 
     def _get_replay_ball_state(self) -> Optional[BallState]:
         """Generate BallState from replay CSV data."""
@@ -3286,6 +4377,25 @@ class PingPongControllerNode(Node):
             stamp=now_time.to_msg(),
         )
 
+        if (self.enable_ball_state_estimator
+                and state.valid
+                and idx != self._last_replay_estimator_idx):
+            raw_measurement = {
+                'source': 'replay',
+                'replay_idx': int(idx),
+                'replay_t_rel': float(row['t_rel']),
+                'frame': 'sim_frame' if self.replay_data_is_sim_frame else 'base_link',
+            }
+            observation = {
+                'detected': True,
+                'position': state.position.tolist(),
+                'velocity': state.velocity.tolist(),
+                'raw_measurement': raw_measurement,
+            }
+            stamp_sec = now_time.nanoseconds * 1e-9
+            self._feed_ball_state_estimator(observation, stamp_sec)
+            self._last_replay_estimator_idx = idx
+
         self._replay_idx = idx
         return state
 
@@ -3310,6 +4420,37 @@ class PingPongControllerNode(Node):
             if abs(snapshot[name] - target_rad) > tol:
                 return False
         return True
+
+    def _compute_init_pose_ramp_command(
+            self, target_q: np.ndarray, elapsed_s: float) -> np.ndarray:
+        """Return a smooth right-arm init-pose command for the current tick."""
+        target = np.asarray(target_q, dtype=np.float64).reshape(-1)
+        if self._init_pose_start_q is None:
+            q, _ = self._get_right_arm_feedback()
+            if q is not None:
+                self._init_pose_start_q = q.astype(np.float64)
+                self._init_pose_start_source = '/joint_states'
+            else:
+                self._init_pose_start_q = np.asarray(
+                    self._last_safe_joint_positions,
+                    dtype=np.float64).reshape(-1).copy()
+                self._init_pose_start_source = 'last command'
+                self.get_logger().warn(
+                    'No right-arm /joint_states yet for init-pose ramp; '
+                    'using last command as ramp start',
+                    throttle_duration_sec=2.0)
+
+            self.get_logger().info(
+                'Init-pose ramp start '
+                f'({self._init_pose_start_source}, deg='
+                f'{np.rad2deg(self._init_pose_start_q).round(2).tolist()})')
+
+        duration = max(float(self.init_pose_duration_s), 1e-6)
+        alpha = float(np.clip(elapsed_s / duration, 0.0, 1.0))
+        # Smoothstep gives zero slope at both ends, which avoids a sharp
+        # command jump when safety limiting is intentionally disabled.
+        alpha = alpha * alpha * (3.0 - 2.0 * alpha)
+        return self._init_pose_start_q + alpha * (target - self._init_pose_start_q)
 
     def _maybe_sync_safety_limiter_to_joint_state(self) -> None:
         """Re-anchor the safety limiter once the real right-arm state arrives.
@@ -3337,6 +4478,36 @@ class PingPongControllerNode(Node):
         self.get_logger().info(
             'Safety limiter anchored to real right-arm /joint_states '
             f'(deg={np.rad2deg(q).round(2).tolist()})')
+
+    def _ball_state_to_policy_sim_frame(
+            self, ball_state: BallState) -> tuple[np.ndarray, np.ndarray]:
+        """Return ball position/velocity in the sim-frame convention for RL."""
+        # BallState carries mm / mm/s; the RL policy expects m / m/s.
+        ball_pos_m = np.asarray(
+            ball_state.position, dtype=np.float32) * 1e-3
+        ball_vel_m_s = np.asarray(
+            ball_state.velocity, dtype=np.float32) * 1e-3
+
+        # CRITICAL: Transform ball coordinates from the real Cartesian frame
+        # (waist02) to the simulation frame to match training observations.
+        #
+        # Simulation coordinate system (MJX):
+        #   - Uses _point_to_base() which returns [x_rel, y_rel, z_world]
+        #   - x, y: relative to base, rotated by yaw
+        #   - z: ABSOLUTE world frame z (NOT relative to base!)
+        #
+        # Real system coordinate system:
+        #   - Ball position is in the robot Cartesian frame via T_base_camera
+        #   - That Cartesian frame corresponds to moz1_pd.xml body waist02
+        #   - x, y, z: ALL relative to waist02 origin
+        #
+        # Transform: p_sim = p_waist02 + waist02_origin_in_sim_base.
+        #
+        # IMPORTANT: Skip transformation if replay data is already in sim frame
+        # (e.g., mjx_ball_replay.csv from simulation).
+        if not (self.enable_replay_mode and self.replay_data_is_sim_frame):
+            ball_pos_m = self._transform_ball_pos_to_sim_frame(ball_pos_m)
+        return ball_pos_m, ball_vel_m_s
 
     def compute_action(self, ball_state: BallState,
                        age_override: Optional[float] = None) -> np.ndarray:
@@ -3371,30 +4542,8 @@ class PingPongControllerNode(Node):
             age_s = self.rl_ball_obs_age_clip
         age_s = float(max(0.0, age_s))
 
-        # BallState carries mm / mm/s; the RL policy expects m / m/s.
-        ball_pos_m = np.asarray(
-            ball_state.position, dtype=np.float32) * 1e-3
-        ball_vel_m_s = np.asarray(
-            ball_state.velocity, dtype=np.float32) * 1e-3
-
-        # CRITICAL: Transform ball coordinates from real system (base_link) to
-        # simulation frame to match training observations.
-        #
-        # Simulation coordinate system (MJX):
-        #   - Uses _point_to_base() which returns [x_rel, y_rel, z_world]
-        #   - x, y: relative to base, rotated by yaw
-        #   - z: ABSOLUTE world frame z (NOT relative to base!)
-        #
-        # Real system coordinate system:
-        #   - Ball position is in base_link frame via T_base_camera transform
-        #   - x, y, z: ALL relative to base_link origin
-        #
-        # The issue: simulation's z is world-absolute (~1.4m), real's z is
-        # base-relative (~-0.4m). From data analysis:
-        #   base_z_in_world ≈ 1.75m (base_link origin height in world frame)
-        #
-        # Transform: z_sim = z_real + BASE_HEIGHT_IN_WORLD
-        ball_pos_m = self._transform_ball_pos_to_sim_frame(ball_pos_m)
+        ball_pos_m, ball_vel_m_s = self._ball_state_to_policy_sim_frame(
+            ball_state)
 
         # Real right-arm feedback for the RL observation. If it's missing,
         # predict() falls back to arm_cmd_q/arm_cmd_qvel internally, which
@@ -3407,6 +4556,11 @@ class PingPongControllerNode(Node):
                     'estimate for q/dq until feedback arrives',
                     throttle_duration_sec=5.0)
                 self._joint_state_log_warned_missing = True
+
+        # Stash the sim-frame ball state for the viz done-condition overlay.
+        self._last_sim_ball_pos_m = ball_pos_m.copy()
+        self._last_sim_ball_vel_m_s = ball_vel_m_s.copy()
+        self._last_sim_ball_valid = bool(ball_state.valid)
 
         try:
             joint_cmd = self.rl_controller.predict(
@@ -3493,6 +4647,19 @@ class PingPongControllerNode(Node):
             self.get_clock().now().to_msg()
         msg.header.frame_id = ''
         msg.cmds = list(cmds)
+        if self.warn_no_command_subscriber:
+            try:
+                sub_count = self.cmd_pub.get_subscription_count()
+            except Exception:  # noqa: BLE001 - diagnostic only
+                sub_count = 1
+            if sub_count <= 0:
+                now_wall = time.time()
+                if (now_wall - self._last_cmd_pub_no_sub_warn_wall
+                        >= self.command_subscriber_warn_period_s):
+                    self._last_cmd_pub_no_sub_warn_wall = now_wall
+                    self.get_logger().warn(
+                        'No subscribers on command_topic; MechUnitCmdArray is '
+                        'being published but no controller is receiving it')
         self.cmd_pub.publish(msg)
 
     def _publish_right_arm_command(
@@ -4214,9 +5381,28 @@ class PingPongControllerNode(Node):
         live visualization window and the offline raw-video annotation tool
         draw identical overlays. All node-specific state (frame counters,
         callback rate, output frame) is gathered here and passed in.
+
+        The sim-frame ball state + done-condition block is drawn for BOTH the
+        hybrid detector's own composite render and the non-hybrid overlay.
+        When RL is active, it displays the control-loop sim state that is fed to
+        the policy and done monitor; otherwise it falls back to the raw frame.
         """
-        # Hybrid detector已经完成渲染，直接返回
+        # Sim-frame ball state + done overlay pieces.
+        (sim_ball_pos_m, sim_ball_vel_m_s, sim_detected,
+         sim_label) = self._compute_viz_sim_ball_state(observation)
+        racket_anchor_m = self._get_racket_anchor_sim()
+        racket_pos_m = self._get_racket_pos_sim()
+        detected = bool(observation.get('detected', False))
+
+        # Hybrid detector已经完成渲染（RGB|IR 双图）：把 sim/done 叠加画到成品图后返回。
         if observation.get('_hybrid_viz_rendered', False):
+            if sim_ball_pos_m is not None and sim_ball_vel_m_s is not None:
+                draw_sim_done_overlay(
+                    frame, sim_ball_pos_m, sim_ball_vel_m_s, racket_anchor_m,
+                    racket_pos_m=racket_pos_m,
+                    thresholds=self._viz_done_thresholds(),
+                    detected=sim_detected,
+                    label=sim_label)
             return frame
 
         if len(self.callback_times) > 0:
@@ -4227,12 +5413,67 @@ class PingPongControllerNode(Node):
         output_frame = (
             getattr(self.detector, 'output_frame', 'camera')
             if self.detector is not None else 'camera')
+
         return render_detection_overlay(
             frame, observation,
             frame_count=self.frame_count,
             detection_count=self.detection_count,
             callback_hz=callback_hz,
-            output_frame=output_frame)
+            output_frame=output_frame,
+            sim_ball_pos_m=sim_ball_pos_m,
+            sim_ball_vel_m_s=sim_ball_vel_m_s,
+            racket_anchor_m=racket_anchor_m,
+            racket_pos_m=racket_pos_m,
+            done_thresholds=self._viz_done_thresholds(),
+            sim_detected=sim_detected,
+            sim_label=sim_label)
+
+    def _viz_done_thresholds(self) -> dict:
+        """Done-condition thresholds for the viz overlay (from node params)."""
+        return {
+            'ball_z_floor': self.done_ball_z_floor_m,
+            'ball_z_ceiling': self.done_ball_z_ceiling_m,
+            'ball_x_range': self.done_ball_x_range_m,
+            'ball_y_range': self.done_ball_y_range_m,
+            'racket_anchor_distance': self.done_racket_anchor_distance_m,
+            'racket_z_high_offset': self.done_racket_z_high_offset_m,
+            'racket_z_low_offset': self.done_racket_z_low_offset_m,
+        }
+
+    def _compute_viz_sim_ball_state(self, observation: dict):
+        """Ball pos (m, sim frame) + vel (m/s) for the viz done overlay.
+
+        Prefer the control-loop sim state when available, because that is the
+        value fed to RL and done monitoring. Fall back to the per-frame detector
+        observation before the first control tick, or when RL is disabled.
+        """
+        if (self.enable_rl_policy and self.rl_controller is not None
+                and self._last_sim_ball_pos_m is not None
+                and self._last_sim_ball_vel_m_s is not None):
+            return (
+                np.asarray(self._last_sim_ball_pos_m, dtype=np.float64).reshape(3),
+                np.asarray(self._last_sim_ball_vel_m_s, dtype=np.float64).reshape(3),
+                bool(self._last_sim_ball_valid),
+                "[SIM control state]",
+            )
+
+        if not bool(observation.get('detected', False)):
+            return None, None, False, "[SIM raw frame]"
+        pos = observation.get('position')
+        if pos is None:
+            return None, None, False, "[SIM raw frame]"
+        vel = observation.get('velocity')
+        if vel is None:
+            vel = [0.0, 0.0, 0.0]
+        try:
+            pos_m = np.asarray(pos, dtype=np.float64).reshape(3) * 1e-3
+            vel_m_s = np.asarray(vel, dtype=np.float64).reshape(3) * 1e-3
+        except (TypeError, ValueError):
+            return None, None, False, "[SIM raw frame]"
+        # Real Cartesian/waist02 frame -> sim frame, matching the transform used
+        # to feed the policy.
+        pos_sim = self._transform_ball_pos_to_sim_frame(pos_m)
+        return pos_sim, vel_m_s, True, "[SIM raw frame]"
 
     def _publish_ball_state_debug(self, ball_state: BallState) -> None:
         """Publish ball detection result as Odometry on /pingpong/ball_state.
@@ -4290,7 +5531,7 @@ class PingPongControllerNode(Node):
         self.rl_joint_cmd_state_pub.publish(msg)
 
     def _transform_ball_pos_to_sim_frame(self, ball_pos_m: np.ndarray) -> np.ndarray:
-        """Transform ball position from real base_link frame to simulation frame.
+        """Transform ball position from real Cartesian/waist02 frame to sim frame.
 
         Coordinate system difference (from code analysis):
 
@@ -4303,26 +5544,165 @@ class PingPongControllerNode(Node):
             Result: [x_rel, y_rel, z_world_absolute]
 
         Real system (via T_base_camera transformation):
-            All coordinates relative to base_link origin.
-            Result: [x_rel, y_rel, z_base_link_relative]
+            All coordinates relative to the robot Cartesian frame, which
+            corresponds to moz1_pd.xml's waist02 body.
+            Result: [x_waist02, y_waist02, z_waist02]
 
         Transform:
-            z_world = z_base_link + BASE_LINK_HEIGHT_IN_WORLD
+            p_sim = p_waist02 + waist02_origin_in_sim_base
 
-        where BASE_LINK_HEIGHT_IN_WORLD is the physical height of base_link
-        frame origin above ground when robot is in TARGET_DEGREES posture.
-        This is a kinematic constant for the given posture, validated from
-        data: sim_z=1372mm, real_z=-376mm => 1.748m ≈ 1.75m (error < 20mm).
+        where waist02_origin_in_sim_base is computed from moz1_pd.xml at the
+        TARGET_DEGREES posture. Default [0.0, 0.023583, 0.947396] m.
 
         Args:
-            ball_pos_m: Ball position in base_link frame [x, y, z] in meters
+            ball_pos_m: Ball position in waist02 frame [x, y, z] in meters
 
         Returns:
             Ball position in simulation frame [x, y, z_world] in meters
         """
         transformed = ball_pos_m.copy()
+        transformed[0] = ball_pos_m[0] + self._sim_cartesian_x_offset_m
+        transformed[1] = ball_pos_m[1] + self._sim_cartesian_y_offset_m
         transformed[2] = ball_pos_m[2] + self._sim_base_height_m
         return transformed
+
+    # ------------------------------------------------------------------
+    # Racket-anchor FK for the viz done-condition overlay (RL-independent)
+    # ------------------------------------------------------------------
+
+    def _init_viz_fk(self) -> None:
+        """Load a standalone MuJoCo model for the racket anchor / racket pose.
+
+        The done-condition overlay needs the racket anchor (right_ee_site at the
+        training initial posture) and, when joint feedback is available, the
+        current racket pose. The RL policy already does this FK, but it is absent
+        when enable_rl_policy:=false, so we build our own lightweight model here.
+        Mirrors RLPolicyController's FK: non-right-arm joints seeded to
+        TARGET_DEGREES, world->base yaw transform. Sets self._viz_racket_anchor_sim
+        (constant, sim frame) and keeps the model for per-frame racket pose FK.
+        """
+        self._viz_mj_model = None
+        self._viz_mj_data = None
+        self._viz_racket_site_id = -1
+        self._viz_arm_jids = []
+        self._viz_base_body_id = -1
+        self._viz_racket_anchor_sim = None
+        if not _MUJOCO_AVAILABLE:
+            self.get_logger().info(
+                'Viz FK: mujoco not available; sim done-condition overlay will '
+                'show ball pos/vel and z done-conditions only.')
+            return
+        xml = self.robot_xml_path
+        if not xml or not os.path.exists(xml):
+            self.get_logger().warn(
+                f'Viz FK: robot_xml_path not found ({xml}); racket anchor '
+                'unavailable; done overlay will show ball pos/vel and z only.')
+            return
+        try:
+            model = _mj.MjModel.from_xml_path(str(xml))
+            data = _mj.MjData(model)
+            site_id = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_SITE, 'right_ee_site')
+            arm_jids = [
+                _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_JOINT, n)
+                for n in RIGHT_ARM_JOINTS]
+            if site_id < 0 or any(j < 0 for j in arm_jids):
+                self.get_logger().warn(
+                    'Viz FK: model missing right_ee_site or right-arm joints; '
+                    'done overlay will show ball pos/vel and z only.')
+                return
+            base_bid = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_BODY, 'base_link')
+            if base_bid < 0:
+                base_bid = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_BODY, 'base')
+            self._viz_mj_model = model
+            self._viz_mj_data = data
+            self._viz_racket_site_id = int(site_id)
+            self._viz_arm_jids = arm_jids
+            self._viz_base_body_id = int(base_bid)
+            # Seed non-right-arm joints to TARGET_DEGREES (matches training FK).
+            right_set = set(RIGHT_ARM_JOINTS)
+            for name, deg in TARGET_DEGREES.items():
+                if name in right_set:
+                    continue
+                jid = _mj.mj_name2id(model, _mj.mjtObj.mjOBJ_JOINT, name)
+                if jid < 0:
+                    continue
+                qadr = int(model.jnt_qposadr[jid])
+                data.qpos[qadr] = float(np.deg2rad(deg))
+            # Anchor = right_ee_site at the training initial right-arm posture.
+            anchor_base = self._viz_racket_pose_base(
+                np.asarray(target_right_arm_q_rad(), dtype=np.float64))
+            if anchor_base is not None:
+                # _viz_racket_pose_base follows the MJX base-yaw convention:
+                # x/y are base-relative, z is already world/sim height.
+                self._viz_racket_anchor_sim = anchor_base
+                self.get_logger().info(
+                    'Viz FK: racket anchor (sim frame) = '
+                    f'{np.round(self._viz_racket_anchor_sim, 3).tolist()} m')
+        except Exception as exc:  # noqa: BLE001 - non-fatal for viz
+            self.get_logger().warn(
+                f'Viz FK init failed: {exc}; done overlay will show ball '
+                'pos/vel and z only.')
+            self._viz_mj_model = None
+            self._viz_mj_data = None
+
+    def _viz_racket_pose_base(self, arm_q: np.ndarray):
+        """FK the right arm to `arm_q`; return racket pos in base yaw frame (m).
+
+        Non-right-arm joints stay seeded to TARGET_DEGREES. Returns a length-3
+        numpy array or None if FK is unavailable.
+        """
+        if self._viz_mj_model is None or self._viz_mj_data is None:
+            return None
+        model, data = self._viz_mj_model, self._viz_mj_data
+        q = np.asarray(arm_q, dtype=np.float64).reshape(-1)
+        for i, jid in enumerate(self._viz_arm_jids):
+            qadr = int(model.jnt_qposadr[jid])
+            data.qpos[qadr] = float(q[i])
+        _mj.mj_forward(model, data)
+        rpos_world = np.asarray(
+            data.site_xpos[self._viz_racket_site_id], dtype=np.float64)
+        # world -> base yaw frame (matches RLPolicyController._world_point_to_base).
+        if self._viz_base_body_id < 0:
+            return rpos_world
+        base_pos = np.asarray(
+            data.xpos[self._viz_base_body_id], dtype=np.float64)
+        base_R = np.asarray(
+            data.xmat[self._viz_base_body_id], dtype=np.float64).reshape(3, 3)
+        yaw = np.arctan2(base_R[1, 0], base_R[0, 0])
+        dx = rpos_world[0] - base_pos[0]
+        dy = rpos_world[1] - base_pos[1]
+        c, s = np.cos(yaw), np.sin(yaw)
+        return np.array([c * dx + s * dy, -s * dx + c * dy, rpos_world[2]],
+                        dtype=np.float64)
+
+    def _get_racket_anchor_sim(self):
+        """Return the racket anchor in sim frame (m), or None.
+
+        Prefers the live RL policy anchor when the policy is running (kept in
+        sync with its FK); otherwise the standalone init-time constant.
+        """
+        if self.rl_controller is not None:
+            anchor = getattr(self.rl_controller, '_racket_anchor_pos_base', None)
+            if anchor is not None:
+                # RLPolicyController stores the racket anchor in the same MJX
+                # base-yaw convention: z is already world/sim height.
+                return np.asarray(anchor, dtype=np.float64).reshape(3)
+        return self._viz_racket_anchor_sim
+
+    def _get_racket_pos_sim(self):
+        """Return the CURRENT racket pose in sim frame (m) from joint feedback.
+
+        FK the live right-arm q from /joint_states. Returns None when feedback
+        or FK is unavailable (then the overlay omits the racket-z/-far checks).
+        """
+        q, _ = self._get_right_arm_feedback()
+        if q is None:
+            return None
+        rpos_base = self._viz_racket_pose_base(q)
+        if rpos_base is None:
+            return None
+        # _viz_racket_pose_base already returns sim-frame z (world height).
+        return rpos_base
 
     def _maybe_log_safety_counts(self):
         """Throttled log of safety limiter activity (once per second)."""
@@ -4380,6 +5760,9 @@ def main(args=None):
             node._shutdown_realsense()
             node._stop_raw_video_recording()
             node._shutdown_visualization()
+            # Stop mocap detector if running
+            if hasattr(node, '_mocap_detector') and node._mocap_detector is not None:
+                node._mocap_detector.stop()
             node.save_trajectory_plot()
             node.save_estimator_log_file()
             node.save_policy_log_file()

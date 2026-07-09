@@ -1,0 +1,36 @@
+# 灰色反光球 Hybrid Detector 参数配置
+
+use_hybrid_detector: true
+
+# YOLO参数
+yolo_interval: 1  # 每3帧运行一次YOLO（降低计算负载）
+target_class: 'Class 0'  # YOLO模型的类别
+conf_threshold: 0.25  # YOLO置信度阈值
+
+# IR检测参数
+ir_threshold: 150
+use_adaptive_ir: true
+ir_exposure: 1000  # μs (1ms)
+ir_gain: 16
+ir_laser_power: 360  # mW
+ir_min_radius: 10  # px (过滤小噪点)
+ir_max_radius: 60  # px (250mm时球半径~51px)
+ir_circularity_min: 0.7
+ir_brightness_percentile: 25
+hybrid_roi_margin: 100  # YOLO bbox扩展边距
+
+# 禁用颜色筛选（灰色球）
+color_match_threshold: 0.0
+color_circularity_min: 0.0
+hsv_lower: [0, 0, 0]
+hsv_upper: [180, 255, 255]
+
+# RealSense配置
+use_direct_realsense: true
+realsense_fps: 60
+use_depth_sensor: true  # 虽然hybrid主要用geometry，但仍保留sensor作为fallback
+
+# 其他配置
+print_every: 1
+enable_visualization: false
+save_raw_video: false

@@ -334,9 +334,13 @@ class RLPolicyController:
         self._last_valid_ball_pos_m = np.zeros(3, dtype=np.float32)
         self._last_valid_ball_vel_m_s = np.zeros(3, dtype=np.float32)
         self._has_valid_ball_obs = False
+        # Fixed reset racket anchor for done-condition checks. Keep it separate
+        # from _prev_racket_pos_base, which is mutated every observation step.
+        self._racket_anchor_pos_base: Optional[np.ndarray] = None
         # Initialize prev racket pos (base frame) for velocity estimation.
         if self.mj_model is not None and self.mj_data is not None:
             rpos_base, _ = self._compute_racket_pose_base(self.arm_cmd_q)
+            self._racket_anchor_pos_base = rpos_base.astype(np.float32).copy()
             self._prev_racket_pos_base = rpos_base.astype(np.float32)
         else:
             self._prev_racket_pos_base = np.zeros(3, dtype=np.float32)

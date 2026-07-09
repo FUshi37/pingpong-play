@@ -89,6 +89,24 @@ class _CheckpointUnpickler(pickle.Unpickler):
         return super().find_class(module, name)
 
 
+def inspect_mjx_checkpoint_metadata(model_path: str) -> dict:
+    """Read lightweight deployment metadata from an MJX checkpoint.
+
+    The pickle still has to be loaded because the training checkpoint stores
+    metadata and params in one object, but callers can use this before building
+    the controller to choose the correct 50D/67D observation path.
+    """
+    with open(model_path, "rb") as handle:
+        payload = _CheckpointUnpickler(handle).load()
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"MJX checkpoint is not a dict: {model_path}")
+    return {
+        "obs_dim": int(payload.get("obs_dim", 0) or 0),
+        "act_dim": int(payload.get("act_dim", 0) or 0),
+        "env_cfg": dict(payload.get("env_cfg") or {}),
+    }
+
+
 def _flatten_params(params: dict) -> dict:
     """Flatten the nested param tree into 'pi/l1/w'-style keys."""
     flat: dict = {}

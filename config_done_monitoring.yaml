@@ -1,0 +1,76 @@
+# Done condition monitoring and safety configuration
+# This config enables real-time monitoring of simulation termination conditions
+# to prevent the RL policy from operating outside its trained boundaries.
+
+pingpong_controller:
+  ros__parameters:
+    # ============================================================================
+    # Done Condition Monitoring (NEW)
+    # ============================================================================
+
+    # Master switch: enable/disable done-condition monitoring
+    enable_done_monitoring: true
+
+    # Ball state limits (sim frame, meters)
+    # These match the training environment (mjx_juggle_env.py:2778-2786)
+    done_ball_z_floor_m: 0.3        # Min ball height (dropped)
+    done_ball_z_ceiling_m: 1.9      # Max ball height (too high)
+    done_ball_x_range_m: 0.5        # Max |ball_x - anchor_x|
+    done_ball_y_range_m: 0.5        # Max |ball_y - anchor_y|
+
+    # Racket position limits relative to anchor (sim frame, meters)
+    done_racket_anchor_distance_m: 1.1   # Max 3D distance from anchor
+    done_racket_z_high_offset_m: 0.24    # Max z above anchor
+    done_racket_z_low_offset_m: -0.12    # Max z below anchor (negative)
+
+    # End-effector workspace limits (OPTIONAL, base frame, meters)
+    # These are ADDITIONAL hard constraints beyond the sim done-conditions.
+    # Set to empty list [] to disable; otherwise [min, max].
+    #
+    # CALIBRATION GUIDE:
+    # 1. Run with empty limits first to observe actual workspace
+    # 2. Use tools/calibrate_workspace.py to mark safe boundaries
+    # 3. Set limits here with ~5cm safety margin
+    #
+    # Example (UNCALIBRATED - ADJUST BEFORE USE):
+    done_ee_x_limits_m: [-0.298, 0.163]    # e.g., [-0.3, 0.3] for ±30cm in x
+    done_ee_y_limits_m: [-0.502, -0.290]    # e.g., [0.2, 0.8] for 20-80cm forward
+    # Keep the lower bound below the reset racket anchor (~1.08m), otherwise
+    # done-monitoring parks the arm immediately at formal RL start.
+    done_ee_z_limits_m: [0.692, 1.462]    # e.g., [0.6, 1.4] for 60-140cm height
+
+    # Logging throttle (seconds between status logs)
+    done_log_period_s: 2.0
+
+    # Hardware runs with visualization already show frame/detection state in
+    # the OpenCV window. Keep the terminal free for the Enter start gate and
+    # safety messages.
+    quiet_vision_logs: true
+    print_every: 0
+
+    # ============================================================================
+    # Existing Safety Features (PRESERVED)
+    # ============================================================================
+
+    # Safety limiter: vel/acc limits on right-arm commands
+    # Can be disabled if done-monitoring provides sufficient protection
+    enable_safety_limiter: true
+
+    # Ball-lost failsafe: timeout extended to work with estimator
+    enable_ball_lost_failsafe: true
+    ball_lost_failsafe_timeout_s: 0.6
+
+    # ============================================================================
+    # RL Policy Configuration (UNCHANGED)
+    # ============================================================================
+
+    enable_rl_policy: true
+    rl_model_path: "$(find-pkg-share pingpong_controller)/models/best_model.zip"
+    policy_backend: "mjx"  # or "sb3"
+    control_rate_hz: 200.0
+
+    # Joint limits from MuJoCo XML (PRESERVED - loaded from robot_xml_path)
+    robot_xml_path: "$(find-pkg-share pingpong_controller)/models/moz1_pd.xml"
+
+    # Coordinate transform: real base_link -> sim frame
+    sim_base_height_m: 0.947396

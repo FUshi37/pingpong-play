@@ -33,6 +33,7 @@ setup(
         'console_scripts': [
             'pingpong_node = pingpong_controller.pingpong_node:main',
             'enhanced_trajectory_visualizer = pingpong_controller.enhanced_trajectory_visualizer:main',
+            'mocap_calibration = pingpong_controller.mocap_calibration:main',
         ],
     },
 )

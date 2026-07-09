@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# ROS2
+install/
+log/
+build/
+
+# Model files
+*.pt
+*.pkl
+
+# Output files
+outputs/
+*.csv
+*.json
+*.png
+*.mp4
+*.avi
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temp files
+*.log
+*.txt

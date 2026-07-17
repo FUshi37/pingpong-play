@@ -6,10 +6,11 @@ feed into ONE filter, instead of solving frequency-bridging, latency
 compensation, and loss robustness separately:
 
   1. Frequency bridging. The detector emits a fresh measurement at most at
-     the camera rate (~60 Hz); the control loop runs at 200 Hz. A ballistic
-     ``predict`` step (constant velocity + gravity) is evaluated every
-     control tick, so the policy always sees a smooth, continuous ball state
-     even on the ticks between measurements.
+     the camera rate (~60 Hz); the control loop runs at 200 Hz. Two selectable
+     output contracts are supported: ``continuous`` evaluates a ballistic
+     prediction every control tick, while ``predict_on_frame_hold`` predicts
+     once from the newest accepted measurement and holds that snapshot until
+     the next configured output refresh.
 
   2. Perception-latency compensation (the key trick). Each measurement is
      stamped with the image timestamp ``t_img`` (the instant the ball was
@@ -41,6 +42,7 @@ Pure NumPy, no ROS. One instance per node lifetime; default OFF at the node.
 from __future__ import annotations
 
 import threading
+from collections import deque
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -48,6 +50,13 @@ import numpy as np
 
 # Gravity magnitude in mm/s^2 (positive scalar).
 _G_MM_S2 = 9810.0
+
+CONTROL_OUTPUT_CONTINUOUS = 'continuous'
+CONTROL_OUTPUT_PREDICT_ON_FRAME_HOLD = 'predict_on_frame_hold'
+CONTROL_OUTPUT_MODES = (
+    CONTROL_OUTPUT_CONTINUOUS,
+    CONTROL_OUTPUT_PREDICT_ON_FRAME_HOLD,
+)
 
 
 def gravity_for_base_link() -> Tuple[float, float, float]:
@@ -176,6 +185,24 @@ class BallStateEstimatorConfig:
     # timeline (trust/degrade/invalid) is unchanged, so a truly lost ball still
     # ages out and hands control to the failsafe.
     enable_prediction: bool = True
+
+    # --- Policy-facing output scheduling ---
+    # continuous: preserve the original behavior and predict to every control
+    # tick. predict_on_frame_hold: predict once after a new accepted measurement
+    # at no more than frame_hold_output_rate_hz, then zero-order hold that
+    # position/velocity snapshot between policy ticks. The latter matches the
+    # deployed checkpoint's 200 Hz policy / 50 Hz held-ball observation path.
+    control_output_mode: str = CONTROL_OUTPUT_CONTINUOUS
+    frame_hold_output_rate_hz: float = 50.0
+
+    # --- Dynamics phase ---
+    # True preserves the original free-flight gravity/drag model. False uses a
+    # constant-velocity model, intended for the operator-held phase before a
+    # release gate clears. Controllers can switch this on at release and ask the
+    # estimator to reseed velocity from recent real measurements.
+    enable_ballistic_dynamics: bool = True
+    dynamics_reseed_history_size: int = 8
+    dynamics_reseed_window_s: float = 0.12
 
     # --- Aerodynamics (quadratic drag + optional Magnus) ---
     # A 2.7 g / 40 mm ball has a very high drag-to-mass ratio: ignoring drag
@@ -312,6 +339,19 @@ class BallStateEstimator:
                  frame_rotation: Optional[np.ndarray] = None):
         self.config = config or BallStateEstimatorConfig()
         self._gravity = np.asarray(self.config.gravity_mm_s2, dtype=float)
+        self.control_output_mode = str(
+            self.config.control_output_mode).strip().lower()
+        if self.control_output_mode not in CONTROL_OUTPUT_MODES:
+            raise ValueError(
+                f'Unsupported control_output_mode={self.control_output_mode!r}; '
+                f'expected one of {CONTROL_OUTPUT_MODES}')
+        frame_hold_rate_hz = float(self.config.frame_hold_output_rate_hz)
+        if not np.isfinite(frame_hold_rate_hz) or frame_hold_rate_hz <= 0.0:
+            raise ValueError(
+                'frame_hold_output_rate_hz must be finite and positive')
+        self._frame_hold_output_period_s = 1.0 / frame_hold_rate_hz
+        self._ballistic_dynamics_enabled = bool(
+            self.config.enable_ballistic_dynamics)
 
         # Cached aero parameters (resolved once; 0 disables a term).
         self._drag_k = (float(self.config.drag_k_per_mm)
@@ -382,6 +422,8 @@ class BallStateEstimator:
 
     def _reset_locked(self) -> None:
         """Drop all state; the next update() re-initializes. Caller holds lock."""
+        self._ballistic_dynamics_enabled = bool(
+            self.config.enable_ballistic_dynamics)
         self._pos = np.zeros(3)          # committed position at _filter_time
         self._vel = np.zeros(3)          # committed velocity at _filter_time
         self._P = np.eye(6) * 1e6        # committed covariance
@@ -395,11 +437,21 @@ class BallStateEstimator:
         self._prev_vert_vel = 0.0        # vertical velocity sign tracker
         self._state = STATE_TRACKING
         self.last_event: Optional[str] = None
+        # Policy-facing snapshot state. Measurement sequence advances only for
+        # accepted/reinitialized real observations, never for gated rejects.
+        self._measurement_sequence = 0
+        self._frame_hold_cached_sequence = -1
+        self._frame_hold_snapshot = None
+        self._frame_hold_last_refresh_time: Optional[float] = None
+        self._measurement_history = deque(
+            maxlen=max(2, int(self.config.dynamics_reseed_history_size)))
         # Diagnostics.
         self.updates_accepted = 0
         self.updates_rejected = 0
         self.reinits = 0
         self.bounces_detected = 0
+        self.frame_hold_snapshots = 0
+        self.dynamics_reseeds = 0
 
     @property
     def state(self) -> str:
@@ -409,6 +461,46 @@ class BallStateEstimator:
         with self._lock:
             self._reset_locked()
             self.last_event = 'reset'
+
+    def set_ballistic_dynamics(
+            self, enabled: bool,
+            *, reinitialize_from_history: bool = False) -> None:
+        """Switch between held/static CV and free-flight ballistic dynamics.
+
+        The original estimator behavior is ``enabled=True`` for its entire
+        lifetime. Release-gated controllers may start with it disabled, then
+        enable it once real measurement history confirms that the ball moved.
+        """
+        with self._lock:
+            enabled = bool(enabled)
+            if (enabled == self._ballistic_dynamics_enabled
+                    and not reinitialize_from_history):
+                return
+            self._ballistic_dynamics_enabled = enabled
+
+            reseeded = False
+            if enabled and reinitialize_from_history and self._measurement_history:
+                latest_pos, latest_t = self._measurement_history[-1]
+                window_s = max(
+                    0.0, float(self.config.dynamics_reseed_window_s))
+                samples = [
+                    (pos, stamp)
+                    for pos, stamp in self._measurement_history
+                    if latest_t - stamp <= window_s + 1e-9
+                ]
+                velocity = self._velocity_from_samples(samples)
+                self._init_at(latest_pos, latest_t, velocity=velocity)
+                self.reinits += 1
+                self.dynamics_reseeds += 1
+                reseeded = True
+
+            # Force a fresh policy snapshot on the next control tick even when
+            # the configured 50 Hz output period has not elapsed yet.
+            self._frame_hold_cached_sequence = -1
+            self._frame_hold_last_refresh_time = None
+            self.last_event = (
+                'ballistic_enabled_reseed' if reseeded
+                else ('ballistic_enabled' if enabled else 'ballistic_disabled'))
 
     # ------------------------------------------------------------------
     # 60 Hz update (vision callback thread)
@@ -429,8 +521,13 @@ class BallStateEstimator:
         if z.shape != (3,) or not np.all(np.isfinite(z)):
             return
         t = float(t_img)
+        if not np.isfinite(t):
+            return
 
         with self._lock:
+            if (not self._measurement_history
+                    or t > self._measurement_history[-1][1] + 1e-9):
+                self._measurement_history.append((z.copy(), t))
             # First-ever measurement (or after a reset): stash it and wait for
             # a second point to seed velocity by finite difference (two-point
             # initialization). A CV filter started from v=0 takes ~5 frames to
@@ -542,21 +639,22 @@ class BallStateEstimator:
             self._prev_vert_vel = float(np.dot(self._vel, self._up_dir()))
             self._state = STATE_TRACKING
             self.updates_accepted += 1
+            self._mark_measurement_accepted_locked()
             self.last_event = 'updated'
 
     # ------------------------------------------------------------------
-    # 200 Hz predict (control thread) — read-only, never mutates committed state
+    # 200 Hz predict (control thread)
     # ------------------------------------------------------------------
 
     def predict_to(self, t_now: float) -> dict:
         """Extrapolate the committed state to ``t_now`` for the control loop.
 
-        Read-only: the committed (pos, vel, P, time) are NOT modified, so the
-        next update() still fuses against the real last measurement. The
-        elapsed (t_now - t_img) absorbs the perception latency automatically
-        (de-aging), and the optional prediction_horizon_s leads further (kept
-        0.0 by default — execution latency is handled by the sim actuator
-        model, see module docstring).
+        The committed filter state (pos, vel, P, time) is never modified, so the
+        next update() still fuses against the real last measurement. In
+        ``continuous`` mode, the elapsed (t_now - t_img) is propagated on every
+        call. In ``predict_on_frame_hold`` mode, the first due control tick after
+        a new accepted measurement creates one de-aged snapshot and subsequent
+        calls return that fixed position/velocity until the next refresh.
 
         Returns a dict shaped like a detector observation:
             position [x,y,z] mm, velocity [vx,vy,vz] mm/s, valid (bool),
@@ -577,42 +675,96 @@ class BallStateEstimator:
                 self._state = STATE_LOST
                 return self._invalid_out(reason='loss_timeout', loss_s=loss_s)
 
+            output_mode = self.control_output_mode
+            snapshot_sequence = self._measurement_sequence
+            snapshot_new = False
+            snapshot_hold_s = 0.0
+
             if not self.config.enable_prediction:
                 # No-prediction mode: return the last FUSED measurement held at
                 # its committed time. No ballistic roll-forward, no latency
                 # de-aging — just the smoothed 60 Hz state re-issued at 200 Hz.
+                output_mode = 'no_prediction'
                 dt = 0.0
                 clamped = False
                 pos, vel = self._pos.copy(), self._vel.copy()
+                age_s = self._graded_age(loss_s)
+                control_age_s = loss_s
+            elif output_mode == CONTROL_OUTPUT_PREDICT_ON_FRAME_HOLD:
+                has_new_measurement = (
+                    self._measurement_sequence
+                    != self._frame_hold_cached_sequence)
+                refresh_due = (
+                    self._frame_hold_last_refresh_time is None
+                    or t - self._frame_hold_last_refresh_time
+                    >= self._frame_hold_output_period_s - 1e-9)
+                if (self._frame_hold_snapshot is None
+                        or (has_new_measurement and refresh_due)):
+                    pos, vel, dt, clamped = self._predict_committed_to_locked(t)
+                    self._frame_hold_snapshot = {
+                        'position': pos.copy(),
+                        'velocity': vel.copy(),
+                        'extrapolation_s': float(dt),
+                        'clamped': bool(clamped),
+                        'control_time_s': float(t),
+                        'measurement_sequence': int(self._measurement_sequence),
+                    }
+                    self._frame_hold_cached_sequence = self._measurement_sequence
+                    self._frame_hold_last_refresh_time = float(t)
+                    self.frame_hold_snapshots += 1
+                    snapshot_new = True
+
+                snapshot = self._frame_hold_snapshot
+                pos = snapshot['position'].copy()
+                vel = snapshot['velocity'].copy()
+                dt = float(snapshot['extrapolation_s'])
+                clamped = bool(snapshot['clamped'])
+                snapshot_sequence = int(snapshot['measurement_sequence'])
+                snapshot_hold_s = max(
+                    0.0, t - float(snapshot['control_time_s']))
+                # The checkpoint treats normal inter-frame zero-order hold as
+                # fresh. Age starts only when the next 50 Hz refresh is overdue.
+                overdue_s = max(
+                    0.0,
+                    snapshot_hold_s - self._frame_hold_output_period_s)
+                age_s = self._graded_age(overdue_s)
+                # Safety gating must account for both the prediction used to
+                # make the snapshot and how long that snapshot has been held.
+                control_age_s = float(dt) + snapshot_hold_s
             else:
-                # Target time = now + forward lead (lead defaults to 0).
-                target = t + max(float(self.config.prediction_horizon_s), 0.0)
-                raw_dt = target - self._filter_time
+                pos, vel, dt, clamped = self._predict_committed_to_locked(t)
+                age_s = self._graded_age(loss_s)
+                control_age_s = float(dt)
 
-                # Cap extrapolation; shorten it near a suspected bounce/hit.
-                cap = self.config.max_extrapolation_s
-                if self._near_event(self._pos):
-                    cap = min(cap, self.config.near_event_extrapolation_s)
-                clamped = raw_dt > cap
-                dt = min(max(raw_dt, 0.0), cap)
-
-                pos, vel = self._step(self._pos, self._vel, dt)
-
+            prediction_active = bool(self.config.enable_prediction)
             if self._state != STATE_LOST:
-                self._state = (STATE_TRACKING if loss_s < self.config.trust_loss_s
-                               else STATE_PREDICTING)
+                # With prediction disabled the output is a held fused
+                # measurement, never a predicted state.  Keep loss_s/age_s for
+                # stale-observation safety, but do not report "predicting".
+                self._state = (
+                    STATE_TRACKING
+                    if (not prediction_active
+                        or loss_s < self.config.trust_loss_s)
+                    else STATE_PREDICTING)
 
             return {
                 'position': pos.tolist(),
                 'velocity': vel.tolist(),
                 'detected': True,
                 'valid': True,
-                'age_s': self._graded_age(loss_s),
-                'predicted': loss_s >= self.config.trust_loss_s,
+                'age_s': float(age_s),
+                'predicted': bool(
+                    prediction_active
+                    and loss_s >= self.config.trust_loss_s),
                 'state': self._state,
                 'extrapolation_s': float(dt),
                 'loss_s': float(loss_s),
                 'clamped': bool(clamped),
+                'output_mode': output_mode,
+                'snapshot_sequence': int(snapshot_sequence),
+                'snapshot_new': bool(snapshot_new),
+                'snapshot_hold_s': float(snapshot_hold_s),
+                'control_age_s': float(control_age_s),
             }
 
     # ------------------------------------------------------------------
@@ -645,6 +797,27 @@ class BallStateEstimator:
         self._consecutive_rejects = 0
         self._prev_vert_vel = float(np.dot(self._vel, self._up_dir()))
         self._state = STATE_TRACKING
+        self._mark_measurement_accepted_locked()
+
+    def _mark_measurement_accepted_locked(self) -> None:
+        """Advance the version consumed by frame-held policy snapshots."""
+        self._measurement_sequence += 1
+
+    def _predict_committed_to_locked(
+            self, control_time_s: float
+    ) -> Tuple[np.ndarray, np.ndarray, float, bool]:
+        """Predict committed state to one control target without mutating it."""
+        target = float(control_time_s) + max(
+            float(self.config.prediction_horizon_s), 0.0)
+        raw_dt = target - float(self._filter_time)
+
+        cap = float(self.config.max_extrapolation_s)
+        if self._near_event(self._pos):
+            cap = min(cap, float(self.config.near_event_extrapolation_s))
+        clamped = raw_dt > cap
+        dt = min(max(raw_dt, 0.0), cap)
+        pos, vel = self._step(self._pos, self._vel, dt)
+        return pos, vel, float(dt), bool(clamped)
 
     def _velocity_from_samples(self, samples: list) -> Optional[np.ndarray]:
         """Least-squares velocity (mm/s) from a list of (pos, t) reject points.
@@ -677,6 +850,8 @@ class BallStateEstimator:
         otherwise the closed-form gravity-only step. Single source of truth so
         update() and predict_to() always integrate identically.
         """
+        if not self._ballistic_dynamics_enabled:
+            return pos + vel * dt, vel.copy()
         if self._aero_on:
             return _propagate_aero(
                 pos, vel, self._gravity, dt, self._drag_k, self._magnus_k,
@@ -697,7 +872,8 @@ class BallStateEstimator:
         """
         F = np.eye(6)
         F[0, 3] = F[1, 4] = F[2, 5] = dt
-        if not self._aero_on or vel is None:
+        if (not self._ballistic_dynamics_enabled
+                or not self._aero_on or vel is None):
             return F
         v = np.asarray(vel, dtype=float).reshape(3)
         speed = float(np.linalg.norm(v))
@@ -790,6 +966,9 @@ class BallStateEstimator:
         return float(loss_s + frac * (ceil - loss_s))
 
     def _invalid_out(self, reason: str, loss_s: float = 0.0) -> dict:
+        output_mode = (
+            self.control_output_mode
+            if self.config.enable_prediction else 'no_prediction')
         return {
             'position': [0.0, 0.0, 0.0],
             'velocity': [0.0, 0.0, 0.0],
@@ -802,6 +981,11 @@ class BallStateEstimator:
             'loss_s': float(loss_s),
             'clamped': False,
             'reject_reason': reason,
+            'output_mode': output_mode,
+            'snapshot_sequence': int(self._measurement_sequence),
+            'snapshot_new': False,
+            'snapshot_hold_s': 0.0,
+            'control_age_s': float(loss_s),
         }
 
     def diagnostics(self) -> dict:
@@ -815,4 +999,9 @@ class BallStateEstimator:
                 'reinits': self.reinits,
                 'bounces_detected': self.bounces_detected,
                 'initialized': self._initialized,
+                'control_output_mode': self.control_output_mode,
+                'measurement_sequence': self._measurement_sequence,
+                'frame_hold_snapshots': self.frame_hold_snapshots,
+                'ballistic_dynamics_enabled': self._ballistic_dynamics_enabled,
+                'dynamics_reseeds': self.dynamics_reseeds,
             }

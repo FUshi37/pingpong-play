@@ -20,7 +20,7 @@ pingpong_controller:
 
     # Racket position limits relative to anchor (sim frame, meters)
     done_racket_anchor_distance_m: 1.1   # Max 3D distance from anchor
-    done_racket_z_high_offset_m: 0.24    # Max z above anchor
+    done_racket_z_high_offset_m: 0.34    # Max z above anchor
     done_racket_z_low_offset_m: -0.12    # Max z below anchor (negative)
 
     # End-effector workspace limits (OPTIONAL, base frame, meters)
@@ -33,11 +33,20 @@ pingpong_controller:
     # 3. Set limits here with ~5cm safety margin
     #
     # Example (UNCALIBRATED - ADJUST BEFORE USE):
-    done_ee_x_limits_m: [-0.298, 0.163]    # e.g., [-0.3, 0.3] for ±30cm in x
-    done_ee_y_limits_m: [-0.502, -0.290]    # e.g., [0.2, 0.8] for 20-80cm forward
+    done_ee_x_limits_m: [-0.348, 0.163]    # e.g., [-0.3, 0.3] for ±30cm in x
+    # Keep this aligned with RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh. The probe
+    # receives its limits from CLI/environment variables, not this ROS YAML.
+    done_ee_y_limits_m: [-0.602, -0.290]    # e.g., [0.2, 0.8] for 20-80cm forward
     # Keep the lower bound below the reset racket anchor (~1.08m), otherwise
     # done-monitoring parks the arm immediately at formal RL start.
     done_ee_z_limits_m: [0.692, 1.462]    # e.g., [0.6, 1.4] for 60-140cm height
+
+    # Predictive EE stop: short-horizon projection from EE velocity/acceleration.
+    done_enable_predictive_stop: true
+    done_prediction_horizon_s: 0.12
+    done_prediction_dt_s: 0.01
+    done_prediction_margin_m: 0.02
+    done_prediction_orientation_margin_rad: 0.035
 
     # Logging throttle (seconds between status logs)
     done_log_period_s: 2.0
@@ -54,7 +63,7 @@ pingpong_controller:
 
     # Safety limiter: vel/acc limits on right-arm commands
     # Can be disabled if done-monitoring provides sufficient protection
-    enable_safety_limiter: true
+    enable_safety_limiter: false
 
     # Ball-lost failsafe: timeout extended to work with estimator
     enable_ball_lost_failsafe: true
@@ -72,5 +81,9 @@ pingpong_controller:
     # Joint limits from MuJoCo XML (PRESERVED - loaded from robot_xml_path)
     robot_xml_path: "$(find-pkg-share pingpong_controller)/models/moz1_pd.xml"
 
-    # Coordinate transform: real base_link -> sim frame
-    sim_base_height_m: 0.947396
+    # Coordinate transform: real /cart_states frame -> sim observation frame.
+    # /cart_states is relative to moz1_pd.xml body waist03
+    # (moz_v2.urdf link torso_flange). Its TARGET-pose MuJoCo world height is
+    # 1.302396m: 1.202396m above XML base plus the XML base body's 0.100m
+    # world offset.
+    sim_base_height_m: 1.302396

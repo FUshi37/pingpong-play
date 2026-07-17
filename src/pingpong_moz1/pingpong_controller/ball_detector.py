@@ -1911,6 +1911,17 @@ class PingPongBallDetector:
             if self.pipeline is not None:
                 self.pipeline.stop()
 
+    def close(self):
+        """Release the RealSense pipeline held by this detector."""
+        pipeline = getattr(self, 'pipeline', None)
+        if pipeline is None:
+            return
+        try:
+            pipeline.stop()
+        except Exception:
+            pass
+        self.pipeline = None
+
 
 if __name__ == "__main__":
     import argparse

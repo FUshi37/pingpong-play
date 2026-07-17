@@ -16,6 +16,7 @@ import numpy as np
 import cv2
 import pyrealsense2 as rs
 import time
+import os
 from collections import deque
 from typing import Optional, Dict, Any, Tuple
 from ultralytics import YOLO
@@ -86,6 +87,8 @@ class HybridBallDetector:
         self.depth_scale = depth_scale
         self.depth_neighborhood_px = depth_neighborhood_px
         self.print_every = print_every
+        self.debug_yolo = str(os.environ.get("PINGPONG_YOLO_DEBUG", "")).lower() in (
+            "1", "true", "yes", "on")
         # IR 曝光/增益（构造时应用到 stereo sensor）与自适应背景分位数
         self.ir_exposure = exposure
         self.ir_gain = gain
@@ -568,7 +571,7 @@ class HybridBallDetector:
         xyxy = boxes.xyxy.cpu().numpy()
 
         # 调试：打印所有检测到的类别（每100帧打印一次）
-        if self.frame_count % 100 == 0 and len(class_ids) > 0:
+        if self.debug_yolo and self.frame_count % 100 == 0 and len(class_ids) > 0:
             detected_classes = [(self.yolo_model.names[cls_id], confidences[i])
                                for i, cls_id in enumerate(class_ids)]
             print(f"[YOLO Debug] 检测到: {detected_classes}, 目标类别: '{self.target_class}'")
@@ -1291,6 +1294,17 @@ class HybridBallDetector:
             if enable_viz:
                 cv2.destroyAllWindows()
             self.pipeline.stop()
+
+    def close(self):
+        """Release the RealSense pipeline held by this detector."""
+        pipeline = getattr(self, 'pipeline', None)
+        if pipeline is None:
+            return
+        try:
+            pipeline.stop()
+        except Exception:
+            pass
+        self.pipeline = None
 
     def _render_visualization(self, rgb_image, ir_image, observation):
         """

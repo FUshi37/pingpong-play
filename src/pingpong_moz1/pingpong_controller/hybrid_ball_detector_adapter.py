@@ -116,6 +116,8 @@ class HybridBallDetectorAdapter:
         self.use_depth_sensor = use_depth_sensor
         self.depth_scale = depth_scale
         self.depth_neighborhood_px = depth_neighborhood_px
+        self.T_base_camera = None
+        self.R_base_camera = None
 
         # 如果提供了ir_params_json，从文件加载参数
         if ir_params_json and os.path.exists(ir_params_json):
@@ -166,6 +168,11 @@ class HybridBallDetectorAdapter:
             print_every=print_every,
             depth_correction_model_path=depth_correction_model_path  # 新增
         )
+        self.T_base_camera = getattr(self.detector, 'T_base_camera', None)
+        if self.T_base_camera is not None:
+            T = np.asarray(self.T_base_camera, dtype=np.float64)
+            if T.shape == (4, 4) and np.all(np.isfinite(T)):
+                self.R_base_camera = T[:3, :3].copy()
 
     def detect(self, rgb_image, depth_image=None, timestamp=None):
         """

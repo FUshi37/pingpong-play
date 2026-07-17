@@ -9,6 +9,7 @@ integration so the deployed behavior matches training.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -67,6 +68,10 @@ DEFAULT_ARM_Q_HIGH_RAD = tuple(np.pi for _ in range(7))
 DEFAULT_BALL_OBS_AGE_CLIP_S = 0.20
 # JuggleConfig.action_acc_scale (base value; action_scale_mult is DR-only).
 DEFAULT_ACTION_ACC_SCALE = 1.0
+# MJX _point_to_base keeps the input point's z unchanged, so FK-derived racket
+# positions must keep MuJoCo world z. The real-camera path converts its z into
+# this same world-height convention before building policy observations.
+DEPLOYMENT_FK_WORLD_Z_CORRECTION_M = 0.0
 
 EXPECTED_OBS_DIM = 50  # Base observation dimension (legacy)
 EXPECTED_OBS_DIM_WITH_DELAY = 67  # 50 base + 17 delay conditioning
@@ -136,6 +141,7 @@ class RLPolicyController:
         logger: Optional[object] = None,
         arm_action_limiter: bool = False,
         enable_delay_conditioning: bool = True,
+        use_valid_ball_obs_age: bool = True,
     ) -> None:
         self._logger = logger or _LoggerShim()
         self.dt = float(dt)
@@ -153,6 +159,7 @@ class RLPolicyController:
         # for delay compensation features (obs_dim=67); when False, uses legacy
         # 50-dim observation without delay features.
         self.enable_delay_conditioning = bool(enable_delay_conditioning)
+        self.use_valid_ball_obs_age = bool(use_valid_ball_obs_age)
         self._expected_obs_dim = (
             EXPECTED_OBS_DIM_WITH_DELAY if self.enable_delay_conditioning
             else EXPECTED_OBS_DIM
@@ -196,7 +203,8 @@ class RLPolicyController:
             f"RL policy loaded | obs_dim={self._expected_obs_dim}, "
             f"act_dim={self.n_arm}, dt={self.dt:.4f}s, device={device}, "
             f"arm_action_limiter={self.arm_action_limiter}, "
-            f"delay_conditioning={self.enable_delay_conditioning}")
+            f"delay_conditioning={self.enable_delay_conditioning}, "
+            f"use_valid_ball_obs_age={self.use_valid_ball_obs_age}")
 
         # Optional MuJoCo FK for racket position/velocity.
         self.mj_model = None
@@ -384,7 +392,7 @@ class RLPolicyController:
 
         NOTE: This uses the base yaw frame convention from MJX juggle env,
         NOT the full base_link 6-DOF frame. Only yaw rotation is applied;
-        x/y are translated, but z remains world height.
+        x/y are translated, and z remains MuJoCo world height.
         """
         if self._base_body_id < 0:
             # Training XML kept base at origin for juggle; identity fallback.
@@ -410,8 +418,60 @@ class RLPolicyController:
         return np.array([
             c * dx + s * dy,
             -s * dx + c * dy,
-            p_world[2]  # z is world height, not relative to base
+            p_world[2] + DEPLOYMENT_FK_WORLD_Z_CORRECTION_M,
         ], dtype=np.float32)
+
+    def _world_rot_to_base_yaw(self, R_world: np.ndarray) -> np.ndarray:
+        """Rotate a world-frame orientation into the same base-yaw frame as FK."""
+        Rw = np.asarray(R_world, dtype=np.float32).reshape(3, 3)
+        if self._base_body_id < 0:
+            return Rw
+        base_R = np.asarray(
+            self.mj_data.xmat[self._base_body_id], dtype=np.float32
+        ).reshape(3, 3)
+        yaw = np.arctan2(base_R[1, 0], base_R[0, 0])
+        c = np.cos(yaw)
+        s = np.sin(yaw)
+        R_base_from_world_yaw = np.array([
+            [c, s, 0.0],
+            [-s, c, 0.0],
+            [0.0, 0.0, 1.0],
+        ], dtype=np.float32)
+        return R_base_from_world_yaw @ Rw
+
+    @staticmethod
+    def _rotmat_to_quat_xyzw(R: np.ndarray) -> np.ndarray:
+        """Convert a rotation matrix to a normalized [x, y, z, w] quaternion."""
+        m = np.asarray(R, dtype=np.float64).reshape(3, 3)
+        trace = float(np.trace(m))
+        if trace > 0.0:
+            s = math.sqrt(trace + 1.0) * 2.0
+            w = 0.25 * s
+            x = (m[2, 1] - m[1, 2]) / s
+            y = (m[0, 2] - m[2, 0]) / s
+            z = (m[1, 0] - m[0, 1]) / s
+        elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
+            s = math.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2]) * 2.0
+            w = (m[2, 1] - m[1, 2]) / s
+            x = 0.25 * s
+            y = (m[0, 1] + m[1, 0]) / s
+            z = (m[0, 2] + m[2, 0]) / s
+        elif m[1, 1] > m[2, 2]:
+            s = math.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2]) * 2.0
+            w = (m[0, 2] - m[2, 0]) / s
+            x = (m[0, 1] + m[1, 0]) / s
+            y = 0.25 * s
+            z = (m[1, 2] + m[2, 1]) / s
+        else:
+            s = math.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1]) * 2.0
+            w = (m[1, 0] - m[0, 1]) / s
+            x = (m[0, 2] + m[2, 0]) / s
+            y = (m[1, 2] + m[2, 1]) / s
+            z = 0.25 * s
+        q = np.asarray([x, y, z, w], dtype=np.float32)
+        norm = float(np.linalg.norm(q))
+        return q / norm if norm > 1e-9 else np.array(
+            [0.0, 0.0, 0.0, 1.0], dtype=np.float32)
 
     def _compute_racket_pose_base(
         self, arm_q: np.ndarray,
@@ -430,6 +490,121 @@ class RLPolicyController:
         rpos_world = np.asarray(
             self.mj_data.site_xpos[self._racket_site_id], dtype=np.float32)
         return self._world_point_to_base(rpos_world), True
+
+    def _compute_racket_pose_quat_base(
+        self, arm_q: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, bool]:
+        """Run FK and return racket position plus [x, y, z, w] orientation."""
+        if self.mj_model is None or self.mj_data is None:
+            return (
+                np.zeros(3, dtype=np.float32),
+                np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+                False,
+            )
+        for i, jid in enumerate(self._arm_jids):
+            qadr = int(self.mj_model.jnt_qposadr[jid])
+            self.mj_data.qpos[qadr] = float(arm_q[i])
+        mj.mj_forward(self.mj_model, self.mj_data)
+        rpos_world = np.asarray(
+            self.mj_data.site_xpos[self._racket_site_id], dtype=np.float32)
+        R_world = np.asarray(
+            self.mj_data.site_xmat[self._racket_site_id],
+            dtype=np.float32).reshape(3, 3)
+        R_base = self._world_rot_to_base_yaw(R_world)
+        return (
+            self._world_point_to_base(rpos_world),
+            self._rotmat_to_quat_xyzw(R_base),
+            True,
+        )
+
+    def _compute_racket_pose_jacobians_base(
+        self, arm_q: np.ndarray,
+    ) -> tuple[
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray, bool,
+    ]:
+        """Return racket pose plus exact MuJoCo translational/angular Jacobians.
+
+        Jacobian columns follow ``RIGHT_ARM_JOINTS`` and are expressed in the
+        same base-yaw frame as :meth:`_compute_racket_pose_quat_base`.  This is
+        substantially cheaper and better conditioned than seven finite-
+        difference FK calls in the 200 Hz workspace safety filter.
+        """
+        if (not _MUJOCO_AVAILABLE or self.mj_model is None
+                or self.mj_data is None):
+            zeros3 = np.zeros(3, dtype=np.float32)
+            zeros_j = np.zeros((3, len(RIGHT_ARM_JOINTS)), dtype=np.float64)
+            return (
+                zeros3,
+                np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+                zeros_j,
+                zeros_j.copy(),
+                False,
+            )
+        q = np.asarray(arm_q, dtype=np.float64).reshape(-1)
+        if q.shape[0] != len(self._arm_jids) or not np.all(np.isfinite(q)):
+            zeros3 = np.zeros(3, dtype=np.float32)
+            zeros_j = np.zeros((3, len(RIGHT_ARM_JOINTS)), dtype=np.float64)
+            return (
+                zeros3,
+                np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32),
+                zeros_j,
+                zeros_j.copy(),
+                False,
+            )
+        for i, jid in enumerate(self._arm_jids):
+            qadr = int(self.mj_model.jnt_qposadr[jid])
+            self.mj_data.qpos[qadr] = float(q[i])
+        mj.mj_forward(self.mj_model, self.mj_data)
+
+        rpos_world = np.asarray(
+            self.mj_data.site_xpos[self._racket_site_id], dtype=np.float32)
+        rotation_world = np.asarray(
+            self.mj_data.site_xmat[self._racket_site_id],
+            dtype=np.float32,
+        ).reshape(3, 3)
+        if self._base_body_id < 0:
+            rotation_base_from_world = np.eye(3, dtype=np.float64)
+        else:
+            base_rotation = np.asarray(
+                self.mj_data.xmat[self._base_body_id],
+                dtype=np.float64,
+            ).reshape(3, 3)
+            yaw = math.atan2(base_rotation[1, 0], base_rotation[0, 0])
+            c = math.cos(yaw)
+            s = math.sin(yaw)
+            rotation_base_from_world = np.array([
+                [c, s, 0.0],
+                [-s, c, 0.0],
+                [0.0, 0.0, 1.0],
+            ], dtype=np.float64)
+
+        jacobian_position_world = np.zeros(
+            (3, int(self.mj_model.nv)), dtype=np.float64)
+        jacobian_angular_world = np.zeros_like(jacobian_position_world)
+        mj.mj_jacSite(
+            self.mj_model,
+            self.mj_data,
+            jacobian_position_world,
+            jacobian_angular_world,
+            int(self._racket_site_id),
+        )
+        dof_addresses = np.asarray([
+            int(self.mj_model.jnt_dofadr[jid]) for jid in self._arm_jids
+        ], dtype=np.int64)
+        jacobian_position_base = (
+            rotation_base_from_world
+            @ jacobian_position_world[:, dof_addresses])
+        jacobian_angular_base = (
+            rotation_base_from_world
+            @ jacobian_angular_world[:, dof_addresses])
+        rotation_base = rotation_base_from_world @ rotation_world
+        return (
+            self._world_point_to_base(rpos_world),
+            self._rotmat_to_quat_xyzw(rotation_base),
+            jacobian_position_base,
+            jacobian_angular_base,
+            True,
+        )
 
     def current_arm_cmd_q(self) -> np.ndarray:
         """Return the latest 7-DOF right-arm command (rad)."""
@@ -567,9 +742,10 @@ class RLPolicyController:
         bpos_base = np.asarray(ball_pos_m, dtype=np.float32).reshape(3)
         bvel_base = np.asarray(ball_vel_m_s, dtype=np.float32).reshape(3)
 
-        # Compute racket pose/velocity in BASE frame via FK (matches
-        # JuggleEnv._get_obs() which uses _world_point_to_base on the racket
-        # site). When FK is unavailable we fall back to zeros.
+        # Compute racket pose/velocity in the deployment base-yaw/world-z
+        # convention. This mirrors JuggleEnv._point_to_base: x/y are transformed
+        # by base yaw, while z remains MuJoCo world height. When FK is
+        # unavailable we fall back to zeros.
         rpos_base, fk_ok = self._compute_racket_pose_base(q)
         if fk_ok:
             rvel_base = (rpos_base - self._prev_racket_pos_base) / max(
@@ -695,15 +871,21 @@ class RLPolicyController:
         # the first predict() call uses the actual ball state, not zeros.
         # Previously the update happened after _build_obs(), causing the
         # first observation to use initial zero values.
+        obs_age = float(ball_obs_age_s)
+        if not np.isfinite(obs_age) or obs_age < 0.0:
+            obs_age = 0.0
+
         if ball_valid:
             self._last_valid_ball_pos_m = np.asarray(
                 ball_pos_m, dtype=np.float32).reshape(3).copy()
             self._last_valid_ball_vel_m_s = np.asarray(
                 ball_vel_m_s, dtype=np.float32).reshape(3).copy()
             self._has_valid_ball_obs = True
-            age_for_obs = 0.0
+            # A valid estimator prediction can still be aged/stale. Preserve
+            # that age so obs[49] matches the estimator/dropout contract.
+            age_for_obs = obs_age if self.use_valid_ball_obs_age else 0.0
         else:
-            age_for_obs = max(ball_obs_age_s, step_dt)
+            age_for_obs = max(obs_age, step_dt)
 
         # Now build observation with the updated ball state
         obs = self._build_obs(

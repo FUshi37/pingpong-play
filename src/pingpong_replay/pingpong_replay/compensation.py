@@ -187,6 +187,24 @@ class CommandCompensator:
             self._warm_q = q0.copy()
         self._initialized = True
 
+    def observe_published(self, q_published: np.ndarray) -> None:
+        """Replace the newest buffered reference with what was really sent.
+
+        Safety filters may modify the compensated reference after :meth:`step`.
+        Keeping the rejected reference in the delay buffer makes the inverse
+        model release that hidden command later.  Feeding back the published
+        reference is a bumpless anti-windup update; it preserves the older
+        delay history and avoids repeatedly resetting the whole compensator.
+        """
+        q = np.asarray(q_published, dtype=np.float32).reshape(-1)
+        if q.shape != (self.n_joints,) or not np.all(np.isfinite(q)):
+            raise ValueError(
+                f"q_published must be a finite length-{self.n_joints} array")
+        if not self._initialized:
+            self.reset(q)
+            return
+        self.command_buffer[-1] = self._clip(q)
+
     def step(
         self,
         q_cmd: np.ndarray,

@@ -64,8 +64,21 @@ class HybridBallDetectorAdapter:
                  use_undistort: bool = True,
                  depth_scale: float = 0.001,
                  depth_neighborhood_px: int = 2,
-                 # 以下参数为兼容接口，hybrid_detector不使用
+                 depth_mode: str = 'sensor',
                  use_kalman: bool = False,
+                 use_ir_depth_kalman: bool = False,
+                 use_synchronized_depth: bool = False,
+                 depth_temporal_window_frames: int = 5,
+                 pixel_kalman_process_noise_pos: float = 0.3,
+                 pixel_kalman_process_noise_vel: float = 3.0,
+                 pixel_kalman_measurement_noise: float = 1.2,
+                 pixel_kalman_innovation_gate_px: float = 15.0,
+                 pixel_kalman_reset_after_outliers: int = 3,
+                 candidate_filter_enabled: bool = True,
+                 candidate_min_brightness: float = 23000.0,
+                 candidate_max_depth_disagreement_mm: float = 180.0,
+                 candidate_motion_scale_px: float = 130.0,
+                 # 以下参数为兼容接口，hybrid_detector不使用
                  camera_tilt_deg: float = 0.0,
                  conf_threshold: float = 0.25,
                  infer_imgsz: int = 640,
@@ -163,9 +176,26 @@ class HybridBallDetectorAdapter:
             roi_margin=roi_margin,
             depth_scale=depth_scale,
             depth_neighborhood_px=depth_neighborhood_px,
+            depth_mode=depth_mode,
             calibration_data=calibration_data,
             output_frame=output_frame,
             print_every=print_every,
+            pixel_kalman_enabled=use_kalman,
+            ir_depth_kalman_enabled=use_ir_depth_kalman,
+            synchronized_depth_enabled=use_synchronized_depth,
+            depth_temporal_window_frames=depth_temporal_window_frames,
+            pixel_kalman_process_noise_pos=pixel_kalman_process_noise_pos,
+            pixel_kalman_process_noise_vel=pixel_kalman_process_noise_vel,
+            pixel_kalman_measurement_noise=pixel_kalman_measurement_noise,
+            pixel_kalman_innovation_gate_px=(
+                pixel_kalman_innovation_gate_px),
+            pixel_kalman_reset_after_outliers=(
+                pixel_kalman_reset_after_outliers),
+            candidate_filter_enabled=candidate_filter_enabled,
+            candidate_min_brightness=candidate_min_brightness,
+            candidate_max_depth_disagreement_mm=(
+                candidate_max_depth_disagreement_mm),
+            candidate_motion_scale_px=candidate_motion_scale_px,
             depth_correction_model_path=depth_correction_model_path  # 新增
         )
         self.T_base_camera = getattr(self.detector, 'T_base_camera', None)

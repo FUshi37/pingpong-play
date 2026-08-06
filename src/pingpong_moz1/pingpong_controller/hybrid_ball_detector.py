@@ -17,12 +17,20 @@ import cv2
 import pyrealsense2 as rs
 import time
 import os
+import math
 from collections import deque
 from typing import Optional, Dict, Any, Tuple
 from ultralytics import YOLO
 
 from pingpong_controller.calibration_loader import CalibrationData
+from pingpong_controller.ir_depth_kalman_filter import IRDepthKalmanFilter
 from pingpong_controller.pixel_kalman_filter import PixelKalmanFilter
+from pingpong_controller.ir_center_estimator import refine_ir_ball_center
+
+
+def _rs_extrinsics_rotation_matrix(rotation):
+    """Convert librealsense's column-major flat rotation to a NumPy matrix."""
+    return np.asarray(rotation, dtype=np.float64).reshape(3, 3).T
 
 
 class HybridBallDetector:
@@ -64,6 +72,20 @@ class HybridBallDetector:
                  output_frame='base_link',
                  print_every=10,
                  offline_camera_params: Optional[dict] = None,
+                 depth_mode='sensor',
+                 pixel_kalman_enabled=True,
+                 pixel_kalman_process_noise_pos=0.3,
+                 pixel_kalman_process_noise_vel=3.0,
+                 pixel_kalman_measurement_noise=1.2,
+                 pixel_kalman_innovation_gate_px=15.0,
+                 pixel_kalman_reset_after_outliers=3,
+                 ir_depth_kalman_enabled=False,
+                 synchronized_depth_enabled=False,
+                 depth_temporal_window_frames=5,
+                 candidate_filter_enabled=True,
+                 candidate_min_brightness=23000.0,
+                 candidate_max_depth_disagreement_mm=180.0,
+                 candidate_motion_scale_px=130.0,
                  depth_correction_model_path='depth_correction_model.pkl'):  # 新增参数
         """
         初始化混合检测器
@@ -86,7 +108,31 @@ class HybridBallDetector:
         self.roi_margin = roi_margin
         self.depth_scale = depth_scale
         self.depth_neighborhood_px = depth_neighborhood_px
+        self.depth_mode = self._normalize_depth_mode(depth_mode)
         self.print_every = print_every
+        self.pixel_kalman_enabled = bool(pixel_kalman_enabled)
+        self.pixel_kalman_process_noise_pos = max(
+            0.0, float(pixel_kalman_process_noise_pos))
+        self.pixel_kalman_process_noise_vel = max(
+            0.0, float(pixel_kalman_process_noise_vel))
+        self.pixel_kalman_measurement_noise = max(
+            1e-6, float(pixel_kalman_measurement_noise))
+        self.pixel_kalman_innovation_gate_px = max(
+            0.0, float(pixel_kalman_innovation_gate_px))
+        self.pixel_kalman_reset_after_outliers = max(
+            1, int(pixel_kalman_reset_after_outliers))
+        self.ir_depth_kalman_enabled = bool(ir_depth_kalman_enabled)
+        self.synchronized_depth_enabled = bool(synchronized_depth_enabled)
+        self.depth_temporal_window_frames = (
+            self._normalize_depth_temporal_window(
+                depth_temporal_window_frames))
+        self.candidate_filter_enabled = bool(candidate_filter_enabled)
+        self.candidate_min_brightness = max(
+            0.0, float(candidate_min_brightness))
+        self.candidate_max_depth_disagreement_mm = max(
+            0.0, float(candidate_max_depth_disagreement_mm))
+        self.candidate_motion_scale_px = max(
+            1.0, float(candidate_motion_scale_px))
         self.debug_yolo = str(os.environ.get("PINGPONG_YOLO_DEBUG", "")).lower() in (
             "1", "true", "yes", "on")
         # IR 曝光/增益（构造时应用到 stereo sensor）与自适应背景分位数
@@ -146,36 +192,39 @@ class HybridBallDetector:
             self._init_offline_camera(self.offline_camera_params, width, height)
             return
 
-        # 初始化RealSense
+        # Stereo and RGB use independent pipelines.  A mixed-rate frameset
+        # would synchronize to the slower 60 Hz RGB stream and silently drop
+        # IR/depth frames.  The control path therefore waits only on the
+        # 90 Hz stereo pipeline; RGB remains 848x480@60 for visualization and
+        # optional YOLO and is polled asynchronously.
         self.pipeline = rs.pipeline()
         config = rs.config()
-
-        # 配置RGB和IR流
-        # 修复：RGB也需要60fps以支持高速运动下的YOLO检测
-        rgb_fps = 60  # RGB恢复60fps
-        ir_fps = 60   # IR保持60fps（主要数据源）
+        ir_fps = max(1, int(fps))
+        rgb_width, rgb_height, rgb_fps = width, height, 60
 
         try:
-            # RGB流（60fps以支持高速运动下的YOLO）
-            config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, rgb_fps)
-            # IR流（用于精确检测，保持高帧率）
             config.enable_stream(rs.stream.infrared, 1, width, height, rs.format.y8, ir_fps)
-            # 深度流（与IR同步）
             config.enable_stream(rs.stream.depth, width, height, rs.format.z16, ir_fps)
-            print(f"配置: RGB {width}x{height}@{rgb_fps}fps, IR/Depth {width}x{height}@{ir_fps}fps")
+            print(
+                f"配置: IR/Depth {width}x{height}@{ir_fps}fps; "
+                f"RGB独立流 {rgb_width}x{rgb_height}@{rgb_fps}fps")
         except Exception as e:
             # 回退配置
             print(f"配置失败: {e}, 尝试回退配置...")
-            config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 60)
             config.enable_stream(rs.stream.infrared, 1, 640, 480, rs.format.y8, 60)
             config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 60)
             width, height = 640, 480
             rgb_fps, ir_fps = 60, 60
+            rgb_width, rgb_height = width, height
             print(f"回退配置: RGB {width}x{height}@{rgb_fps}fps, IR/Depth {width}x{height}@{ir_fps}fps")
 
         self.image_width = width
         self.image_height = height
+        self.color_stream_width = int(rgb_width)
+        self.color_stream_height = int(rgb_height)
         self.fps = ir_fps  # 使用IR帧率作为主帧率
+        self.color_pipeline = None
+        self.latest_color_image = None
 
         # 启动pipeline（添加重试机制）
         print("启动RealSense相机...")
@@ -194,8 +243,37 @@ class HybridBallDetector:
                     print(f"相机启动失败，已尝试{max_retries}次")
                     raise
 
-        # 设置激光功率
+        # Bind RGB to the exact same physical device chosen for stereo.  It is
+        # intentionally not part of the stereo frameset and cannot throttle
+        # the IR/depth wait loop.
         device = profile.get_device()
+        serial = device.get_info(rs.camera_info.serial_number)
+        color_config = rs.config()
+        color_config.enable_device(serial)
+        color_config.enable_stream(
+            rs.stream.color, rgb_width, rgb_height,
+            rs.format.bgr8, rgb_fps)
+        try:
+            self.color_pipeline = rs.pipeline()
+            color_profile = self.color_pipeline.start(color_config)
+            color_frames = self.color_pipeline.wait_for_frames(
+                timeout_ms=1000)
+            first_color = color_frames.get_color_frame()
+            if first_color:
+                self.latest_color_image = np.asanyarray(
+                    first_color.get_data()).copy()
+            print("RGB独立流启动成功（不阻塞IR/Depth检测）")
+        except Exception as exc:
+            if self.color_pipeline is not None:
+                try:
+                    self.color_pipeline.stop()
+                except Exception:
+                    pass
+            self.color_pipeline = None
+            print(f"WARNING: RGB独立流启动失败，使用IR灰度可视化: {exc}")
+            color_profile = None
+
+        # 设置激光功率
         depth_sensor = device.first_depth_sensor()
         if depth_sensor.supports(rs.option.laser_power):
             depth_sensor.set_option(rs.option.laser_power, laser_power)
@@ -224,8 +302,30 @@ class HybridBallDetector:
         ir_stream = profile.get_stream(rs.stream.infrared, 1)
         self.ir_intrinsics = ir_stream.as_video_stream_profile().get_intrinsics()
 
-        # 获取RGB内参（用于可视化和手眼标定坐标系）
-        color_stream = profile.get_stream(rs.stream.color)
+        # 获取RGB内参（用于可视化和手眼标定坐标系）。即使RGB采集启动
+        # 失败，也可从设备公开profile恢复固定内/外参，保证IR检测仍能运行。
+        color_stream = None
+        if color_profile is not None:
+            color_stream = color_profile.get_stream(rs.stream.color)
+        else:
+            for sensor in device.query_sensors():
+                for candidate in sensor.get_stream_profiles():
+                    try:
+                        video = candidate.as_video_stream_profile()
+                        if (candidate.stream_type() == rs.stream.color
+                                and video.width() == rgb_width
+                                and video.height() == rgb_height
+                                and candidate.fps() == rgb_fps):
+                            color_stream = candidate
+                            break
+                    except Exception:
+                        continue
+                if color_stream is not None:
+                    break
+        if color_stream is None:
+            raise RuntimeError(
+                "RGB profile unavailable; cannot recover calibrated "
+                "IR-to-RGB extrinsics")
         self.color_intrinsics = color_stream.as_video_stream_profile().get_intrinsics()
 
         # 保存IR内参用于反投影
@@ -265,11 +365,48 @@ class HybridBallDetector:
 
         # 获取IR到RGB的外参（关键：用于将IR 3D点转换到RGB 3D点）
         depth_stream = profile.get_stream(rs.stream.depth)
-        self.depth_to_color_extrinsics = depth_stream.get_extrinsics_to(color_stream)
+        try:
+            self.depth_to_color_extrinsics = (
+                depth_stream.get_extrinsics_to(color_stream))
+        except RuntimeError:
+            # Profiles returned by two separately started pipelines do not
+            # always share librealsense's active extrinsics graph.  Native
+            # profiles queried from the same device do, and describe the same
+            # fixed physical sensor transform.
+            native_depth = None
+            native_color = None
+            for sensor in device.query_sensors():
+                for candidate in sensor.get_stream_profiles():
+                    try:
+                        video = candidate.as_video_stream_profile()
+                        if (candidate.stream_type() == rs.stream.depth
+                                and video.width() == width
+                                and video.height() == height
+                                and candidate.fps() == ir_fps
+                                and candidate.format() == rs.format.z16):
+                            native_depth = candidate
+                        elif (candidate.stream_type() == rs.stream.color
+                                and video.width() == rgb_width
+                                and video.height() == rgb_height
+                                and candidate.fps() == rgb_fps):
+                            native_color = candidate
+                    except Exception:
+                        continue
+            if native_depth is None or native_color is None:
+                raise RuntimeError(
+                    "Unable to resolve native Depth/RGB profiles for "
+                    "cross-pipeline extrinsics")
+            self.depth_to_color_extrinsics = (
+                native_depth.get_extrinsics_to(native_color))
 
         # 构建IR→RGB的4x4齐次变换矩阵（更清晰直接）
-        # RealSense外参：rotation是3x3矩阵（行优先存储9个元素），translation是3D向量（米）
-        R = np.array(self.depth_to_color_extrinsics.rotation).reshape(3, 3)
+        # librealsense exposes ``rs2_extrinsics.rotation`` as a column-major
+        # flat array.  NumPy reshapes in row-major order, so transpose it here
+        # to reproduce rs.rs2_transform_point_to_point exactly.  Without the
+        # transpose, the small D455 depth->color rotation is inverted and the
+        # RGB overlay is displaced by a few pixels.
+        R = _rs_extrinsics_rotation_matrix(
+            self.depth_to_color_extrinsics.rotation)
         t = np.array(self.depth_to_color_extrinsics.translation)
         self.T_ir_to_rgb = np.eye(4)
         self.T_ir_to_rgb[:3, :3] = R
@@ -299,6 +436,78 @@ class HybridBallDetector:
                     break
         print(f"\n混合检测器就绪（预热{warmup_count}/20帧）")
 
+    @staticmethod
+    def _normalize_depth_mode(mode):
+        value = str(mode).strip().lower()
+        return value if value in ('sensor', 'geometry') else 'sensor'
+
+    def set_depth_mode(self, mode):
+        """Change the preferred depth source without rebuilding the camera."""
+        normalized = self._normalize_depth_mode(mode)
+        if normalized == self.depth_mode:
+            return
+        self.depth_mode = normalized
+        # Do not mix samples produced by two different ranging methods.  In
+        # particular, geometry can be tens of millimetres away from stereo
+        # depth, so retaining the old median window makes a live switch look
+        # unresponsive for several frames.
+        depth_history = getattr(self, 'depth_history', None)
+        if depth_history is not None:
+            depth_history.clear()
+
+    def configure_pixel_kalman(
+            self, *, enabled, process_noise_pos, process_noise_vel,
+            measurement_noise, innovation_gate_px, reset_after_outliers):
+        """Apply pixel-filter tuning atomically for the next camera frame.
+
+        Replacing the filter intentionally clears its history.  This prevents
+        old state/covariance from masking a live parameter change and makes
+        disabling the filter immediately expose the raw IR centre.
+        """
+        self.pixel_kalman_enabled = bool(enabled)
+        self.pixel_kalman_process_noise_pos = max(
+            0.0, float(process_noise_pos))
+        self.pixel_kalman_process_noise_vel = max(
+            0.0, float(process_noise_vel))
+        self.pixel_kalman_measurement_noise = max(
+            1e-6, float(measurement_noise))
+        self.pixel_kalman_innovation_gate_px = max(
+            0.0, float(innovation_gate_px))
+        self.pixel_kalman_reset_after_outliers = max(
+            1, int(reset_after_outliers))
+        replacement = self._new_pixel_kalman_filter()
+        self.pixel_kf = replacement
+
+    @staticmethod
+    def _normalize_depth_temporal_window(value):
+        window = max(1, min(9, int(value)))
+        if window % 2 == 0:
+            window = window + 1 if window < 9 else window - 1
+        return window
+
+    def configure_ir_depth_processing(
+            self, *, kalman_enabled, synchronized_depth_enabled,
+            depth_temporal_window_frames):
+        """Apply independent 3D-KF and same-frameset-depth switches."""
+        kalman_enabled = bool(kalman_enabled)
+        synchronized_depth_enabled = bool(synchronized_depth_enabled)
+        depth_temporal_window_frames = (
+            self._normalize_depth_temporal_window(
+                depth_temporal_window_frames))
+        changed = (
+            kalman_enabled != self.ir_depth_kalman_enabled
+            or synchronized_depth_enabled != self.synchronized_depth_enabled
+            or depth_temporal_window_frames
+            != self.depth_temporal_window_frames)
+        self.ir_depth_kalman_enabled = kalman_enabled
+        self.synchronized_depth_enabled = synchronized_depth_enabled
+        self.depth_temporal_window_frames = depth_temporal_window_frames
+        if changed:
+            self.ir_depth_kf.reset()
+            self.depth_history = deque(
+                maxlen=self.depth_temporal_window_frames)
+            self.position_history.clear()
+
     def _check_cuda(self):
         """检查CUDA是否可用"""
         try:
@@ -315,6 +524,8 @@ class HybridBallDetector:
         self.last_yolo_time = 0
         self.yolo_miss_count = 0
         self.max_yolo_miss = 3  # 修复：YOLO连续丢失3次后清除bbox（软约束）
+        self.yolo_enabled = True
+        self.ir_tracking_miss_count = 0
 
         # 统计
         self.total_frames = 0
@@ -327,46 +538,205 @@ class HybridBallDetector:
         self.fps_queue = deque(maxlen=30)
         self.yolo_time_queue = deque(maxlen=10)
         self.ir_time_queue = deque(maxlen=30)
+        self.detect_time_queue = deque(maxlen=60)
+        self.detected_time_queue = deque(maxlen=60)
+        self.missed_time_queue = deque(maxlen=60)
+        self.color_frame_count = 0
+        self.color_last_timestamp_ms = None
+        self.color_fps_queue = deque(maxlen=60)
 
         self.position_history = deque(maxlen=5)
         self.last_observation_time = None
+        self.candidate_position_history = deque(maxlen=2)
+        self.candidate_filter_stats = {
+            'frames': 0,
+            'candidates': 0,
+            'accepted': 0,
+            'rejected_brightness': 0,
+            'rejected_depth': 0,
+            'all_rejected': 0,
+        }
 
         # 像素坐标历史（用于平滑可视化）
         self.pixel_history = deque(maxlen=5)  # (cx, cy, radius)
 
         # 2D像素卡尔曼滤波器（核心平滑机制）
         # 参数调优：静止球高稳定性，运动球低延迟
-        self.pixel_kf = PixelKalmanFilter(
-            dt=1.0/self.fps,  # 使用self.fps而不是fps
-            process_noise_pos=0.3,    # 位置过程噪声（像素） - 降低以增强静止稳定性
-            process_noise_vel=3.0,     # 速度过程噪声（像素/秒） - 适中以平衡响应
-            measurement_noise=1.2,     # 测量噪声（像素） - IR检测的典型精度
-            innovation_gate=15.0       # 离群值门限 - 较大值以容忍击打时的真实跳变
-        )
+        self.pixel_kf = self._new_pixel_kalman_filter()
+
+        # Joint IR+depth filter. Depth synchronization is controlled separately:
+        # the filter can consume either the same-frameset depth or legacy median
+        # depth so the two effects can be evaluated independently.
+        self.ir_depth_kf = IRDepthKalmanFilter(
+            frame_rotation=self._ir_to_output_rotation())
 
         # 深度历史（用于时域去尖峰+平滑，统一作用于 sensor/geometry 两条路径）
-        self.depth_history = deque(maxlen=5)
+        self.depth_history = deque(
+            maxlen=self.depth_temporal_window_frames)
 
-        # 深度源距离门（带迟滞）：
-        #   近场 —— 双目常跌破 D455 最小工作距离而失效/空洞，且球半径大、
-        #           单目几何 Z∝1/r 越近越稳 → 锁定 geometry。
-        #   远场 —— 球半径小、几何 dr/r 噪声放大，双目更准 → 用 sensor 深度。
-        # 两个门限之间留迟滞带，避免在临界点 sensor/geometry 反复横跳
-        # （切换本身会造成阶跃跳变，这正是原逐帧回退的病根）。
-        self.depth_near_gate_mm = 500.0   # 稳定深度 < 此值 → 切到近场(geometry)
-        self.depth_far_gate_mm = 650.0    # 稳定深度 > 此值 → 切回远场(sensor)
-        self.depth_source_state = 'far'   # 'near'=锁geometry, 'far'=用sensor
+        # Valid stereo depth is the primary metric measurement. Geometry is a
+        # fallback only because the morphology radius follows a projector-dot
+        # blob rather than the physical ball boundary.
+        self.depth_source_state = 'sensor'
 
-        # FPS计算（使用帧时间戳）
+        # FPS calculation uses the RealSense hardware frame timestamp.
         self.last_frame_timestamp = None
 
-        # 自适应阈值
+        # Adaptive-threshold and depth-correction state are shared by online
+        # and offline detection paths.
         self.background_intensity = None
-
-        # 深度校正模型（YOLO辅助校准）
         self.depth_correction_model = None
-        # self.depth_correction_model_path 已在__init__开头设置
-        self._load_depth_correction_model(self.depth_correction_model_path)  # 使用实例变量
+        # self.depth_correction_model_path is set at the start of __init__.
+        self._load_depth_correction_model(self.depth_correction_model_path)
+
+    def _ir_to_output_rotation(self):
+        """Rotation from IR optical coordinates into the detector output frame."""
+        ir_to_rgb = np.asarray(
+            getattr(self, 'T_ir_to_rgb', np.eye(4)), dtype=np.float64)
+        rotation = (
+            ir_to_rgb[:3, :3]
+            if ir_to_rgb.shape == (4, 4)
+            else np.eye(3, dtype=np.float64))
+        if (getattr(self, 'output_frame', 'base_link') == 'base_link'
+                and getattr(self, 'T_base_camera', None) is not None):
+            base_to_camera = np.asarray(
+                self.T_base_camera, dtype=np.float64)
+            if base_to_camera.shape == (4, 4):
+                rotation = base_to_camera[:3, :3] @ rotation
+        return rotation
+
+    def _new_pixel_kalman_filter(self):
+        return PixelKalmanFilter(
+            dt=1.0/self.fps,  # 使用self.fps而不是fps
+            process_noise_pos=self.pixel_kalman_process_noise_pos,
+            process_noise_vel=self.pixel_kalman_process_noise_vel,
+            measurement_noise=self.pixel_kalman_measurement_noise,
+            innovation_gate=self.pixel_kalman_innovation_gate_px,
+            reset_after_outliers=self.pixel_kalman_reset_after_outliers,
+        )
+
+    def configure_candidate_filter(
+            self, *, enabled, min_brightness,
+            max_depth_disagreement_mm, motion_scale_px):
+        """Apply raw-candidate filtering/scoring for the next camera frame."""
+        self.candidate_filter_enabled = bool(enabled)
+        self.candidate_min_brightness = max(0.0, float(min_brightness))
+        self.candidate_max_depth_disagreement_mm = max(
+            0.0, float(max_depth_disagreement_mm))
+        self.candidate_motion_scale_px = max(1.0, float(motion_scale_px))
+        history = getattr(self, 'candidate_position_history', None)
+        if history is not None:
+            history.clear()
+
+    def configure_yolo(self, enabled):
+        """Enable or disable RGB YOLO without rebuilding the camera pipeline."""
+        self.yolo_enabled = bool(enabled)
+        if not self.yolo_enabled:
+            self.last_yolo_bbox = None
+            self.yolo_miss_count = 0
+
+    def _predicted_ir_roi(self, now):
+        """Return an IR-only tracking ROI derived from recent IR detections."""
+        center = self._predict_candidate_center(now)
+        if center is None or not np.all(np.isfinite(center)):
+            return None
+        margin = max(16, int(self.roi_margin))
+        cx, cy = float(center[0]), float(center[1])
+        return (
+            max(0, int(np.floor(cx - margin))),
+            max(0, int(np.floor(cy - margin))),
+            min(self.image_width, int(np.ceil(cx + margin + 1))),
+            min(self.image_height, int(np.ceil(cy + margin + 1))),
+        )
+
+    def _predict_candidate_center(self, now):
+        history = self.candidate_position_history
+        if not history:
+            return None
+        t1, x1, y1 = history[-1]
+        predicted = np.array([x1, y1], dtype=np.float64)
+        if len(history) < 2:
+            return predicted
+        t0, x0, y0 = history[-2]
+        sample_dt = float(t1 - t0)
+        if sample_dt <= 1e-4:
+            return predicted
+        horizon = float(np.clip(float(now) - t1, 0.0, 0.10))
+        velocity = (
+            np.array([x1 - x0, y1 - y0], dtype=np.float64) / sample_dt)
+        return predicted + velocity * horizon
+
+    def _select_ir_candidate(self, candidates, depth_image, now):
+        """Filter implausible blobs and score all remaining IR candidates."""
+        if not self.candidate_filter_enabled:
+            return max(candidates, key=lambda item: item['brightness'])
+
+        stats = self.candidate_filter_stats
+        stats['frames'] += 1
+        stats['candidates'] += len(candidates)
+        predicted = self._predict_candidate_center(now)
+        accepted = []
+        for candidate in candidates:
+            brightness = float(candidate['brightness'])
+            if (self.candidate_min_brightness > 0.0
+                    and brightness < self.candidate_min_brightness):
+                stats['rejected_brightness'] += 1
+                continue
+
+            sensor_depth_mm = self._get_depth_from_depthmap(
+                candidate['cx'], candidate['cy'], depth_image,
+                candidate.get('mask'), candidate.get('mask_origin'))
+            geom_depth_mm = self._apply_depth_correction(
+                self._geometry_depth_mm(candidate['radius']))
+            depth_disagreement_mm = None
+            if sensor_depth_mm is not None and geom_depth_mm is not None:
+                depth_disagreement_mm = abs(
+                    float(sensor_depth_mm) - float(geom_depth_mm))
+                if (self.candidate_max_depth_disagreement_mm > 0.0
+                        and depth_disagreement_mm
+                        > self.candidate_max_depth_disagreement_mm):
+                    stats['rejected_depth'] += 1
+                    continue
+
+            if predicted is None:
+                motion_distance_px = None
+                motion_score = 0.5
+            else:
+                motion_distance_px = float(np.linalg.norm(
+                    np.array([candidate['cx'], candidate['cy']]) - predicted))
+                motion_score = math.exp(
+                    -0.5 * (motion_distance_px
+                            / self.candidate_motion_scale_px) ** 2)
+
+            if self.candidate_min_brightness > 0.0:
+                brightness_score = min(
+                    brightness / (2.0 * self.candidate_min_brightness), 1.0)
+            else:
+                brightness_score = 1.0
+            if (depth_disagreement_mm is None
+                    or self.candidate_max_depth_disagreement_mm <= 0.0):
+                depth_score = 0.25
+            else:
+                depth_score = max(
+                    0.0,
+                    1.0 - depth_disagreement_mm
+                    / self.candidate_max_depth_disagreement_mm,
+                )
+            score = 3.0 * motion_score + 2.0 * depth_score + brightness_score
+            enriched = dict(candidate)
+            enriched['selection_score'] = float(score)
+            enriched['selection_motion_distance_px'] = motion_distance_px
+            enriched['selection_sensor_depth_mm'] = sensor_depth_mm
+            enriched['selection_geom_depth_mm'] = geom_depth_mm
+            enriched['selection_depth_disagreement_mm'] = depth_disagreement_mm
+            accepted.append(enriched)
+
+        if not accepted:
+            stats['all_rejected'] += 1
+            return None
+        best = max(accepted, key=lambda item: item['selection_score'])
+        stats['accepted'] += 1
+        return best
 
     def _load_depth_correction_model(self, model_path='depth_correction_model.pkl'):
         """加载深度校正模型"""
@@ -452,6 +822,11 @@ class HybridBallDetector:
         return {
             'width': int(self.image_width),
             'height': int(self.image_height),
+            'fps': int(self.fps),
+            'color_width': int(getattr(
+                self, 'color_stream_width', self.color_intrinsics.width)),
+            'color_height': int(getattr(
+                self, 'color_stream_height', self.color_intrinsics.height)),
             'depth_scale': float(self.depth_scale),
             'ball_diameter_mm': float(self.ball_diameter_mm),
             'ir_intrinsics': self._rs_intrinsics_to_dict(self.ir_intrinsics),
@@ -475,6 +850,7 @@ class HybridBallDetector:
             'target_class': str(self.target_class),
             # 深度：邻域采样半径 + 单目几何深度校正模型路径。
             'depth_neighborhood_px': int(self.depth_neighborhood_px),
+            'depth_mode': str(self.depth_mode),
             'depth_correction_model_path': str(
                 self.depth_correction_model_path),
         }
@@ -490,7 +866,13 @@ class HybridBallDetector:
 
         self.image_width = int(params.get('width', width))
         self.image_height = int(params.get('height', height))
-        self.fps = 60
+        self.fps = int(params.get('fps', 60))
+        self.color_stream_width = int(params.get(
+            'color_width', params['color_intrinsics'].get(
+                'width', self.image_width)))
+        self.color_stream_height = int(params.get(
+            'color_height', params['color_intrinsics'].get(
+                'height', self.image_height)))
         if 'depth_scale' in params:
             self.depth_scale = float(params['depth_scale'])
 
@@ -526,7 +908,9 @@ class HybridBallDetector:
             float(r) for r in ext['rotation']]
         self.depth_to_color_extrinsics.translation = [
             float(t) for t in ext['translation']]
-        R = np.array(ext['rotation'], dtype=np.float64).reshape(3, 3)
+        # Saved RealSense extrinsics retain librealsense's column-major flat
+        # rotation layout; keep offline replay identical to the online path.
+        R = _rs_extrinsics_rotation_matrix(ext['rotation'])
         t = np.array(ext['translation'], dtype=np.float64)
         self.T_ir_to_rgb = np.eye(4)
         self.T_ir_to_rgb[:3, :3] = R
@@ -628,7 +1012,9 @@ class HybridBallDetector:
         threshold = int(self.background_intensity + max(80, self.background_intensity * 0.5))
         return np.clip(threshold, 150, 240)
 
-    def _detect_in_ir(self, ir_image, roi=None):
+    def _detect_in_ir(
+            self, ir_image, roi=None, depth_image=None,
+            observation_time=None):
         """
         在IR图像中检测球
 
@@ -639,20 +1025,29 @@ class HybridBallDetector:
         Returns:
             检测结果字典或None
         """
+        # Crop before threshold/morphology so an ROI actually reduces work.
+        # Candidate coordinates are translated back to full-frame IR pixels.
+        offset_x = 0
+        offset_y = 0
+        work_ir = ir_image
+        if roi is not None:
+            x1, y1, x2, y2 = (int(v) for v in roi)
+            x1 = max(0, min(ir_image.shape[1], x1))
+            x2 = max(x1, min(ir_image.shape[1], x2))
+            y1 = max(0, min(ir_image.shape[0], y1))
+            y2 = max(y1, min(ir_image.shape[0], y2))
+            if x2 <= x1 or y2 <= y1:
+                return None
+            offset_x, offset_y = x1, y1
+            work_ir = ir_image[y1:y2, x1:x2]
+
         # 阈值分割
         if self.ir_params['use_adaptive']:
             threshold = self._update_adaptive_threshold(ir_image, roi)
         else:
             threshold = self.ir_params['threshold']
 
-        _, binary = cv2.threshold(ir_image, threshold, 255, cv2.THRESH_BINARY)
-
-        # 如果有ROI，限制检测区域
-        if roi is not None:
-            x1, y1, x2, y2 = roi
-            mask = np.zeros_like(binary)
-            mask[y1:y2, x1:x2] = binary[y1:y2, x1:x2]
-            binary = mask
+        _, binary = cv2.threshold(work_ir, threshold, 255, cv2.THRESH_BINARY)
 
         # 形态学处理：膨胀 → 闭运算 → 去噪
         dilate_iter = self.ir_params['dilate_iterations']
@@ -711,17 +1106,36 @@ class HybridBallDetector:
                         cx = cx_ellipse
                         cy = cy_ellipse
 
-                    mask = np.zeros(ir_image.shape[:2], dtype=np.uint8)
-                    cv2.drawContours(mask, [cnt], -1, 255, thickness=-1)
-                    brightness = np.sum(ir_image[mask > 0])
+                    # Contours are ROI-local; all externally visible positions
+                    # remain in the original IR image coordinate system.
+                    cx += offset_x
+                    cy += offset_y
+                    coarse_cx, coarse_cy = cx, cy
+                    cx, cy, center_refine_shift = refine_ir_ball_center(
+                        ir_image, (coarse_cx, coarse_cy), radius)
+
+                    # Keep only a contour-bounded mask.  The old full-frame
+                    # mask caused multiple 848x480 allocations and scans for
+                    # every valid candidate.
+                    bx, by, bw, bh = cv2.boundingRect(cnt)
+                    mask = np.zeros((bh, bw), dtype=np.uint8)
+                    local_cnt = cnt - np.array([[[bx, by]]], dtype=cnt.dtype)
+                    cv2.drawContours(mask, [local_cnt], -1, 255, thickness=-1)
+                    candidate_ir = work_ir[by:by + bh, bx:bx + bw]
+                    brightness = np.sum(candidate_ir[mask > 0])
 
                     candidates.append({
                         'cx': cx,
                         'cy': cy,
+                        'cx_coarse': coarse_cx,
+                        'cy_coarse': coarse_cy,
+                        'center_refine_shift_px': center_refine_shift,
                         'radius': radius,
                         'aspect_ratio': aspect_ratio,
                         'brightness': brightness,
+                        'threshold': int(threshold),
                         'mask': mask,
+                        'mask_origin': (offset_x + bx, offset_y + by),
                     })
                 except:
                     continue
@@ -729,20 +1143,31 @@ class HybridBallDetector:
         if not candidates:
             return None
 
-        # 选择最亮的
-        best = max(candidates, key=lambda x: x['brightness'])
+        now = (time.perf_counter() if observation_time is None
+               else float(observation_time))
+        best = self._select_ir_candidate(candidates, depth_image, now)
+        if best is None:
+            return None
 
         # 核心平滑：2D像素卡尔曼滤波
         # 这是最关键的一步，大幅减少静止球抖动
-        smoothed_pos = self.pixel_kf.update([best['cx'], best['cy']])
         best['cx_raw'] = best['cx']  # 保存原始值用于调试
         best['cy_raw'] = best['cy']
-        best['cx'] = smoothed_pos[0]  # 用平滑值替换
-        best['cy'] = smoothed_pos[1]
+        self.candidate_position_history.append(
+            (now, float(best['cx_raw']), float(best['cy_raw'])))
+        if self.pixel_kalman_enabled:
+            # Capture the object once so a concurrent web reconfiguration can
+            # safely swap in a replacement for the following frame.
+            pixel_kf = self.pixel_kf
+            smoothed_pos = pixel_kf.update([best['cx'], best['cy']])
+            best['cx'] = smoothed_pos[0]  # 用平滑值替换
+            best['cy'] = smoothed_pos[1]
 
         return best
 
-    def _get_depth_from_depthmap(self, cx_px, cy_px, depth_image, ball_mask=None):
+    def _get_depth_from_depthmap(
+            self, cx_px, cy_px, depth_image, ball_mask=None,
+            mask_origin=None):
         """从深度图读取深度（增强稳定性，减少近距离跳变）"""
         if depth_image is None:
             return None
@@ -756,10 +1181,24 @@ class HybridBallDetector:
 
         # 采样策略：优先使用mask，fallback到邻域
         depths = None
-        if ball_mask is not None and ball_mask.shape[:2] == depth_image.shape[:2]:
-            sel = (ball_mask > 0) & (depth_image > 0)
-            if np.count_nonzero(sel) >= 5:
-                depths = depth_image[sel]
+        if ball_mask is not None:
+            if ball_mask.shape[:2] == depth_image.shape[:2]:
+                depth_region = depth_image
+            elif mask_origin is not None:
+                x0, y0 = (int(v) for v in mask_origin)
+                mh, mw = ball_mask.shape[:2]
+                if (x0 >= 0 and y0 >= 0 and x0 + mw <= w
+                        and y0 + mh <= h):
+                    depth_region = depth_image[y0:y0 + mh, x0:x0 + mw]
+                else:
+                    depth_region = None
+            else:
+                depth_region = None
+            if (depth_region is not None
+                    and depth_region.shape[:2] == ball_mask.shape[:2]):
+                sel = (ball_mask > 0) & (depth_region > 0)
+                if np.count_nonzero(sel) >= 5:
+                    depths = depth_region[sel]
 
         if depths is None:
             r = self.depth_neighborhood_px
@@ -791,35 +1230,29 @@ class HybridBallDetector:
         return (f * self.ball_diameter_mm) / (2.0 * radius_px)
 
     def _select_depth(self, sensor_depth_mm, geom_depth_mm):
-        """带迟滞的距离门，选择 sensor / geometry 作为本帧深度源。
+        """Prefer measured stereo depth; use geometry only as a fallback.
 
-        用上一帧的稳定深度做门控量（geometry 在近场几乎总有效，可兜底）：
-          - 稳定深度 < near_gate → 状态切 'near'（锁 geometry）
-          - 稳定深度 > far_gate  → 状态切 'far'（用 sensor）
-          - 之间 → 保持上一状态（迟滞，避免临界反复横跳）
-        sensor 无效时无条件退回 geometry，但不改变状态机。
+        The morphology radius describes the connected projector-dot blob, not
+        the physical ball silhouette.  Robot-attached-ball recordings show
+        that using it for geometry depth creates 30--50 mm position-dependent
+        errors, while valid stereo depth stays within a few millimetres.
 
         Returns:
             (depth_raw_mm, method_str) 或 (None, 'none')
         """
-        # 门控参考量：优先用上一帧稳定深度，无历史时用几何深度
-        ref = self.depth_history[-1] if self.depth_history else geom_depth_mm
-        if ref is not None:
-            if ref < self.depth_near_gate_mm:
-                self.depth_source_state = 'near'
-            elif ref > self.depth_far_gate_mm:
-                self.depth_source_state = 'far'
-            # 迟滞带内保持原状态
-
-        if self.depth_source_state == 'near':
+        if self.depth_mode == 'geometry':
             if geom_depth_mm is not None:
+                self.depth_source_state = 'geometry'
                 return geom_depth_mm, 'geometry'
             if sensor_depth_mm is not None:
+                self.depth_source_state = 'sensor_fallback'
                 return sensor_depth_mm, 'sensor'
-        else:  # 'far'
+        else:
             if sensor_depth_mm is not None:
+                self.depth_source_state = 'sensor'
                 return sensor_depth_mm, 'sensor'
             if geom_depth_mm is not None:
+                self.depth_source_state = 'geometry_fallback'
                 return geom_depth_mm, 'geometry'
         return None, 'none'
 
@@ -841,6 +1274,12 @@ class HybridBallDetector:
         if len(hist) >= 3:
             return float(np.median(list(hist)))
         return depth_raw
+
+    def _depth_for_reconstruction(self, depth_raw):
+        """Select same-frameset raw depth or legacy temporal median depth."""
+        if bool(getattr(self, 'synchronized_depth_enabled', False)):
+            return float(depth_raw)
+        return self._stabilize_depth(depth_raw)
 
     def _backproject_to_3d(self, cx_px, cy_px, depth_mm):
         """反投影到IR 3D坐标系（使用IR内参）"""
@@ -1002,11 +1441,10 @@ class HybridBallDetector:
             frames = self.pipeline.wait_for_frames()
 
         # 修复：不使用align，保持IR和Depth的原生对齐关系
-        color_frame = frames.get_color_frame()
         ir_frame = frames.get_infrared_frame(1)
         depth_frame = frames.get_depth_frame()
 
-        if not color_frame or not ir_frame or not depth_frame:
+        if not ir_frame or not depth_frame:
             return {'detected': False, 'position': [0, 0, 0], 'velocity': [0, 0, 0]}
 
         # 修复：FPS计算使用IR帧时间戳（IR是主循环频率）
@@ -1017,11 +1455,21 @@ class HybridBallDetector:
                 self.fps_queue.append(1000.0 / frame_interval_ms)
         self.last_frame_timestamp = current_timestamp
 
-        rgb_image = np.asanyarray(color_frame.get_data())
         ir_image = np.asanyarray(ir_frame.get_data())
         depth_image = np.asanyarray(depth_frame.get_data())
+        rgb_image = self.color_image_for_frames(frames, ir_image)
 
-        return self._detect_core(rgb_image, ir_image, depth_image, now)
+        started = time.perf_counter()
+        result = self._detect_core(rgb_image, ir_image, depth_image, now)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        self.detect_time_queue.append(elapsed_ms)
+        target = (self.detected_time_queue if result.get('detected', False)
+                  else self.missed_time_queue)
+        target.append(elapsed_ms)
+        raw = result.get('raw_measurement')
+        if isinstance(raw, dict):
+            raw.update(self.performance_stats())
+        return result
 
     def get_observation_offline(self, rgb_image, ir_image, depth_image,
                                 observation_time):
@@ -1050,7 +1498,98 @@ class HybridBallDetector:
         if rgb_image is None or ir_image is None:
             return {'detected': False, 'position': [0, 0, 0],
                     'velocity': [0, 0, 0]}
-        return self._detect_core(rgb_image, ir_image, depth_image, now)
+        started = time.perf_counter()
+        result = self._detect_core(rgb_image, ir_image, depth_image, now)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        self.detect_time_queue.append(elapsed_ms)
+        target = (self.detected_time_queue if result.get('detected', False)
+                  else self.missed_time_queue)
+        target.append(elapsed_ms)
+        raw = result.get('raw_measurement')
+        if isinstance(raw, dict):
+            raw.update(self.performance_stats())
+        return result
+
+    def performance_stats(self):
+        """Return lightweight rolling detector-stage timing diagnostics."""
+        def mean(values):
+            return float(np.mean(values)) if values else 0.0
+
+        def p95(values):
+            return float(np.percentile(values, 95.0)) if values else 0.0
+
+        return {
+            'detect_mean_ms': mean(self.detect_time_queue),
+            'detect_p95_ms': p95(self.detect_time_queue),
+            'detected_mean_ms': mean(self.detected_time_queue),
+            'missed_mean_ms': mean(self.missed_time_queue),
+            'yolo_mean_ms': mean(self.yolo_time_queue),
+            'ir_mean_ms': mean(self.ir_time_queue),
+            'rgb_fps': mean(getattr(self, 'color_fps_queue', ())),
+            'rgb_frame_count': int(getattr(
+                self, 'color_frame_count', 0)),
+            'yolo_enabled': bool(self.yolo_enabled),
+        }
+
+    def _rgb_on_ir_canvas(self, rgb_image):
+        """Normalize unexpected offline/fallback RGB to the IR canvas.
+
+        Normal D455 operation keeps both streams at 848x480; only their rates
+        differ (stereo 90 Hz, RGB 60 Hz), so this is a no-op online.
+        """
+        if rgb_image is None:
+            return None
+        target = (int(self.image_width), int(self.image_height))
+        if rgb_image.shape[1] == target[0] and rgb_image.shape[0] == target[1]:
+            return rgb_image
+        return cv2.resize(rgb_image, target, interpolation=cv2.INTER_LINEAR)
+
+    def color_image_for_frames(self, frames=None, ir_image=None):
+        """Return the newest 60 Hz RGB image without blocking stereo."""
+        color_frame = None
+        if frames is not None:
+            try:
+                color_frame = frames.get_color_frame()
+            except Exception:
+                color_frame = None
+        color_pipeline = getattr(self, 'color_pipeline', None)
+        # A stereo-only frameset returns an invalid ``video_frame`` object,
+        # not Python ``None``.  Test frame truthiness so the independent RGB
+        # pipeline is actually polled instead of serving its startup cache
+        # forever.
+        if not color_frame and color_pipeline is not None:
+            try:
+                color_frames = color_pipeline.poll_for_frames()
+                if color_frames:
+                    color_frame = color_frames.get_color_frame()
+            except Exception:
+                color_frame = None
+        if color_frame:
+            image = np.asanyarray(color_frame.get_data())
+            if image is not None and image.size > 0:
+                self.latest_color_image = image.copy()
+                self.color_frame_count = int(getattr(
+                    self, 'color_frame_count', 0)) + 1
+                try:
+                    timestamp_ms = float(color_frame.get_timestamp())
+                except Exception:
+                    timestamp_ms = None
+                previous_ms = getattr(
+                    self, 'color_last_timestamp_ms', None)
+                if (timestamp_ms is not None and previous_ms is not None
+                        and timestamp_ms > previous_ms):
+                    self.color_fps_queue.append(
+                        1000.0 / (timestamp_ms - previous_ms))
+                if timestamp_ms is not None:
+                    self.color_last_timestamp_ms = timestamp_ms
+        cached = getattr(self, 'latest_color_image', None)
+        if cached is not None:
+            return cached
+        if ir_image is not None:
+            return cv2.cvtColor(ir_image, cv2.COLOR_GRAY2BGR)
+        return np.zeros(
+            (int(self.image_height), int(self.image_width), 3),
+            dtype=np.uint8)
 
     def _detect_core(self, rgb_image, ir_image, depth_image, now):
         """混合检测核心（在线/离线共用）：YOLO ROI → IR 定位 → 深度 → 3D。
@@ -1058,12 +1597,12 @@ class HybridBallDetector:
         输入均为 numpy 数组；depth_image 允许为 None（无 sensor 深度时退回
         geometry）。帧计数/FPS 由调用方（get_observation/offline）负责维护。
         """
+        rgb_image = self._rgb_on_ir_canvas(rgb_image)
         detection_method = 'none'
         roi = None
 
-        # 步骤1：YOLO检测（间隔运行，辅助语义过滤）
-        if self.frame_count % self.yolo_interval == 0:
-            t_yolo = time.time()
+        # 步骤1：YOLO检测（可运行时关闭；关闭后使用IR自身轨迹ROI）
+        if self.yolo_enabled and self.frame_count % self.yolo_interval == 0:
             yolo_result = self._detect_with_yolo(rgb_image)
 
             if yolo_result is not None:
@@ -1076,11 +1615,16 @@ class HybridBallDetector:
 
         # 检查YOLO bbox是否有效（软约束）
         use_roi = False
-        if self.last_yolo_bbox is not None and self.yolo_miss_count < self.max_yolo_miss:
+        if (self.yolo_enabled and self.last_yolo_bbox is not None
+                and self.yolo_miss_count < self.max_yolo_miss):
             # 使用YOLO bbox作为ROI
             roi = self._expand_bbox(self.last_yolo_bbox, self.roi_margin)
             use_roi = True
             detection_method = 'hybrid'
+        elif not self.yolo_enabled:
+            roi = self._predicted_ir_roi(now)
+            use_roi = roi is not None
+            detection_method = 'ir_tracking' if use_roi else 'ir_fallback'
         else:
             # YOLO失效，清除bbox
             self.last_yolo_bbox = None
@@ -1092,30 +1636,44 @@ class HybridBallDetector:
 
         if use_roi:
             # 优先在ROI内检测
-            ir_detection = self._detect_in_ir(ir_image, roi)
+            ir_detection = self._detect_in_ir(
+                ir_image, roi, depth_image, now)
             if ir_detection is None:
                 # 修复：ROI内失败，立即全图兜底（YOLO软约束）
-                ir_detection = self._detect_in_ir(ir_image, None)
+                ir_detection = self._detect_in_ir(
+                    ir_image, None, depth_image, now)
                 if ir_detection is not None:
                     detection_method = 'ir_fallback'  # 标记为兜底模式
         else:
             # 全图检测
-            ir_detection = self._detect_in_ir(ir_image, None)
+            ir_detection = self._detect_in_ir(
+                ir_image, None, depth_image, now)
 
         self.ir_time_queue.append((time.time() - t_ir) * 1000)
 
         if ir_detection is None:
+            self.ir_tracking_miss_count += 1
+            if not self.yolo_enabled and self.ir_tracking_miss_count >= 2:
+                self.candidate_position_history.clear()
             return {'detected': False, 'position': [0, 0, 0], 'velocity': [0, 0, 0],
                    'detection_method': detection_method}
+        self.ir_tracking_miss_count = 0
 
         # 步骤3：获取深度
         # 3a. sensor（双目硬件深度，远场准）与 geometry（单目 Z=f*D/2r，近场稳）都算出来
-        sensor_depth_mm = self._get_depth_from_depthmap(
-            ir_detection['cx'], ir_detection['cy'], depth_image, ir_detection['mask'])
-        geom_depth_mm = self._geometry_depth_mm(ir_detection['radius'])
-
-        # 3a+. 对geometry深度应用YOLO校准的校正模型
-        geom_depth_mm = self._apply_depth_correction(geom_depth_mm)
+        sensor_depth_mm = ir_detection.get('selection_sensor_depth_mm')
+        if sensor_depth_mm is None:
+            depth_sample_cx = ir_detection.get(
+                'cx_raw', ir_detection['cx'])
+            depth_sample_cy = ir_detection.get(
+                'cy_raw', ir_detection['cy'])
+            sensor_depth_mm = self._get_depth_from_depthmap(
+                depth_sample_cx, depth_sample_cy, depth_image,
+                ir_detection['mask'], ir_detection.get('mask_origin'))
+        geom_depth_mm = ir_detection.get('selection_geom_depth_mm')
+        if geom_depth_mm is None:
+            geom_depth_mm = self._apply_depth_correction(
+                self._geometry_depth_mm(ir_detection['radius']))
 
         # 3b. 带迟滞的距离门选择深度源（近场锁geometry / 远场用sensor，避免逐帧横跳）
         depth_raw, depth_method = self._select_depth(sensor_depth_mm, geom_depth_mm)
@@ -1123,11 +1681,27 @@ class HybridBallDetector:
             return {'detected': False, 'position': [0, 0, 0], 'velocity': [0, 0, 0],
                    'detection_method': detection_method}
 
-        # 3c. 时域去尖峰+平滑（统一作用于两条路径）
-        depth_mm = self._stabilize_depth(depth_raw)
+        use_ir_depth_kalman = bool(
+            getattr(self, 'ir_depth_kalman_enabled', False))
+        use_synchronized_depth = bool(
+            getattr(self, 'synchronized_depth_enabled', False))
+        # The switch is deliberately independent from the joint KF. This makes
+        # all four raw/median-depth and filtered/unfiltered combinations valid.
+        depth_mm = self._depth_for_reconstruction(depth_raw)
+        projected_radius_px = (
+            (self.ir_fx + self.ir_fy) * self.ball_diameter_mm
+            / (4.0 * depth_mm)
+            if depth_mm is not None and depth_mm > 1e-3 else None)
 
         # 步骤4：IR坐标 + IR内参 → IR 3D点
-        X_ir, Y_ir, Z_ir = self._backproject_to_3d(ir_detection['cx'], ir_detection['cy'], depth_mm)
+        measurement_cx = (
+            ir_detection.get('cx_raw', ir_detection['cx'])
+            if use_ir_depth_kalman else ir_detection['cx'])
+        measurement_cy = (
+            ir_detection.get('cy_raw', ir_detection['cy'])
+            if use_ir_depth_kalman else ir_detection['cy'])
+        X_ir, Y_ir, Z_ir = self._backproject_to_3d(
+            measurement_cx, measurement_cy, depth_mm)
         pos_ir = [X_ir, Y_ir, Z_ir]
 
         # 步骤5：IR 3D → T_ir_to_rgb齐次变换 → RGB 3D（关键！）
@@ -1135,22 +1709,30 @@ class HybridBallDetector:
 
         # 步骤6：转换坐标系（RGB手眼外参 → base_link）
         if self.output_frame == 'base_link' and self.T_base_camera is not None:
-            position = self._transform_to_base_link(pos_rgb_camera)
+            measured_position = self._transform_to_base_link(pos_rgb_camera)
         else:
-            position = pos_rgb_camera
+            measured_position = pos_rgb_camera
+
+        if use_ir_depth_kalman:
+            position, velocity = self.ir_depth_kf.update(
+                measured_position, now)
+        else:
+            position = measured_position
+            velocity = None
 
         # 更新历史
         self.position_history.append((now, position))
 
         # 计算速度
-        velocity = self._calculate_velocity()
+        if velocity is None:
+            velocity = self._calculate_velocity()
 
         # 统计
         self.detected_frames += 1
         self.ir_detections += 1
         if detection_method == 'hybrid':
             self.hybrid_detections += 1
-        elif detection_method == 'ir_fallback':
+        elif detection_method in ('ir_fallback', 'ir_tracking'):
             self.fallback_detections += 1
 
         # 可视化：将RGB 3D点投影到RGB图像（保证和3D位置完全一致）
@@ -1179,20 +1761,44 @@ class HybridBallDetector:
                 'cy': ir_detection['cy'],
                 'cx_raw': ir_detection.get('cx_raw'),  # 原始检测（卡尔曼前）
                 'cy_raw': ir_detection.get('cy_raw'),
+                'cx_coarse': ir_detection.get('cx_coarse'),
+                'cy_coarse': ir_detection.get('cy_coarse'),
+                'center_refine_shift_px': ir_detection.get(
+                    'center_refine_shift_px'),
                 'cx_rgb': rgb_pixel[0] if rgb_pixel else None,  # IR在RGB图上的精确位置（卡尔曼后）
                 'cy_rgb': rgb_pixel[1] if rgb_pixel else None,
                 'radius': ir_detection['radius'],
+                'projected_radius_px': projected_radius_px,
                 'smoothed_cx': smoothed_cx,  # 移动平均平滑（额外的平滑层）
                 'smoothed_cy': smoothed_cy,
                 'smoothed_radius': smoothed_radius,
                 'depth_mm': depth_mm,
+                'sensor_depth_mm': sensor_depth_mm,
+                'synchronized_depth_enabled': use_synchronized_depth,
+                'depth_temporal_window_frames': (
+                    self.depth_temporal_window_frames),
+                'ir_depth_kalman_enabled': use_ir_depth_kalman,
+                'ir_depth_innovation_mahalanobis': (
+                    self.ir_depth_kf.last_innovation_mahalanobis
+                    if use_ir_depth_kalman else None),
+                'geom_depth_mm': geom_depth_mm,
                 'depth_method': depth_method,
+                'depth_mode': self.depth_mode,
                 'detection_method': detection_method,
                 'pixel_source': 'ir',  # 主要数据源
                 'yolo_bbox': self.last_yolo_bbox,
                 'roi': roi,
                 'aspect_ratio': ir_detection['aspect_ratio'],
+                'threshold_used': ir_detection.get('threshold'),
                 'brightness': ir_detection['brightness'],
+                'candidate_selection_score': ir_detection.get(
+                    'selection_score'),
+                'candidate_motion_distance_px': ir_detection.get(
+                    'selection_motion_distance_px'),
+                'candidate_depth_disagreement_mm': ir_detection.get(
+                    'selection_depth_disagreement_mm'),
+                'candidate_filter_enabled': bool(
+                    self.candidate_filter_enabled),
                 'raw_position_ir': pos_ir,
                 'raw_position_rgb': pos_rgb_camera,  # RGB坐标系位置
             },
@@ -1233,21 +1839,19 @@ class HybridBallDetector:
 
                 # 保存原始视频（在对齐前保存原始RGB）
                 if save_raw_video and video_writer is not None:
-                    color_frame = frames.get_color_frame()
-                    if color_frame:
-                        rgb_image = np.asanyarray(color_frame.get_data())
-                        video_writer.write(rgb_image)
+                    rgb_image = self.color_image_for_frames(frames)
+                    video_writer.write(rgb_image)
 
                 # 获取观测（传入已获取的帧，避免重复获取）
                 observation = self.get_observation(frames=frames)
 
                 # 获取图像用于可视化（修复：避免重复align）
-                color_frame = frames.get_color_frame()
                 ir_frame = frames.get_infrared_frame(1)
 
-                if color_frame and ir_frame:
-                    rgb_image = np.asanyarray(color_frame.get_data())
+                if ir_frame:
                     ir_image = np.asanyarray(ir_frame.get_data())
+                    rgb_image = self.color_image_for_frames(
+                        frames, ir_image)
 
                     # 可视化（始终显示，即使未检测到）
                     if enable_viz:
@@ -1293,10 +1897,17 @@ class HybridBallDetector:
                 print(f"原始视频已保存: {video_path}")
             if enable_viz:
                 cv2.destroyAllWindows()
-            self.pipeline.stop()
+            self.close()
 
     def close(self):
         """Release the RealSense pipeline held by this detector."""
+        color_pipeline = getattr(self, 'color_pipeline', None)
+        if color_pipeline is not None:
+            try:
+                color_pipeline.stop()
+            except Exception:
+                pass
+            self.color_pipeline = None
         pipeline = getattr(self, 'pipeline', None)
         if pipeline is None:
             return
@@ -1316,6 +1927,7 @@ class HybridBallDetector:
         │  (YOLO bbox) │ (检测结果)   │
         └─────────────┴─────────────┘
         """
+        rgb_image = self._rgb_on_ir_canvas(rgb_image)
         h, w = rgb_image.shape[:2]
 
         # RGB图像 - 绘制YOLO bbox和检测结果
@@ -1375,7 +1987,7 @@ class HybridBallDetector:
                 # 转换成功，使用精确的RGB坐标（已经过卡尔曼平滑）
                 cx_display = int(cx_rgb)
                 cy_display = int(cy_rgb)
-                label = 'IR KF'  # 标明已经过卡尔曼滤波
+                label = 'IR KF' if self.pixel_kalman_enabled else 'IR raw'
                 color = (0, 255, 0)  # 绿色
             else:
                 # 转换失败，回退到IR原始坐标（会有偏移）
@@ -1384,7 +1996,9 @@ class HybridBallDetector:
                 label = 'IR (Approx)'
                 color = (0, 200, 200)  # 青绿色表示近似
 
-            radius = int(raw['radius'])
+            morphology_radius = int(round(raw['radius']))
+            radius = int(round(raw.get('projected_radius_px')
+                               or raw['radius']))
 
             # IR是主要数据源 - 粗线+实心圆（这是卡尔曼平滑后的）
             cv2.circle(rgb_display, (cx_display, cy_display), radius, color, 2)
@@ -1401,7 +2015,7 @@ class HybridBallDetector:
                 # 只在平滑值与原始值不同时绘制橙色圆
                 if (abs(smoothed_cx - cx_display) > 1 or
                     abs(smoothed_cy - cy_display) > 1 or
-                    abs(smoothed_radius - radius) > 1):
+                    abs(smoothed_radius - morphology_radius) > 1):
                     cv2.circle(rgb_display,
                               (int(round(smoothed_cx)), int(round(smoothed_cy))),
                               int(round(smoothed_radius)),
@@ -1436,8 +2050,18 @@ class HybridBallDetector:
                 f"Detector Vel[{self.output_frame}]: "
                 f"({vel[0]:.0f}, {vel[1]:.0f}, {vel[2]:.0f})mm/s",
                 f"Mode: {raw['detection_method']}",
-                f"Depth: {raw['depth_mm']:.0f}mm ({raw['depth_method']})",
-                f"KF: speed={kf_stats['speed_px_s']:.1f}px/s outlier={kf_stats['outlier_rate_pct']:.1f}%",
+                f"Depth: {raw['depth_mm']:.0f}mm ({raw['depth_method']}; "
+                f"mode={raw.get('depth_mode', self.depth_mode)})",
+                f"R morph/physical: {raw['radius']:.2f}/"
+                f"{raw.get('projected_radius_px', raw['radius']):.2f}px  "
+                f"sensor/geom: "
+                f"{raw.get('sensor_depth_mm') if raw.get('sensor_depth_mm') is not None else '-'} / "
+                f"{raw.get('geom_depth_mm') if raw.get('geom_depth_mm') is not None else '-'}mm",
+                (
+                    f"Pixel KF: speed={kf_stats['speed_px_s']:.1f}px/s "
+                    f"outlier={kf_stats['outlier_rate_pct']:.1f}%"
+                    if self.pixel_kalman_enabled else "Pixel KF: OFF (raw IR)"
+                ),
             ]
 
             # 添加调试信息（可选显示IR和RGB坐标系位置）
@@ -1459,8 +2083,13 @@ class HybridBallDetector:
         if observation['detected']:
             raw = observation['raw_measurement']
             cx, cy = int(raw['cx']), int(raw['cy'])
-            radius = int(raw['radius'])
+            morphology_radius = int(round(raw['radius']))
+            radius = int(round(raw.get('projected_radius_px')
+                               or raw['radius']))
             cv2.circle(ir_colored, (cx, cy), radius, (0, 255, 0), 2)
+            if abs(morphology_radius - radius) > 1:
+                cv2.circle(ir_colored, (cx, cy), morphology_radius,
+                           (0, 165, 255), 1)
             cv2.circle(ir_colored, (cx, cy), 3, (0, 0, 255), -1)
 
         # 拼接左右

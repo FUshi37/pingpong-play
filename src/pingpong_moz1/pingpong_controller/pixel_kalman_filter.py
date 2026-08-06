@@ -25,7 +25,8 @@ class PixelKalmanFilter:
                  process_noise_pos=0.5,  # 位置过程噪声（像素）
                  process_noise_vel=5.0,   # 速度过程噪声（像素/秒）
                  measurement_noise=1.5,   # 测量噪声（像素）
-                 innovation_gate=10.0):   # 离群值门限（像素）
+                 innovation_gate=10.0,    # 离群值门限（像素）
+                 reset_after_outliers=3):
         """
         Args:
             dt: 时间步长（秒），默认60Hz
@@ -33,6 +34,7 @@ class PixelKalmanFilter:
             process_noise_vel: 速度过程噪声标准差（像素/秒）
             measurement_noise: 测量噪声标准差（像素）
             innovation_gate: 新息门限，超过此值的测量被视为离群值
+            reset_after_outliers: 连续多少次离群后重新锁定到新测量
         """
         self.dt = dt
         self.initialized = False
@@ -68,6 +70,7 @@ class PixelKalmanFilter:
 
         # 创新门限
         self.innovation_gate = innovation_gate
+        self.reset_after_outliers = max(1, int(reset_after_outliers))
 
         # 统计
         self.consecutive_outliers = 0
@@ -123,7 +126,7 @@ class PixelKalmanFilter:
 
             # 连续多次离群：可能是真实的大跳变（如球被击打）
             # 重新初始化以快速适应
-            if self.consecutive_outliers >= 3:
+            if self.consecutive_outliers >= self.reset_after_outliers:
                 self.state[:2] = measurement
                 self.P = np.eye(4, dtype=np.float64) * 100.0
                 self.consecutive_outliers = 0

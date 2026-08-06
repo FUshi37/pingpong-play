@@ -9,11 +9,12 @@ with position actuators enabled.
 from __future__ import annotations
 
 import importlib.util
+import math
 import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -41,11 +42,22 @@ else:
 
 from pingpong_controller.mjx_rl_policy import (
     MjxRLPolicyController,
+    Simcode2IdealPd67PolicyController,
+    Simcode3Actuator67PolicyController,
+    Simcode4Servo67PolicyController,
+    Simcode5PureActuator67PolicyController,
     inspect_mjx_checkpoint_metadata,
 )
 from pingpong_controller.rl_policy import (
+    OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+    OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
+    OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
+    OBSERVATION_PROFILE_SIMCODE4_SERVO67,
+    OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
     RIGHT_ARM_JOINTS,
     TARGET_DEGREES,
+    normalize_observation_profile,
+    uses_corrected_67d_observation,
 )
 
 try:
@@ -120,6 +132,90 @@ class SimMirrorConfig:
     rl_use_valid_ball_obs_age: bool = True
     mjx_domain_randomization: bool = False
     mjx_zero_ball_obs_noise: bool = True
+    policy_profile: str = OBSERVATION_PROFILE_LEGACY_BUG_COMPAT
+    simcode2_model_path: Path | None = None
+    simcode2_policy_xml_path: Path | None = None
+    simcode2_sim_xml_path: Path | None = None
+    simcode3_model_path: Path | None = None
+    simcode3_policy_xml_path: Path | None = None
+    simcode3_sim_xml_path: Path | None = None
+    simcode4_model_path: Path | None = None
+    simcode4_policy_xml_path: Path | None = None
+    simcode4_sim_xml_path: Path | None = None
+    simcode5_model_path: Path | None = None
+    simcode5_policy_xml_path: Path | None = None
+    simcode5_sim_xml_path: Path | None = None
+
+
+def normalize_policy_profile(value: object) -> str:
+    """Return the canonical policy profile shared with real deployment."""
+    return normalize_observation_profile(value)
+
+
+def sim_mirror_config_for_policy_profile(
+    base_cfg: SimMirrorConfig,
+    profile: object,
+) -> SimMirrorConfig:
+    """Resolve a mirror config without mutating the legacy path defaults.
+
+    The primary model/XML fields remain the legacy profile.  Selecting the
+    simcode2 profile explicitly swaps all three together so a new policy can
+    never be paired with the legacy policy FK XML or simulation plant XML.
+    """
+    canonical = normalize_policy_profile(profile)
+    if canonical == OBSERVATION_PROFILE_LEGACY_BUG_COMPAT:
+        return replace(base_cfg, policy_profile=canonical)
+
+    if canonical == OBSERVATION_PROFILE_SIMCODE2_IDEALPD67:
+        alternate_paths = {
+            "model_path": base_cfg.simcode2_model_path,
+            "policy_xml_path": base_cfg.simcode2_policy_xml_path,
+            "sim_xml_path": base_cfg.simcode2_sim_xml_path,
+        }
+    elif canonical == OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67:
+        alternate_paths = {
+            "model_path": base_cfg.simcode3_model_path,
+            "policy_xml_path": base_cfg.simcode3_policy_xml_path,
+            "sim_xml_path": base_cfg.simcode3_sim_xml_path,
+        }
+    elif canonical == OBSERVATION_PROFILE_SIMCODE4_SERVO67:
+        alternate_paths = {
+            "model_path": base_cfg.simcode4_model_path,
+            "policy_xml_path": base_cfg.simcode4_policy_xml_path,
+            "sim_xml_path": base_cfg.simcode4_sim_xml_path,
+        }
+    else:
+        alternate_paths = {
+            "model_path": base_cfg.simcode5_model_path,
+            "policy_xml_path": base_cfg.simcode5_policy_xml_path,
+            "sim_xml_path": base_cfg.simcode5_sim_xml_path,
+        }
+    missing = [name for name, value in alternate_paths.items() if value is None]
+    if missing:
+        raise ValueError(
+            f"{canonical} mirror is missing dedicated paths for: "
+            + ", ".join(missing))
+    return replace(
+        base_cfg,
+        policy_profile=canonical,
+        policy_obs_dim=67,
+        rl_use_valid_ball_obs_age=(canonical not in {
+            OBSERVATION_PROFILE_SIMCODE4_SERVO67,
+            OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+        }),
+        # Simcode4 parity must be measured against the original MJX
+        # environment used by train/validate.  Simcode5 deliberately preserves
+        # the caller-selected backend so its CPU MuJoCo actuator mirror can be
+        # used for the interactive probe (and MJX can still be requested
+        # explicitly at launch).
+        backend=(
+            "mjx"
+            if canonical == OBSERVATION_PROFILE_SIMCODE4_SERVO67
+            else base_cfg.backend),
+        model_path=Path(alternate_paths["model_path"]),
+        policy_xml_path=Path(alternate_paths["policy_xml_path"]),
+        sim_xml_path=Path(alternate_paths["sim_xml_path"]),
+    )
 
 
 class _LoggerShim:
@@ -215,10 +311,20 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _load_simcode_mjx_env() -> tuple[Any, Any]:
+def _load_simcode_mjx_env(
+    policy_profile: object = OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+) -> tuple[Any, Any]:
+    canonical = normalize_policy_profile(policy_profile)
+    source_dir = {
+        OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: "simcode",
+        OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: "simcode2",
+        OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67: "simcode3",
+        OBSERVATION_PROFILE_SIMCODE4_SERVO67: "simcode4",
+        OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: "simcode5",
+    }[canonical]
     rl_sim_dir = (
         _repo_root()
-        / "simcode"
+        / source_dir
         / "pingpong_moz1-main"
         / "pingpong_controller"
         / "tools"
@@ -226,12 +332,47 @@ def _load_simcode_mjx_env() -> tuple[Any, Any]:
     )
     module_path = rl_sim_dir / "mjx_juggle_env.py"
     if not module_path.is_file():
-        raise FileNotFoundError(f"simcode MJX env not found: {module_path}")
+        raise FileNotFoundError(
+            f"{source_dir} MJX env not found: {module_path}")
     rl_sim_text = str(rl_sim_dir)
-    if rl_sim_text not in sys.path:
-        sys.path.insert(0, rl_sim_text)
+    # The selected tree must take precedence over a path left by the other
+    # profile in the long-lived mirror subprocess.
+    if rl_sim_text in sys.path:
+        sys.path.remove(rl_sim_text)
+    sys.path.insert(0, rl_sim_text)
+    # Both source trees use bare imports for their local helpers.  A profile
+    # switch in the long-lived mirror subprocess must not reuse the other
+    # tree's cached helper modules.
+    local_module_names = (
+        "camera_calibration",
+        "delay_control",
+        "mjx_smoke",
+        "rl_juggle_env_random",
+        "sim2real_bridger",
+    )
+    repo_root = _repo_root().resolve()
+    local_roots = (
+        repo_root / "simcode",
+        repo_root / "simcode2",
+        repo_root / "simcode3",
+        repo_root / "simcode4",
+        repo_root / "simcode5",
+    )
+    for module_name in local_module_names:
+        loaded = sys.modules.get(module_name)
+        loaded_file = getattr(loaded, "__file__", None)
+        if loaded_file is None:
+            continue
+        try:
+            loaded_path = Path(loaded_file).resolve()
+            is_local = any(
+                loaded_path.is_relative_to(root) for root in local_roots)
+        except (OSError, RuntimeError, ValueError):
+            is_local = False
+        if is_local:
+            sys.modules.pop(module_name, None)
     spec = importlib.util.spec_from_file_location(
-        "_pingpong_simcode_mjx_juggle_env", module_path)
+        f"_pingpong_{source_dir}_mjx_juggle_env", module_path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"failed to load simcode MJX env: {module_path}")
     module = importlib.util.module_from_spec(spec)
@@ -298,17 +439,47 @@ class RealBallSimMirror:
         *,
         logger: Any | None = None,
     ) -> None:
+        cfg = sim_mirror_config_for_policy_profile(cfg, cfg.policy_profile)
         self.cfg = cfg
+        self.policy_profile = normalize_policy_profile(cfg.policy_profile)
+        self._ideal_pd_profile = (
+            self.policy_profile == OBSERVATION_PROFILE_SIMCODE2_IDEALPD67)
+        self._servo_planner_profile = (
+            self.policy_profile == OBSERVATION_PROFILE_SIMCODE4_SERVO67)
+        self._pure_actuator_profile = (
+            self.policy_profile
+            == OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+        self._corrected_67d_profile = uses_corrected_67d_observation(
+            self.policy_profile)
         self._logger = logger or _LoggerShim()
         if not _MUJOCO_AVAILABLE:
             raise RuntimeError(f"mujoco unavailable: {_MUJOCO_IMPORT_ERROR}")
         self.sim_xml_path = Path(cfg.sim_xml_path).expanduser().resolve()
-        self.patched_xml_path = _patch_robot_xml_with_ball(self.sim_xml_path)
+        if self._corrected_67d_profile:
+            from pingpong_controller.simcode2_xml import (
+                build_simcode2_training_xml,
+            )
+            self.patched_xml_path = build_simcode2_training_xml(
+                self.sim_xml_path)
+        else:
+            self.patched_xml_path = _patch_robot_xml_with_ball(
+                self.sim_xml_path)
         self.model = mj.MjModel.from_xml_path(str(self.patched_xml_path))
         self.data = mj.MjData(self.model)
         self.dt = float(cfg.control_dt)
         self.substeps = max(1, int(round(self.dt / max(self.model.opt.timestep, 1e-6))))
-        self.policy = MjxRLPolicyController(
+        policy_cls = {
+            OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: MjxRLPolicyController,
+            OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: (
+                Simcode2IdealPd67PolicyController),
+            OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67: (
+                Simcode3Actuator67PolicyController),
+            OBSERVATION_PROFILE_SIMCODE4_SERVO67: (
+                Simcode4Servo67PolicyController),
+            OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: (
+                Simcode5PureActuator67PolicyController),
+        }[self.policy_profile]
+        self.policy = policy_cls(
             str(Path(cfg.model_path).expanduser().resolve()),
             dt=self.dt,
             robot_xml_path=str(Path(cfg.policy_xml_path).expanduser().resolve()),
@@ -316,6 +487,50 @@ class RealBallSimMirror:
             use_valid_ball_obs_age=True,
             logger=self._logger,
         )
+
+        self.pure_actuator_wn: np.ndarray | None = None
+        self.pure_actuator_zeta: np.ndarray | None = None
+        self.pure_actuator_gain: np.ndarray | None = None
+        self.pure_actuator_delay_steps: np.ndarray | None = None
+        if self._pure_actuator_profile:
+            env_cfg = dict(inspect_mjx_checkpoint_metadata(
+                str(Path(cfg.model_path).expanduser().resolve())
+            ).get("env_cfg") or {})
+            model_name = str(env_cfg.get(
+                "actuator_cmd_model", ""
+            )).strip().lower().replace("-", "_")
+            if model_name != "second_order":
+                raise RuntimeError(
+                    "simcode5 MuJoCo mirror requires checkpoint "
+                    f"actuator_cmd_model='second_order', got {model_name!r}")
+
+            def _contract_vector(name: str) -> np.ndarray:
+                values = np.asarray(env_cfg.get(name, ()), dtype=np.float32)
+                if values.shape != (len(RIGHT_ARM_JOINTS),):
+                    raise RuntimeError(
+                        f"simcode5 checkpoint {name} must contain "
+                        f"{len(RIGHT_ARM_JOINTS)} values, got {values.shape}")
+                if not np.all(np.isfinite(values)):
+                    raise RuntimeError(
+                        f"simcode5 checkpoint {name} contains non-finite values")
+                return values
+
+            self.pure_actuator_wn = _contract_vector(
+                "actuator_cmd_natural_frequency_rad_s")
+            self.pure_actuator_zeta = _contract_vector(
+                "actuator_cmd_damping_ratio")
+            self.pure_actuator_gain = _contract_vector(
+                "actuator_cmd_gain_per_joint")
+            delay_ms = _contract_vector("actuator_cmd_delay_ms_per_joint")
+            if (np.any(self.pure_actuator_wn <= 0.0)
+                    or np.any(self.pure_actuator_zeta <= 0.0)
+                    or np.any(self.pure_actuator_zeta >= 1.0)
+                    or np.any(delay_ms < 0.0)):
+                raise RuntimeError(
+                    "invalid simcode5 second-order actuator checkpoint values")
+            self.pure_actuator_delay_steps = np.rint(
+                delay_ms * np.float32(1e-3 / self.dt)
+            ).astype(np.int32)
 
         self.arm_jids = self._ids(mj.mjtObj.mjOBJ_JOINT, RIGHT_ARM_JOINTS)
         self.arm_aids = self._ids(mj.mjtObj.mjOBJ_ACTUATOR, RIGHT_ARM_JOINTS)
@@ -327,6 +542,16 @@ class RealBallSimMirror:
             [int(self.model.jnt_dofadr[jid]) for jid in self.arm_jids],
             dtype=np.int32,
         )
+        self.base_qadr = np.asarray([
+            int(self.model.jnt_qposadr[mj.mj_name2id(
+                self.model, mj.mjtObj.mjOBJ_JOINT, name)])
+            for name in ("base_x", "base_y", "base_yaw")
+        ], dtype=np.int32)
+        self.base_vadr = np.asarray([
+            int(self.model.jnt_dofadr[mj.mj_name2id(
+                self.model, mj.mjtObj.mjOBJ_JOINT, name)])
+            for name in ("base_x", "base_y", "base_yaw")
+        ], dtype=np.int32)
         self.racket_site_id = mj.mj_name2id(
             self.model, mj.mjtObj.mjOBJ_SITE, "right_ee_site")
         self.ball_joint_id = mj.mj_name2id(
@@ -360,11 +585,13 @@ class RealBallSimMirror:
         self.arm_q_ref_active: np.ndarray | None = None
         self.arm_actuator_q_ref_active: np.ndarray | None = None
         self.arm_applied_q: np.ndarray | None = None
+        self.arm_applied_qvel: np.ndarray | None = None
         self.actuator_delay_steps = 0
         self.actuator_command_buffer_len = 1
         self.reset()
         self._logger.info(
             "simulation mirror ready | "
+            f"policy_profile={self.policy_profile}, "
             f"xml={self.sim_xml_path.name}, substeps={self.substeps}, "
             f"dt={self.dt:.4f}s, renderer={bool(cfg.use_mujoco_renderer)}")
 
@@ -381,35 +608,94 @@ class RealBallSimMirror:
             aid = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, name)
             if aid >= 0:
                 ctrl[aid] = float(np.deg2rad(deg))
+        if self._corrected_67d_profile:
+            # Corrected checkpoints carry their D455-aligned reset pose.
+            # Seed the CPU plant at that pose before policy/history reset.
+            for name, q_rad in zip(
+                RIGHT_ARM_JOINTS, self.policy.initial_arm_q_rad,
+            ):
+                aid = mj.mj_name2id(
+                    self.model, mj.mjtObj.mjOBJ_ACTUATOR, name)
+                if aid >= 0:
+                    ctrl[aid] = float(q_rad)
         for name in ("Base-X", "Base-Y", "Base-Yaw"):
             aid = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, name)
             if aid >= 0:
                 ctrl[aid] = 0.0
         return ctrl
 
-    def reset(self, arm_q: np.ndarray | None = None) -> dict[str, Any]:
+    def reset(
+        self,
+        arm_q: np.ndarray | None = None,
+        *,
+        ball_pos: np.ndarray | None = None,
+        ball_vel: np.ndarray | None = None,
+        ball_valid: bool = False,
+        ball_obs_age_s: float = 0.0,
+    ) -> dict[str, Any]:
         self.data = mj.MjData(self.model)
         self.data.ctrl[:] = self.default_ctrl
-        if arm_q is not None:
+        if arm_q is not None and not self._corrected_67d_profile:
             q = _finite_vec(arm_q, len(RIGHT_ARM_JOINTS))
             for i, (qadr, aid) in enumerate(zip(self.arm_qadr, self.arm_aids)):
                 self.data.qpos[qadr] = float(q[i])
                 self.data.ctrl[aid] = float(q[i])
         for _ in range(700):
             mj.mj_step(self.model, self.data)
+        if arm_q is not None and self._corrected_67d_profile:
+            # MJX reset first restores its canonical warm state, then the live
+            # mirror's force-arm path overwrites q/dq/ctrl without an extra
+            # settling interval.  Match that ordering exactly.
+            q = _finite_vec(arm_q, len(RIGHT_ARM_JOINTS))
+            self.data.qpos[self.arm_qadr] = q
+            self.data.qvel[self.arm_vadr] = 0.0
+            self.data.ctrl[self.arm_aids] = q
         mj.mj_forward(self.model, self.data)
         q0 = self.data.qpos[self.arm_qadr].astype(np.float32)
         self.policy.reset()
         self.policy.arm_cmd_q = q0.copy()
-        self.policy.arm_cmd_qvel = self.data.qvel[self.arm_vadr].astype(np.float32)
+        self.policy.arm_cmd_qvel = (
+            np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float32)
+            if self._corrected_67d_profile
+            else self.data.qvel[self.arm_vadr].astype(np.float32)
+        )
         self.policy.last_cmd_q = q0.copy()
         self.policy.last_cmd_qvel = self.policy.arm_cmd_qvel.copy()
         self.policy.last_cmd_qacc = np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float32)
         self.policy.last_action = np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float32)
+        if self._corrected_67d_profile:
+            # reset() initially anchors the corrected observation path at the
+            # checkpoint reset pose.  The mirror may instead be seeded from a
+            # live arm pose, so re-anchor every state that is observable on the
+            # first policy tick at the actual settled q0.
+            command_buffer_len = max(
+                1, int(getattr(self.policy, "_command_buffer_len", 1)))
+            self.policy._cmd_history = [
+                q0.copy() for _ in range(command_buffer_len)
+            ]
+            racket_pos_base, fk_ok = self.policy._compute_racket_pose_base(q0)
+            if fk_ok:
+                racket_anchor = np.asarray(
+                    racket_pos_base, dtype=np.float32).reshape(3)
+                self.policy._prev_racket_pos_base = racket_anchor.copy()
+                self.policy._racket_anchor_pos_base = racket_anchor.copy()
         if self.warm_arm_q is None:
             self.warm_arm_q = q0.copy()
             self.warm_arm_qvel = self.policy.arm_cmd_qvel.copy()
-        self._reset_actuator_model(q0)
+        if self._ideal_pd_profile:
+            # simcode2's ideal-PD plant consumes the current nominal policy
+            # command directly.  Keep the public command fields coherent while
+            # leaving the legacy software delay/FOPDT state completely unused.
+            self.arm_q_ref_active = q0.copy()
+            self.arm_actuator_q_ref_active = q0.copy()
+            self.arm_applied_q = q0.copy()
+            self.actuator_model_key = None
+            self.command_buffer = None
+            self.actuator_command_buffer = None
+            self.actuator_delay_steps = 0
+            self.actuator_command_buffer_len = 1
+        else:
+            self._reset_actuator_model(q0)
         self.frame_seq = 0
         self.latest_frame = None
         self.latest_frame_info = {"seq": 0, "ageS": None}
@@ -419,13 +705,48 @@ class RealBallSimMirror:
                 self.compensator.reset(q0.copy())
             except Exception:
                 pass
-        return self.snapshot()
+        if ball_pos is not None:
+            reset_ball_vel = (
+                np.zeros(3, dtype=np.float32)
+                if ball_vel is None else _finite_vec(ball_vel, 3)
+            )
+            self._set_ball_state(ball_pos, reset_ball_vel)
+            mj.mj_forward(self.model, self.data)
+        return self.snapshot(
+            ball_pos=ball_pos,
+            ball_vel=ball_vel,
+            ball_valid=bool(ball_valid),
+            ball_obs_age_s=max(0.0, float(ball_obs_age_s)),
+        )
 
     def _set_ball_state(self, ball_pos: np.ndarray, ball_vel: np.ndarray) -> None:
         if self.ball_qadr < 0 or self.ball_vadr < 0:
             return
         p = _finite_vec(ball_pos, 3)
         v = _finite_vec(ball_vel, 3)
+        if self._corrected_67d_profile:
+            # Probe/policy inputs are already in the base-yaw frame, whereas
+            # the MuJoCo free joint is world-frame.  Invert simcode2's
+            # _point_to_base/_vel_to_base before injecting the physical ball.
+            base_q = self.data.qpos[self.base_qadr].astype(np.float64)
+            base_dq = self.data.qvel[self.base_vadr].astype(np.float64)
+            c = math.cos(float(base_q[2]))
+            s = math.sin(float(base_q[2]))
+            rel_x = c * float(p[0]) - s * float(p[1])
+            rel_y = s * float(p[0]) + c * float(p[1])
+            rel_vx = c * float(v[0]) - s * float(v[1])
+            rel_vy = s * float(v[0]) + c * float(v[1])
+            p = np.asarray([
+                float(base_q[0]) + rel_x,
+                float(base_q[1]) + rel_y,
+                float(p[2]),
+            ], dtype=np.float32)
+            yaw_rate = float(base_dq[2])
+            v = np.asarray([
+                float(base_dq[0]) + rel_vx - yaw_rate * rel_y,
+                float(base_dq[1]) + rel_vy + yaw_rate * rel_x,
+                float(v[2]),
+            ], dtype=np.float32)
         self.data.qpos[self.ball_qadr:self.ball_qadr + 3] = p
         self.data.qpos[self.ball_qadr + 3:self.ball_qadr + 7] = np.asarray(
             [1.0, 0.0, 0.0, 0.0], dtype=np.float32)
@@ -449,6 +770,18 @@ class RealBallSimMirror:
         )
 
     def _actuator_model_key(self, options: Any | None = None) -> tuple[Any, ...]:
+        if (bool(getattr(self, "_pure_actuator_profile", False))
+                and self.pure_actuator_wn is not None
+                and self.pure_actuator_zeta is not None
+                and self.pure_actuator_gain is not None
+                and self.pure_actuator_delay_steps is not None):
+            return (
+                "simcode5_second_order",
+                tuple(float(v) for v in self.pure_actuator_wn),
+                tuple(float(v) for v in self.pure_actuator_zeta),
+                tuple(float(v) for v in self.pure_actuator_gain),
+                tuple(int(v) for v in self.pure_actuator_delay_steps),
+            )
         return self._actuator_model_key_from_values(
             delay_ms=float(
                 getattr(options, "comp_delay_ms", self.cfg.comp_delay_ms)),
@@ -469,11 +802,18 @@ class RealBallSimMirror:
     ) -> None:
         q0 = _finite_vec(q_seed, len(RIGHT_ARM_JOINTS))
         key = self._actuator_model_key(options)
-        delay_ms = float(key[0])
+        pure_second_order = (
+            bool(getattr(self, "_pure_actuator_profile", False))
+            and self.pure_actuator_delay_steps is not None)
+        delay_ms = (
+            float(np.max(self.pure_actuator_delay_steps)) * self.dt * 1e3
+            if pure_second_order else float(key[0]))
         self.actuator_command_buffer_len = _command_buffer_length(
-            delay_ms, self.dt, int(key[3]))
+            delay_ms, self.dt, 4 if pure_second_order else int(key[3]))
         self.actuator_delay_steps = int(np.clip(
-            _delay_steps_from_tau(delay_ms * 1e-3, self.dt),
+            (int(round(float(self.cfg.comp_delay_ms) * 1e-3 / self.dt))
+             if pure_second_order
+             else _delay_steps_from_tau(delay_ms * 1e-3, self.dt)),
             0,
             self.actuator_command_buffer_len - 1,
         ))
@@ -483,6 +823,7 @@ class RealBallSimMirror:
         self.arm_q_ref_active = q0.copy()
         self.arm_actuator_q_ref_active = q0.copy()
         self.arm_applied_q = q0.copy()
+        self.arm_applied_qvel = np.zeros_like(q0)
         self.actuator_model_key = key
 
     def _ensure_actuator_model(self, options: Any, seed_q: np.ndarray) -> None:
@@ -509,36 +850,107 @@ class RealBallSimMirror:
         assert self.command_buffer is not None
         assert self.actuator_command_buffer is not None
         assert self.arm_applied_q is not None
+        if self.arm_applied_qvel is None:
+            self.arm_applied_qvel = np.zeros_like(self.arm_applied_q)
 
-        if bool(self._actuator_model_key(options)[4]):
+        if (bool(getattr(self, "_pure_actuator_profile", False))
+                or bool(self._actuator_model_key(options)[4])):
             delay_steps = self.actuator_delay_steps
         else:
             delay_steps = 0
         self.command_buffer, q_ref_active = _push_command_buffer(
             self.command_buffer, q_ref, delay_steps)
-        self.actuator_command_buffer, q_actuator_active = _push_command_buffer(
-            self.actuator_command_buffer, q_actuator_ref, delay_steps)
+        if (bool(getattr(self, "_pure_actuator_profile", False))
+                and self.pure_actuator_wn is not None
+                and self.pure_actuator_zeta is not None
+                and self.pure_actuator_gain is not None
+                and self.pure_actuator_delay_steps is not None):
+            self.actuator_command_buffer = np.concatenate([
+                self.actuator_command_buffer[1:], q_actuator_ref[None, :]
+            ], axis=0)
+            joint_steps = np.clip(
+                self.pure_actuator_delay_steps,
+                0,
+                self.actuator_command_buffer.shape[0] - 1,
+            )
+            joint_indices = (
+                self.actuator_command_buffer.shape[0] - 1 - joint_steps)
+            q_actuator_active = self.actuator_command_buffer[
+                joint_indices, np.arange(len(RIGHT_ARM_JOINTS))].copy()
+        else:
+            self.actuator_command_buffer, q_actuator_active = (
+                _push_command_buffer(
+                    self.actuator_command_buffer, q_actuator_ref, delay_steps))
 
         warm = (
             self.warm_arm_q
             if self.warm_arm_q is not None else np.zeros_like(q_actuator_active)
         )
-        tau_s = max(0.0, float(getattr(
-            options, "comp_actuator_tau_s", self.cfg.comp_actuator_tau_s)))
-        gain = float(getattr(
-            options, "comp_actuator_gain", self.cfg.comp_actuator_gain))
-        gain_target = warm + gain * (q_actuator_active - warm)
-        if tau_s <= 1e-6:
-            applied_q = gain_target.astype(np.float32)
-        else:
-            alpha = self.dt / (tau_s + self.dt)
+        if (bool(getattr(self, "_pure_actuator_profile", False))
+                and self.pure_actuator_wn is not None
+                and self.pure_actuator_zeta is not None
+                and self.pure_actuator_gain is not None):
+            wn = self.pure_actuator_wn
+            zeta = self.pure_actuator_zeta
+            root = np.sqrt(np.maximum(1.0 - zeta * zeta, 1e-8))
+            wd = wn * root
+            decay = np.exp(-zeta * wn * self.dt)
+            phase = wd * self.dt
+            sin_phase = np.sin(phase)
+            cos_phase = np.cos(phase)
+            a11 = decay * (cos_phase + zeta / root * sin_phase)
+            a12 = decay * sin_phase / np.maximum(wd, 1e-8)
+            a21 = -decay * wn * wn * sin_phase / np.maximum(wd, 1e-8)
+            a22 = decay * (cos_phase - zeta / root * sin_phase)
+            gain_target = warm + self.pure_actuator_gain * (
+                q_actuator_active - warm)
+            current_q = self.arm_applied_q
+            current_qvel = self.arm_applied_qvel
             applied_q = (
-                self.arm_applied_q
-                + np.float32(alpha) * (gain_target - self.arm_applied_q)
+                a11 * current_q + a12 * current_qvel
+                + (1.0 - a11) * gain_target
             ).astype(np.float32)
+            self.arm_applied_qvel = (
+                a21 * current_q + a22 * current_qvel
+                - a21 * gain_target
+            ).astype(np.float32)
+        else:
+            tau_s = max(0.0, float(getattr(
+                options, "comp_actuator_tau_s", self.cfg.comp_actuator_tau_s)))
+            gain = float(getattr(
+                options, "comp_actuator_gain", self.cfg.comp_actuator_gain))
+            gain_target = warm + gain * (q_actuator_active - warm)
+            if tau_s <= 1e-6:
+                applied_q = gain_target.astype(np.float32)
+            else:
+                alpha = self.dt / (tau_s + self.dt)
+                applied_q = (
+                    self.arm_applied_q
+                    + np.float32(alpha) * (gain_target - self.arm_applied_q)
+                ).astype(np.float32)
         applied_q = np.clip(
             applied_q, self.policy.arm_q_low, self.policy.arm_q_high,
         ).astype(np.float32)
+        if bool(getattr(self, "_servo_planner_profile", False)):
+            from pingpong_controller.safety_limiter import (
+                project_target_tracking_command_step,
+            )
+            planned = project_target_tracking_command_step(
+                applied_q,
+                self.arm_applied_q,
+                self.arm_applied_qvel,
+                self.policy.arm_q_low,
+                self.policy.arm_q_high,
+                self.policy.arm_vel_limit_rad_s,
+                self.policy.arm_acc_limit_rad_s2 * np.float32(0.8),
+                self.dt,
+            )
+            applied_q = np.asarray(planned[0], dtype=np.float32)
+            self.arm_applied_qvel = np.asarray(planned[1], dtype=np.float32)
+        elif not bool(getattr(self, "_pure_actuator_profile", False)):
+            self.arm_applied_qvel = (
+                (applied_q - self.arm_applied_q) / max(self.dt, 1e-6)
+            ).astype(np.float32)
 
         self.arm_q_ref_active = q_ref_active.astype(np.float32)
         self.arm_actuator_q_ref_active = q_actuator_active.astype(np.float32)
@@ -604,7 +1016,13 @@ class RealBallSimMirror:
             self.compensator_key = None
             self.compensation_error = str(exc)
 
-    def _apply_compensation(self, q_cmd: np.ndarray, options: Any) -> np.ndarray:
+    def _apply_compensation(
+        self,
+        q_cmd: np.ndarray,
+        options: Any,
+        *,
+        actual_q: np.ndarray | None = None,
+    ) -> np.ndarray:
         if not bool(getattr(options, "enable_compensation", False)):
             return q_cmd.astype(np.float32)
         self._ensure_compensator(options)
@@ -614,7 +1032,20 @@ class RealBallSimMirror:
             cmd = self.policy.latest_command_state()
             qvel = np.asarray(cmd["velocity"], dtype=np.float32).reshape(-1)
             qacc = np.asarray(cmd["acceleration"], dtype=np.float32).reshape(-1)
-            applied_q = self.data.qpos[self.arm_qadr].astype(np.float32)
+            # simcode3 inverse-MPC was trained against the previous-tick
+            # delayed/filter-modelled actuator target.  Simcode4 deliberately
+            # changed that contract to actual joint feedback.  Keep the CPU
+            # MuJoCo mirror consistent with the selected frozen plant instead
+            # of silently applying simcode3 feedback semantics to simcode4.
+            if self._servo_planner_profile and actual_q is not None:
+                applied_q = _finite_vec(actual_q, len(RIGHT_ARM_JOINTS))
+            else:
+                applied_q = np.asarray(
+                    self.arm_applied_q
+                    if self.arm_applied_q is not None
+                    else self.data.qpos[self.arm_qadr],
+                    dtype=np.float32,
+                )
             out = self.compensator.step(
                 q_cmd=q_cmd.astype(np.float32),
                 qdot_cmd=qvel,
@@ -667,14 +1098,32 @@ class RealBallSimMirror:
                 dt=self.dt,
                 arm_q=arm_q,
                 arm_dq=arm_dq,
+                observation_scales=getattr(
+                    options, "policy_observation_scales", ()),
             )
-            q_actuator = self._apply_compensation(q_nominal, options)
-            q_active, q_actuator_active, q_applied = self._run_actuator_model(
-                q_nominal,
-                q_actuator,
-                options,
-                seed_q=arm_q,
-            )
+            if self._ideal_pd_profile:
+                # New simcode2 checkpoint contract: policy -> current nominal
+                # target -> ideal XML position-actuator PD.  The 72 ms command
+                # history is observation-only and must not delay plant input.
+                q_actuator = np.asarray(q_nominal, dtype=np.float32).copy()
+                q_active = q_actuator.copy()
+                q_actuator_active = q_actuator.copy()
+                q_applied = q_actuator.copy()
+                self.arm_q_ref_active = q_active.copy()
+                self.arm_actuator_q_ref_active = q_actuator_active.copy()
+                self.arm_applied_q = q_applied.copy()
+            else:
+                q_actuator = self._apply_compensation(
+                    q_nominal,
+                    options,
+                    actual_q=arm_q,
+                )
+                q_active, q_actuator_active, q_applied = self._run_actuator_model(
+                    q_nominal,
+                    q_actuator,
+                    options,
+                    seed_q=arm_q,
+                )
             self.data.ctrl[:] = self.default_ctrl
             for i, aid in enumerate(self.arm_aids):
                 self.data.ctrl[aid] = float(q_applied[i])
@@ -723,6 +1172,7 @@ class RealBallSimMirror:
         racket_pos, racket_quat = self._racket_pose()
         q = self.data.qpos[self.arm_qadr].astype(np.float32)
         dq = self.data.qvel[self.arm_vadr].astype(np.float32)
+        ddq = self.data.qacc[self.arm_vadr].astype(np.float32)
         ctrl = self.data.ctrl[self.arm_aids].astype(np.float32)
         ball_p = _finite_vec(ball_pos, 3) if ball_pos is not None else (
             np.asarray(self.data.xpos[self.ball_body_id], dtype=np.float32)
@@ -731,7 +1181,10 @@ class RealBallSimMirror:
         return {
             "enabled": True,
             "available": True,
-            "backend": "mujoco_actuator_mirror",
+            "backend": (
+                "mujoco_ideal_pd_mirror"
+                if self._ideal_pd_profile else "mujoco_actuator_mirror"),
+            "policyProfile": self.policy_profile,
             "timeWallS": round(float(time.time()), 6),
             "valid": bool(ball_valid),
             "age": round(float(max(0.0, ball_obs_age_s)), 6),
@@ -739,6 +1192,8 @@ class RealBallSimMirror:
             "velocity": _rounded(ball_v),
             "jointPosition": _rounded(q),
             "jointVelocity": _rounded(dq),
+            "jointAcceleration": _rounded(ddq),
+            "jointAccelerationSource": "mujoco_qacc",
             "actuatorTarget": _rounded(ctrl),
             "policyCommand": _rounded(q_nominal if q_nominal is not None else cmd["position"]),
             "compensatedCommand": _rounded(q_actuator if q_actuator is not None else ctrl),
@@ -757,6 +1212,12 @@ class RealBallSimMirror:
             "racket": _rounded(racket_pos),
             "racketQuatXyzw": _rounded(racket_quat),
             "policyObs": _rounded(obs_action["obs"]),
+            "policyObsUnscaled": _rounded(obs_action.get(
+                "obs_unscaled", obs_action["obs"])),
+            "policyObservationScaleIndices": list(obs_action.get(
+                "observation_scale_indices", [])),
+            "policyObservationScales": _rounded(obs_action.get(
+                "observation_scales", np.ones_like(obs_action["obs"]))),
             "policyBallObservation": np.asarray(
                 obs_action["obs"], dtype=np.float32,
             ).reshape(-1)[20:26].tolist(),
@@ -766,9 +1227,26 @@ class RealBallSimMirror:
                 "velocity": _rounded(cmd["velocity"]),
                 "acceleration": _rounded(cmd["acceleration"]),
             },
-            "compensation": {
-                "error": self.compensation_error,
-                "available": bool(_COMPENSATION_AVAILABLE),
+            "compensation": (
+                {
+                    "error": None,
+                    "available": True,
+                    "mode": "none",
+                }
+                if self._ideal_pd_profile else {
+                    "error": self.compensation_error,
+                    "available": bool(_COMPENSATION_AVAILABLE),
+                }
+            ),
+            "servoPlanner": {
+                "enabled": bool(self._servo_planner_profile),
+                "feedbackSource": (
+                    "actual_joint_state"
+                    if self._servo_planner_profile
+                    else "modeled_applied_target"),
+                "velocityScale": 1.0,
+                "accelerationScale": (
+                    0.8 if self._servo_planner_profile else 1.0),
             },
             "frame": dict(self.latest_frame_info),
             "renderError": self.render_error,
@@ -848,7 +1326,18 @@ class RealBallMjxJaxSimMirror:
         *,
         logger: Any | None = None,
     ) -> None:
+        cfg = sim_mirror_config_for_policy_profile(cfg, cfg.policy_profile)
         self.cfg = cfg
+        self.policy_profile = normalize_policy_profile(cfg.policy_profile)
+        self._ideal_pd_profile = (
+            self.policy_profile == OBSERVATION_PROFILE_SIMCODE2_IDEALPD67)
+        self._servo_planner_profile = (
+            self.policy_profile == OBSERVATION_PROFILE_SIMCODE4_SERVO67)
+        self._pure_actuator_profile = (
+            self.policy_profile
+            == OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+        self._corrected_67d_profile = uses_corrected_67d_observation(
+            self.policy_profile)
         self._logger = logger or _LoggerShim()
         if not _MUJOCO_AVAILABLE:
             raise RuntimeError(f"mujoco unavailable: {_MUJOCO_IMPORT_ERROR}")
@@ -866,7 +1355,8 @@ class RealBallMjxJaxSimMirror:
 
         self.jax = jax
         self.jnp = jnp
-        MjxJuggleConfig, MjxJuggleEnv = _load_simcode_mjx_env()
+        MjxJuggleConfig, MjxJuggleEnv = _load_simcode_mjx_env(
+            self.policy_profile)
         env_kwargs = self._mjx_env_kwargs(MjxJuggleConfig)
         self.env_cfg = MjxJuggleConfig(**env_kwargs)
         self.env = MjxJuggleEnv(
@@ -880,8 +1370,20 @@ class RealBallMjxJaxSimMirror:
                 f"policy_obs_dim={cfg.policy_obs_dim}. Check checkpoint env_cfg "
                 "and POLICY_OBS_DIM."
             )
+        self.obs_dim = int(cfg.policy_obs_dim)
 
-        self.policy = MjxRLPolicyController(
+        policy_cls = {
+            OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: MjxRLPolicyController,
+            OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: (
+                Simcode2IdealPd67PolicyController),
+            OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67: (
+                Simcode3Actuator67PolicyController),
+            OBSERVATION_PROFILE_SIMCODE4_SERVO67: (
+                Simcode4Servo67PolicyController),
+            OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: (
+                Simcode5PureActuator67PolicyController),
+        }[self.policy_profile]
+        self.policy = policy_cls(
             str(Path(cfg.model_path).expanduser().resolve()),
             dt=float(self.env.dt),
             robot_xml_path=str(Path(cfg.policy_xml_path).expanduser().resolve()),
@@ -921,6 +1423,7 @@ class RealBallMjxJaxSimMirror:
         self.reset()
         self._logger.info(
             "MJX/JAX simulation mirror ready | "
+            f"policy_profile={self.policy_profile}, "
             f"xml={Path(cfg.sim_xml_path).name}, dt={self.dt:.4f}s, "
             f"obs_dim={self.env.obs_dim}, renderer={bool(cfg.use_mujoco_renderer)}")
 
@@ -954,30 +1457,141 @@ class RealBallMjxJaxSimMirror:
                 "ball_obs_nominal_vel_bias_base": (0.0, 0.0, 0.0),
                 "dr_randomize_ball_obs_frame": False,
             })
-        if (int(self.cfg.policy_obs_dim) == 67):
+        if self._ideal_pd_profile:
+            # Preserve the simcode2 checkpoint's ideal-PD plant contract.  In
+            # particular, delay state exists only to form the final 17 policy
+            # observations; it must not delay/filter the command sent to PD.
             fixed.update({
-                "delay_min_ms": float(self.cfg.comp_delay_ms),
-                "delay_max_ms": float(self.cfg.comp_delay_ms),
+                "delay_min_ms": float(env_cfg.get("delay_min_ms", 72.0)),
+                "delay_max_ms": float(env_cfg.get("delay_max_ms", 72.0)),
                 "delay_jitter_ms": 0.0,
                 "delay_sampling_mode": "uniform",
+                "command_buffer_extra_steps": int(
+                    env_cfg.get("command_buffer_extra_steps", 4)),
+                "actuator_delay_observation_only": True,
+                "actuator_cmd_filter": False,
+                "actuator_cmd_tau": max(
+                    0.0, float(env_cfg.get("actuator_cmd_tau", 0.074))),
+                "actuator_cmd_gain": float(
+                    env_cfg.get("actuator_cmd_gain", 1.0)),
+                "actuator_compensation_mode": "none",
+                "action_filter_tau_ms": 0.0,
+                "action_jerk_limit": 0.0,
+                "enable_anti_windup": False,
+                "arm_post_compensation_limiter": False,
+                "arm_servo_target_limiter": False,
+                "arm_servo_target_tracking_planner": False,
+                "arm_actual_state_limiter": False,
+                "high_latency_obs": False,
+                "dr_randomize_actuator": False,
+                "dr_randomize_actuator_cmd_filter": False,
             })
-        fixed.update({
-            "actuator_cmd_filter": True,
-            "actuator_cmd_tau": max(0.0, float(self.cfg.comp_actuator_tau_s)),
-            "actuator_cmd_gain": float(self.cfg.comp_actuator_gain),
-            "actuator_compensation_mode": (
-                str(self.cfg.compensation_mode)
-                if bool(self.cfg.enable_compensation) else "none"
-            ),
-            "actuator_mpc_beta": float(self.cfg.comp_mpc_beta),
-            "actuator_mpc_delay_scale": float(self.cfg.comp_mpc_delay_scale),
-            "actuator_mpc_tau_scale": float(self.cfg.comp_mpc_tau_scale),
-            "actuator_mpc_horizon_steps": max(1, int(self.cfg.comp_mpc_horizon_steps)),
-            "actuator_mpc_tracking_weight": float(self.cfg.comp_mpc_tracking_weight),
-            "actuator_mpc_nominal_weight": float(self.cfg.comp_mpc_nominal_weight),
-            "actuator_mpc_delta_weight": float(self.cfg.comp_mpc_delta_weight),
-            "actuator_mpc_max_delta_rad": max(0.0, float(self.cfg.comp_mpc_max_delta_rad)),
-        })
+        elif bool(getattr(self, "_pure_actuator_profile", False)):
+            # Simcode5 is a checkpoint-authoritative pure-plant profile.  The
+            # real robot supplies these joint characteristics, but the mirror
+            # must restore the per-joint delay + analytic second-order model
+            # and sport PD profile from env_cfg.  Do not replace them with the
+            # legacy UI's scalar FOPDT/compensation knobs.
+            fixed.update({
+                "delay_min_ms": float(env_cfg.get("delay_min_ms", 45.0)),
+                "delay_max_ms": float(env_cfg.get("delay_max_ms", 45.0)),
+                "delay_jitter_ms": 0.0,
+                "delay_sampling_mode": "uniform",
+                "command_buffer_extra_steps": int(
+                    env_cfg.get("command_buffer_extra_steps", 4)),
+                "actuator_delay_observation_only": False,
+                "actuator_cmd_filter": True,
+                "actuator_cmd_model": "second_order",
+                "actuator_compensation_mode": "none",
+                "arm_post_compensation_limiter": False,
+                "arm_servo_target_limiter": False,
+                "arm_servo_target_tracking_planner": False,
+                "arm_servo_target_planner_before_actuator_model": False,
+                "arm_actual_state_limiter": False,
+                "ball_obs_age_tracks_stale": False,
+                "dr_randomize_actuator": False,
+                "dr_randomize_actuator_cmd_filter": False,
+                "dr_randomize_second_order_actuator": False,
+            })
+        else:
+            if int(self.cfg.policy_obs_dim) == 67:
+                fixed.update({
+                    "delay_min_ms": float(
+                        env_cfg.get("delay_min_ms", self.cfg.comp_delay_ms)
+                        if self._servo_planner_profile
+                        else self.cfg.comp_delay_ms),
+                    "delay_max_ms": float(
+                        env_cfg.get("delay_max_ms", self.cfg.comp_delay_ms)
+                        if self._servo_planner_profile
+                        else self.cfg.comp_delay_ms),
+                    "delay_jitter_ms": 0.0,
+                    "delay_sampling_mode": "uniform",
+                })
+            # Keep the deployed legacy mirror's compensation + software
+            # actuator model exactly as configured by its existing UI knobs.
+            fixed.update({
+                "actuator_cmd_filter": True,
+                "actuator_cmd_tau": max(
+                    0.0, float(self.cfg.comp_actuator_tau_s)),
+                "actuator_cmd_gain": float(self.cfg.comp_actuator_gain),
+                "actuator_compensation_mode": (
+                    str(self.cfg.compensation_mode)
+                    if bool(self.cfg.enable_compensation) else "none"
+                ),
+                "actuator_mpc_beta": float(self.cfg.comp_mpc_beta),
+                "actuator_mpc_delay_scale": float(
+                    self.cfg.comp_mpc_delay_scale),
+                "actuator_mpc_tau_scale": float(self.cfg.comp_mpc_tau_scale),
+                "actuator_mpc_horizon_steps": max(
+                    1, int(self.cfg.comp_mpc_horizon_steps)),
+                "actuator_mpc_tracking_weight": float(
+                    self.cfg.comp_mpc_tracking_weight),
+                "actuator_mpc_nominal_weight": float(
+                    self.cfg.comp_mpc_nominal_weight),
+                "actuator_mpc_delta_weight": float(
+                    self.cfg.comp_mpc_delta_weight),
+                "actuator_mpc_max_delta_rad": max(
+                    0.0, float(self.cfg.comp_mpc_max_delta_rad)),
+            })
+            if bool(getattr(self, "_servo_planner_profile", False)):
+                # The planner is part of the frozen simcode4 plant.  Keep its
+                # checkpoint-declared actual-feedback inverse-MPC contract and
+                # drive-side 1.0/0.8 trajectory limits intact.
+                fixed.update({
+                    "actuator_cmd_filter": bool(env_cfg.get(
+                        "actuator_cmd_filter", True)),
+                    "actuator_cmd_tau": float(env_cfg.get(
+                        "actuator_cmd_tau", 0.074)),
+                    "actuator_cmd_gain": float(env_cfg.get(
+                        "actuator_cmd_gain", 1.0)),
+                    "actuator_compensation_mode": str(env_cfg.get(
+                        "actuator_compensation_mode", "inverse_mpc")),
+                    "actuator_mpc_beta": float(env_cfg.get(
+                        "actuator_mpc_beta", 1.2)),
+                    "actuator_mpc_delay_scale": float(env_cfg.get(
+                        "actuator_mpc_delay_scale", 1.05)),
+                    "actuator_mpc_tau_scale": float(env_cfg.get(
+                        "actuator_mpc_tau_scale", 0.75)),
+                    "actuator_mpc_horizon_steps": int(env_cfg.get(
+                        "actuator_mpc_horizon_steps", 6)),
+                    "actuator_mpc_tracking_weight": float(env_cfg.get(
+                        "actuator_mpc_tracking_weight", 1.0)),
+                    "actuator_mpc_nominal_weight": float(env_cfg.get(
+                        "actuator_mpc_nominal_weight", 0.25)),
+                    "actuator_mpc_delta_weight": float(env_cfg.get(
+                        "actuator_mpc_delta_weight", 0.05)),
+                    "actuator_mpc_max_delta_rad": float(env_cfg.get(
+                        "actuator_mpc_max_delta_rad", math.pi / 6.0)),
+                    "actuator_mpc_feedback_source": "actual",
+                    "arm_servo_target_tracking_planner": True,
+                    # Frozen submission order is authoritative for the mirror.
+                    # The deployable pre-actuator order belongs to a retrained
+                    # checkpoint/profile, never this frozen policy.
+                    "arm_servo_target_planner_before_actuator": False,
+                    "arm_servo_target_limiter": False,
+                    "arm_servo_target_velocity_scale": 1.0,
+                    "arm_servo_target_acceleration_scale": 0.8,
+                })
         for key, value in fixed.items():
             if key in field_names:
                 kwargs[key] = value
@@ -992,8 +1606,8 @@ class RealBallMjxJaxSimMirror:
         age_s: Any,
     ) -> tuple[Any, Any]:
         jnp = self.jnp
-        bpos = jnp.asarray(ball_pos, dtype=jnp.float32).reshape((1, 3))
-        bvel = jnp.asarray(ball_vel, dtype=jnp.float32).reshape((1, 3))
+        bpos_base = jnp.asarray(ball_pos, dtype=jnp.float32).reshape((1, 3))
+        bvel_base = jnp.asarray(ball_vel, dtype=jnp.float32).reshape((1, 3))
         valid = jnp.asarray(ball_valid, dtype=bool).reshape((1,))
         age = jnp.maximum(
             jnp.asarray(age_s, dtype=jnp.float32).reshape((1,)),
@@ -1001,6 +1615,32 @@ class RealBallMjxJaxSimMirror:
         )
         qpos = state.data.qpos
         qvel = state.data.qvel
+        base_q = jnp.stack([
+            qpos[:, self.env.base_x_qadr],
+            qpos[:, self.env.base_y_qadr],
+            qpos[:, self.env.base_yaw_qadr],
+        ], axis=-1)
+        base_dq = jnp.stack([
+            qvel[:, self.env.base_x_vadr],
+            qvel[:, self.env.base_y_vadr],
+            qvel[:, self.env.base_yaw_vadr],
+        ], axis=-1)
+        c = jnp.cos(base_q[:, 2])
+        s = jnp.sin(base_q[:, 2])
+        rel_x = c * bpos_base[:, 0] - s * bpos_base[:, 1]
+        rel_y = s * bpos_base[:, 0] + c * bpos_base[:, 1]
+        rel_vx = c * bvel_base[:, 0] - s * bvel_base[:, 1]
+        rel_vy = s * bvel_base[:, 0] + c * bvel_base[:, 1]
+        bpos = jnp.stack([
+            base_q[:, 0] + rel_x,
+            base_q[:, 1] + rel_y,
+            bpos_base[:, 2],
+        ], axis=-1)
+        bvel = jnp.stack([
+            base_dq[:, 0] + rel_vx - base_dq[:, 2] * rel_y,
+            base_dq[:, 1] + rel_vy + base_dq[:, 2] * rel_x,
+            bvel_base[:, 2],
+        ], axis=-1)
         qpos = qpos.at[:, self.env.ball_qadr:self.env.ball_qadr + 3].set(bpos)
         qpos = qpos.at[:, self.env.ball_qadr + 3:self.env.ball_qadr + 7].set(
             jnp.broadcast_to(
@@ -1039,18 +1679,41 @@ class RealBallMjxJaxSimMirror:
         zeros = jnp.zeros_like(q)
         qpos = state.data.qpos.at[:, self.env.arm_qadr].set(q)
         qvel = state.data.qvel.at[:, self.env.arm_vadr].set(zeros)
-        data = state.data.replace(qpos=qpos, qvel=qvel)
+        if self._corrected_67d_profile:
+            ctrl = state.data.ctrl.at[:, self.env.arm_aids_j].set(q)
+            data = state.data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
+        else:
+            data = state.data.replace(qpos=qpos, qvel=qvel)
         data = self.env.batched_forward(state.model, data)
-        state = state._replace(
-            data=data,
-            arm_cmd_q=q,
-            arm_cmd_qvel=zeros,
-            arm_q_ref_latest=q,
-            arm_q_ref_active=q,
-            arm_actuator_q_ref_latest=q,
-            arm_actuator_q_ref_active=q,
-            arm_applied_q=q,
-        )
+        updates = {
+            "data": data,
+            "arm_cmd_q": q,
+            "arm_cmd_qvel": zeros,
+            "arm_q_ref_latest": q,
+            "arm_q_ref_active": q,
+            "arm_actuator_q_ref_latest": q,
+            "arm_actuator_q_ref_active": q,
+            "arm_applied_q": q,
+        }
+        if self._corrected_67d_profile:
+            racket_pos = data.site_xpos[:, self.env.racket_site_id]
+            command_buffer = jnp.broadcast_to(
+                q[:, None, :], state.command_buffer.shape)
+            updates.update({
+                "racket_anchor": racket_pos,
+                "prev_racket_pos": racket_pos,
+                "arm_safe_q_ref_latest": q,
+                "arm_safe_qvel": zeros,
+                "arm_applied_qvel": zeros,
+                "prev_action": zeros,
+                "prev_arm_qvel": zeros,
+                "command_buffer": command_buffer,
+                "actuator_command_buffer": command_buffer,
+                "action_buffer": jnp.zeros_like(state.action_buffer),
+                "action_history": jnp.zeros_like(state.action_history),
+                "anti_windup_scale": jnp.ones_like(state.anti_windup_scale),
+            })
+        state = state._replace(**updates)
         obs = self.env.observe(state)
         return state, obs
 
@@ -1069,6 +1732,7 @@ class RealBallMjxJaxSimMirror:
         ball_vel_seq: Any,
         ball_valid_seq: Any,
         ball_age_seq: Any,
+        observation_scale_vector: Any,
     ) -> tuple[Any, dict[str, Any]]:
         jnp = self.jnp
 
@@ -1077,7 +1741,9 @@ class RealBallMjxJaxSimMirror:
             bpos, bvel, valid, age = item
             step_state, obs = self._force_ball_state(
                 step_state, bpos, bvel, valid, age)
-            action = jnp.clip(self._policy_action_jax(obs), -1.0, 1.0)
+            actor_obs = obs * observation_scale_vector[None, :]
+            action = jnp.clip(
+                self._policy_action_jax(actor_obs), -1.0, 1.0)
             step_state, _next_obs, reward, done, _metrics = self.env.step(
                 step_state, action)
             data = step_state.data
@@ -1091,10 +1757,12 @@ class RealBallMjxJaxSimMirror:
             # MJX state to the host while still preserving a complete trace for
             # every policy tick in a fixed-size batch.
             sample = {
-                "policy_obs": obs[0],
+                "policy_obs": actor_obs[0],
+                "policy_obs_unscaled": obs[0],
                 "policy_action": action[0],
                 "joint_position": data.qpos[0, self.env.arm_qadr],
                 "joint_velocity": data.qvel[0, self.env.arm_vadr],
+                "joint_acceleration": data.qacc[0, self.env.arm_vadr],
                 "actuator_target": data.ctrl[0, self.env.arm_aids_j],
                 "policy_command": step_state.arm_q_ref_latest[0],
                 "active_command": step_state.arm_q_ref_active[0],
@@ -1144,6 +1812,7 @@ class RealBallMjxJaxSimMirror:
             reward = float(reward_seq[index])
             done = bool(done_seq[index])
             samples.append({
+                "policyProfile": self.policy_profile,
                 "valid": bool(np.asarray(outputs["valid"][index])),
                 "age": round(float(max(
                     0.0, np.asarray(outputs["age"][index], dtype=np.float32).item())), 6),
@@ -1151,6 +1820,9 @@ class RealBallMjxJaxSimMirror:
                 "velocity": _rounded(outputs["velocity"][index]),
                 "jointPosition": _rounded(outputs["joint_position"][index]),
                 "jointVelocity": _rounded(outputs["joint_velocity"][index]),
+                "jointAcceleration": _rounded(
+                    outputs["joint_acceleration"][index]),
+                "jointAccelerationSource": "mjx_qacc",
                 "actuatorTarget": _rounded(outputs["actuator_target"][index]),
                 "policyCommand": _rounded(outputs["policy_command"][index]),
                 "compensatedCommand": _rounded(
@@ -1162,6 +1834,8 @@ class RealBallMjxJaxSimMirror:
                 "racket": _rounded(outputs["racket_position"][index]),
                 "racketQuatXyzw": _rounded(racket_quat),
                 "policyObs": _rounded(outputs["policy_obs"][index]),
+                "policyObsUnscaled": _rounded(
+                    outputs["policy_obs_unscaled"][index]),
                 "policyBallObservation": np.asarray(
                     outputs["policy_obs"][index], dtype=np.float32,
                 ).reshape(-1)[20:26].tolist(),
@@ -1171,6 +1845,23 @@ class RealBallMjxJaxSimMirror:
                     "velocity": _rounded(outputs["command_velocity"][index]),
                     "acceleration": _rounded(
                         outputs["command_acceleration"][index]),
+                },
+                "servoPlanner": {
+                    "enabled": bool(self._servo_planner_profile),
+                    "feedbackSource": (
+                        "actual_joint_state"
+                        if self._servo_planner_profile
+                        else "modeled_applied_target"),
+                    "velocityScale": float(getattr(
+                        self.env_cfg,
+                        "arm_servo_target_velocity_scale",
+                        1.0,
+                    )),
+                    "accelerationScale": float(getattr(
+                        self.env_cfg,
+                        "arm_servo_target_acceleration_scale",
+                        1.0,
+                    )),
                 },
                 "reward": round(reward, 6),
                 "done": done,
@@ -1192,6 +1883,7 @@ class RealBallMjxJaxSimMirror:
             "enabled": True,
             "available": True,
             "backend": "mjx_jax_real_ball",
+            "policyProfile": self.policy_profile,
             "timeWallS": round(float(time.time()), 6),
             "valid": bool(sample["valid"]),
             "age": sample["age"],
@@ -1206,8 +1898,15 @@ class RealBallMjxJaxSimMirror:
             "racket": sample["racket"],
             "racketQuatXyzw": sample["racketQuatXyzw"],
             "policyObs": sample["policyObs"],
+            "policyObsUnscaled": sample.get(
+                "policyObsUnscaled", sample["policyObs"]),
+            "policyObservationScaleIndices": sample.get(
+                "policyObservationScaleIndices", []),
+            "policyObservationScales": sample.get(
+                "policyObservationScales", []),
             "policyAction": sample["policyAction"],
             "command": sample["command"],
+            "servoPlanner": sample["servoPlanner"],
             "compensation": {
                 "error": None,
                 "available": True,
@@ -1248,7 +1947,14 @@ class RealBallMjxJaxSimMirror:
             ball_valid = self.jnp.ones((size,), dtype=bool)
             ball_age = self.jnp.zeros((size,), dtype=self.jnp.float32)
             warm_state, outputs = self._step_sequence_jit(
-                warm_state, ball_pos, ball_vel, ball_valid, ball_age)
+                warm_state,
+                ball_pos,
+                ball_vel,
+                ball_valid,
+                ball_age,
+                self.jnp.ones(
+                    (self.obs_dim,), dtype=self.jnp.float32),
+            )
             warm_state, warm_obs = self._force_ball_jit(
                 warm_state,
                 ball_pos[-1],
@@ -1260,12 +1966,31 @@ class RealBallMjxJaxSimMirror:
             self.jax.block_until_ready(warm_obs)
         self.reset()
 
-    def reset(self, arm_q: np.ndarray | None = None) -> dict[str, Any]:
+    def reset(
+        self,
+        arm_q: np.ndarray | None = None,
+        *,
+        ball_pos: np.ndarray | None = None,
+        ball_vel: np.ndarray | None = None,
+        ball_valid: bool = False,
+        ball_obs_age_s: float = 0.0,
+    ) -> dict[str, Any]:
         key = self.jax.random.PRNGKey(0)[None, :]
         self.state, self.obs = self._reset_jit(key)
         if arm_q is not None:
             q = _finite_vec(arm_q, len(RIGHT_ARM_JOINTS))
             self.state, self.obs = self._force_arm_jit(self.state, q)
+        if ball_pos is not None:
+            bpos = _finite_vec(ball_pos, 3)
+            bvel = (
+                np.zeros(3, dtype=np.float32)
+                if ball_vel is None else _finite_vec(ball_vel, 3)
+            )
+            valid = np.asarray([bool(ball_valid)], dtype=bool)
+            age = np.asarray(
+                [max(0.0, float(ball_obs_age_s))], dtype=np.float32)
+            self.state, self.obs = self._force_ball_jit(
+                self.state, bpos, bvel, valid, age)
         self.last_obs = np.asarray(
             self.jax.device_get(self.obs[0]), dtype=np.float32).reshape(-1)
         self.last_action = np.zeros((len(RIGHT_ARM_JOINTS),), dtype=np.float32)
@@ -1279,7 +2004,12 @@ class RealBallMjxJaxSimMirror:
         self.last_done = False
         self.last_reward = 0.0
         self.last_metrics = {}
-        return self.snapshot()
+        return self.snapshot(
+            ball_pos=ball_pos,
+            ball_vel=ball_vel,
+            ball_valid=bool(ball_valid),
+            ball_obs_age_s=max(0.0, float(ball_obs_age_s)),
+        )
 
     def step(
         self,
@@ -1318,7 +2048,6 @@ class RealBallMjxJaxSimMirror:
         ball_obs_age_seq: np.ndarray,
         options: Any,
     ) -> dict[str, Any]:
-        del options
         bpos_seq = np.asarray(ball_pos_seq, dtype=np.float32).reshape(-1, 3)
         bvel_seq = np.asarray(ball_vel_seq, dtype=np.float32).reshape(-1, 3)
         valid_seq = np.asarray(ball_valid_seq, dtype=bool).reshape(-1)
@@ -1335,8 +2064,27 @@ class RealBallMjxJaxSimMirror:
         bvel_seq = bvel_seq[:n]
         valid_seq = valid_seq[:n]
         age_seq = age_seq[:n]
+        observation_scale_vector = np.ones(
+            (self.obs_dim,), dtype=np.float32)
+        candidate_scales = np.asarray(getattr(
+            options, "policy_observation_scales", ()),
+            dtype=np.float32,
+        ).reshape(-1)
+        if candidate_scales.shape == observation_scale_vector.shape:
+            observation_scale_vector = np.where(
+                np.isfinite(candidate_scales), candidate_scales, 1.0,
+            ).astype(np.float32)
+        scale_indices = tuple(np.flatnonzero(
+            observation_scale_vector != np.float32(1.0)
+        ).astype(int).tolist())
         self.state, outputs = self._step_sequence_jit(
-            self.state, bpos_seq, bvel_seq, valid_seq, age_seq)
+            self.state,
+            bpos_seq,
+            bvel_seq,
+            valid_seq,
+            age_seq,
+            observation_scale_vector,
+        )
         bpos = _finite_vec(bpos_seq[-1], 3)
         bvel = _finite_vec(bvel_seq[-1], 3)
         valid = np.asarray([bool(valid_seq[-1])])
@@ -1347,11 +2095,21 @@ class RealBallMjxJaxSimMirror:
         # synchronization per field (and per simulation tick).
         outputs_np = self.jax.device_get(outputs)
         samples = self._batch_samples_from_outputs(outputs_np)
+        for sample in samples:
+            sample["policyObservationScaleIndices"] = list(scale_indices)
+            sample["policyObservationScales"] = _rounded(
+                observation_scale_vector)
         obs_np = np.asarray(
             outputs_np["policy_obs"][-1], dtype=np.float32).reshape(-1)
         action = np.asarray(
             outputs_np["policy_action"][-1], dtype=np.float32).reshape(-1)
         self.policy.last_obs = obs_np.copy()
+        self.policy.last_obs_unscaled = np.asarray(
+            outputs_np["policy_obs_unscaled"][-1],
+            dtype=np.float32,
+        ).reshape(-1).copy()
+        self.policy.last_observation_scale_indices = scale_indices
+        self.policy.last_observation_scales = observation_scale_vector.copy()
         self.policy.last_action = action.copy()
         self.last_obs = obs_np.copy()
         self.last_action = action.copy()
@@ -1386,6 +2144,7 @@ class RealBallMjxJaxSimMirror:
         data = self.state.data
         q = self._np(data.qpos[0, self.arm_qadr_np]).reshape(-1)
         dq = self._np(data.qvel[0, self.arm_vadr_np]).reshape(-1)
+        ddq = self._np(data.qacc[0, self.arm_vadr_np]).reshape(-1)
         ctrl = self._np(data.ctrl[0, self.arm_aids_np]).reshape(-1)
         racket_pos, racket_quat = self._racket_pose()
         ball_p = _finite_vec(ball_pos, 3) if ball_pos is not None else (
@@ -1407,6 +2166,7 @@ class RealBallMjxJaxSimMirror:
             "enabled": True,
             "available": True,
             "backend": "mjx_jax_real_ball",
+            "policyProfile": self.policy_profile,
             "timeWallS": round(float(time.time()), 6),
             "valid": bool(ball_valid),
             "age": round(float(max(0.0, ball_obs_age_s)), 6),
@@ -1414,6 +2174,8 @@ class RealBallMjxJaxSimMirror:
             "velocity": _rounded(ball_v),
             "jointPosition": _rounded(q),
             "jointVelocity": _rounded(dq),
+            "jointAcceleration": _rounded(ddq),
+            "jointAccelerationSource": "mjx_qacc",
             "actuatorTarget": _rounded(ctrl),
             "policyCommand": _rounded(q_ref),
             "compensatedCommand": _rounded(actuator_q_ref),
@@ -1421,6 +2183,15 @@ class RealBallMjxJaxSimMirror:
             "racket": _rounded(racket_pos),
             "racketQuatXyzw": _rounded(racket_quat),
             "policyObs": _rounded(self.last_obs),
+            "policyObsUnscaled": _rounded(getattr(
+                self.policy, "last_obs_unscaled", self.last_obs)),
+            "policyObservationScaleIndices": list(getattr(
+                self.policy, "last_observation_scale_indices", ())),
+            "policyObservationScales": _rounded(getattr(
+                self.policy,
+                "last_observation_scales",
+                np.ones_like(self.last_obs),
+            )),
             "policyAction": _rounded(self.last_action),
             "command": {
                 "position": _rounded(cmd_q),

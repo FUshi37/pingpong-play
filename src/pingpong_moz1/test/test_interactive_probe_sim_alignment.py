@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 
 import importlib.util
+import csv
 import json
+import queue
 import sys
+import tempfile
 import threading
 import unittest
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +27,176 @@ PROBE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 sys.modules[SPEC.name] = PROBE
 SPEC.loader.exec_module(PROBE)
+
+
+class PolicyObservationAgeContractTest(unittest.TestCase):
+
+    def test_simcode4_never_ages_held_valid_ball_observation(self):
+        self.assertFalse(PROBE._policy_uses_valid_ball_obs_age(
+            PROBE.OBSERVATION_PROFILE_SIMCODE4_SERVO67, True))
+
+    def test_simcode3_keeps_valid_ball_observation_age(self):
+        self.assertTrue(PROBE._policy_uses_valid_ball_obs_age(
+            PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67, False))
+
+
+class PolicyObservationScaleContractTest(unittest.TestCase):
+
+    def test_each_observation_dimension_keeps_an_independent_scale(self):
+        requested = [1.0] * 67
+        requested[23] = 0.5
+        requested[24] = 0.25
+        scales = PROBE._policy_observation_scales(requested, 67)
+        self.assertEqual(len(scales), 67)
+        self.assertEqual(scales[23], 0.5)
+        self.assertEqual(scales[24], 0.25)
+        self.assertEqual(scales[25], 1.0)
+
+    def test_invalid_or_missing_scales_fall_back_to_one(self):
+        scales = PROBE._policy_observation_scales(
+            [0.5, float("nan"), 1000.0], 4)
+        self.assertEqual(scales, (0.5, 1.0, 100.0, 1.0))
+
+
+class RecordedBallStateAnalysisTest(unittest.TestCase):
+
+    def test_explicit_ball_state_takes_priority_and_legacy_fields_fallback(self):
+        explicit = PROBE._sample_ball_state_6d({
+            "ballState6D": [1, 2, 3, 4, 5, 6],
+            "policyBallObservation": [7, 8, 9, 10, 11, 12],
+        })
+        legacy = PROBE._sample_ball_state_6d({
+            "observedBall": [0.1, 0.2, 0.3],
+            "observedVelocity": [1.1, 1.2, 1.3],
+        })
+        self.assertEqual(explicit.tolist(), [1, 2, 3, 4, 5, 6])
+        self.assertEqual(legacy.tolist(), [0.1, 0.2, 0.3, 1.1, 1.2, 1.3])
+        self.assertIsNone(PROBE._sample_ball_state_6d({
+            "policyInput": {"ball": None, "velocity": None},
+        }))
+
+    def test_writes_one_figure_for_each_ball_state_dimension(self):
+        samples = [
+            {
+                "time": 0.0,
+                "ballState6D": [0.1, 0.2, 1.0, 1.1, 1.2, -2.0],
+            },
+            {
+                "time": 0.005,
+                "observedBall": [0.11, 0.21, 0.99],
+                "observedVelocity": [1.0, 1.1, -2.1],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            analysis_dir = Path(tmp)
+            (analysis_dir / "ball_position_curves.png").write_bytes(b"old")
+            (analysis_dir / "ball_velocity_curves.png").write_bytes(b"old")
+            outputs = PROBE._plot_ball_state_curves(samples, analysis_dir)
+            self.assertEqual(
+                {path.name for path in outputs},
+                {
+                    "ball_position_x_curve.png",
+                    "ball_position_y_curve.png",
+                    "ball_position_z_curve.png",
+                    "ball_velocity_x_curve.png",
+                    "ball_velocity_y_curve.png",
+                    "ball_velocity_z_curve.png",
+                },
+            )
+            self.assertEqual(len(outputs), 6)
+            self.assertTrue(all(path.is_file() for path in outputs))
+            self.assertFalse(
+                (analysis_dir / "ball_position_curves.png").exists())
+            self.assertFalse(
+                (analysis_dir / "ball_velocity_curves.png").exists())
+            discovered = PROBE._analysis_outputs_from_dir(analysis_dir)
+            self.assertEqual(
+                discovered["ballPositionYCurve"],
+                "ball_position_y_curve.png",
+            )
+            self.assertEqual(
+                discovered["ballVelocityYCurve"],
+                "ball_velocity_y_curve.png",
+            )
+
+    def test_records_and_plots_ir_center_and_depth_diagnostics(self):
+        measurement = PROBE._camera_measurement_payload({
+            "cx": PROBE.np.float32(321.25),
+            "cy": 207.5,
+            "sensor_depth_mm": 812.0,
+            "geom_depth_mm": 798.0,
+            "depth_mm": 812.0,
+            "depth_method": "sensor",
+            "candidate_motion_distance_px": 2.5,
+            "raw_position_ir": [1, 2, 3],
+        })
+        self.assertEqual(measurement["cx"], 321.25)
+        self.assertEqual(measurement["sensor_depth_mm"], 812.0)
+        self.assertNotIn("raw_position_ir", measurement)
+        samples = [
+            {"time": 0.0, "cameraMeasurement": measurement},
+            {
+                "time": 0.005,
+                "cameraMeasurement": {
+                    "cx": 322.0,
+                    "cy": 208.0,
+                    "sensor_depth_mm": 810.0,
+                    "geom_depth_mm": 799.0,
+                    "depth_mm": 810.0,
+                    "depth_method": "sensor",
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            analysis_dir = Path(tmp)
+            outputs = PROBE._plot_camera_measurement_curves(
+                samples, analysis_dir)
+            self.assertEqual(
+                {path.name for path in outputs},
+                {
+                    "camera_ir_cx_curve.png",
+                    "camera_ir_cy_curve.png",
+                    "camera_sensor_depth_curve.png",
+                    "camera_geometry_depth_curve.png",
+                },
+            )
+            trace_path = PROBE._write_policy_trace_csv(samples, analysis_dir)
+            with trace_path.open(newline="", encoding="utf-8") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(rows[0]["camera_ir_cx_px"], "321.25")
+            self.assertEqual(rows[0]["camera_ir_cy_px"], "207.5")
+            self.assertEqual(rows[0]["camera_sensor_depth_mm"], "812.0")
+            self.assertEqual(rows[0]["camera_geometry_depth_mm"], "798.0")
+            self.assertEqual(rows[0]["camera_depth_method"], "sensor")
+
+    def test_camera_state_and_diagnostics_are_selected_atomically(self):
+        class Bridge:
+            def camera_ball_measurement_with_diagnostics(self):
+                return (
+                    PROBE.np.array([0.1, -0.2, 1.0]),
+                    PROBE.np.array([0.0, 0.1, -0.5]),
+                    True,
+                    12.5,
+                    {
+                        "cx": 320.0,
+                        "cy": 200.0,
+                        "sensor_depth_mm": 800.0,
+                        "geom_depth_mm": 790.0,
+                    },
+                )
+
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.ros_bridge = Bridge()
+        selected = probe._select_ball_source(
+            PROBE.np.zeros(3),
+            PROBE.np.zeros(3),
+            True,
+            SimpleNamespace(ball_source="camera"),
+            include_feedback=False,
+        )
+        self.assertEqual(selected[5], 12.5)
+        self.assertEqual(selected[6]["sensor_depth_mm"], 800.0)
+        self.assertEqual(selected[0].tolist(), [0.1, -0.2, 1.0])
 
 
 def real_sample(
@@ -80,7 +255,643 @@ def sim_sample(
     return sample
 
 
+class HybridBallTrackerProbeAdapterTest(unittest.TestCase):
+
+    def _adapter(self, *, prediction_enabled=True):
+        config_path = (
+            PACKAGE_ROOT / "pingpong_controller" / "ball_tracker" /
+            "config.yaml")
+        adapter = PROBE.HybridBallTrackerProbeAdapter(
+            config_path,
+            prediction_enabled=prediction_enabled,
+            frame_rotation=None,
+            ballistic_dynamics_enabled=True,
+        )
+        adapter.set_racket_pose(
+            PROBE.np.array([0.0, 0.0, 0.5]),
+            PROBE.np.array([0.0, 0.0, 1.0]),
+            PROBE.np.zeros(3),
+        )
+        return adapter
+
+    def test_converts_probe_mm_contract_and_reports_impact(self):
+        adapter = self._adapter(prediction_enabled=True)
+        last_timestamp = 0.0
+        for frame in range(8):
+            last_timestamp = frame / 60.0
+            z = (
+                1.0 - 0.5 * last_timestamp
+                - 0.5 * 9.81 * last_timestamp * last_timestamp)
+            accepted = adapter.update(
+                PROBE.np.array([0.0, 0.0, z * 1000.0]),
+                last_timestamp,
+            )
+            self.assertTrue(accepted)
+
+        output = adapter.predict_to(last_timestamp + 0.005)
+
+        self.assertTrue(output["valid"])
+        self.assertTrue(output["predicted"])
+        self.assertEqual(len(output["acceleration"]), 3)
+        self.assertEqual(len(output["state_covariance_si"]), 9)
+        self.assertTrue(output["impact_prediction"]["valid"])
+        self.assertGreater(
+            output["impact_prediction"]["time_to_contact"], 0.0)
+        self.assertEqual(adapter.diagnostics()["backend"], "hybrid_ekf9")
+
+    def test_prediction_switch_holds_latest_measurement_state(self):
+        adapter = self._adapter(prediction_enabled=False)
+        adapter.update([0.0, 0.0, 1000.0], 1.0)
+        adapter.update([0.0, 0.0, 990.0], 1.016)
+        at_measurement = adapter.predict_to(1.016)
+        held = adapter.predict_to(1.050)
+
+        self.assertFalse(held["predicted"])
+        self.assertGreater(held["age_s"], 0.0)
+        self.assertEqual(held["extrapolation_s"], 0.0)
+        self.assertIsNone(held["impact_prediction"])
+        PROBE.np.testing.assert_allclose(
+            held["position"], at_measurement["position"])
+
+
+class RosJointSampleClockTest(unittest.TestCase):
+
+    @staticmethod
+    def _node():
+        node = PROBE.RosBridgeNode.__new__(PROBE.RosBridgeNode)
+        node.lock = threading.Lock()
+        node.latest_joint_q = None
+        node.latest_joint_dq = None
+        node.latest_joint_stamp_wall = None
+        node.latest_joint_stamp_monotonic_s = None
+        node.latest_joint_sample_stamp_s = None
+        node.latest_joint_sample_dt_s = None
+        node.latest_joint_header_stamp_s = None
+        node.latest_joint_sample_stamp_source = "unavailable"
+        node.latest_joint_dq_source = "unavailable"
+        node.latest_cart_pos = None
+        node.latest_cart_quat_xyzw = None
+        node.latest_cart_psi = None
+        node.latest_cart_stamp_wall = None
+        node.publish_count = 0
+        return node
+
+    @staticmethod
+    def _message(stamp_s, *, q_offset=0.0, dq_offset=0.0):
+        if stamp_s is None:
+            sec = 0
+            nanosec = 0
+        else:
+            sec = int(stamp_s)
+            nanosec = int(round((float(stamp_s) - sec) * 1e9))
+        q = PROBE.np.linspace(-0.3, 0.3, 7) + float(q_offset)
+        return SimpleNamespace(
+            header=SimpleNamespace(
+                stamp=SimpleNamespace(sec=sec, nanosec=nanosec)),
+            name=list(PROBE.RIGHT_ARM_JOINTS),
+            position=q.tolist(),
+            velocity=PROBE.np.full(7, float(dq_offset)).tolist(),
+        )
+
+    def test_header_stamp_is_atomic_and_repeat_holds_same_sample(self):
+        node = self._node()
+        with (mock.patch.object(PROBE.time, "time", return_value=200.000),
+              mock.patch.object(
+                  PROBE.time, "monotonic", return_value=300.000)):
+            node._joint_state_callback(self._message(100.000))
+        with (mock.patch.object(PROBE.time, "time", return_value=200.005),
+              mock.patch.object(
+                  PROBE.time, "monotonic", return_value=300.005)):
+            node._joint_state_callback(self._message(100.000))
+
+        with (mock.patch.object(PROBE.time, "time", return_value=-500.0),
+              mock.patch.object(
+                  PROBE.time, "monotonic", return_value=300.006)):
+            q, dq, age_s, source, sample_stamp_s, timing = (
+                node.get_joint_feedback_coherent_with_timing())
+
+        self.assertEqual(sample_stamp_s, 100.0)
+        self.assertEqual(node.latest_joint_sample_dt_s, 0.0)
+        self.assertEqual(node.latest_joint_sample_stamp_source, "header_repeat")
+        self.assertAlmostEqual(age_s, 0.001, places=9)
+        self.assertEqual(source, "joint_state")
+        self.assertEqual(q.shape, (7,))
+        self.assertEqual(dq.shape, (7,))
+        self.assertEqual(timing["jointSampleStampS"], sample_stamp_s)
+        self.assertEqual(timing["jointSampleDtS"], 0.0)
+        self.assertEqual(timing["jointSampleStampSource"], "header_repeat")
+
+    def test_acceleration_uses_joint_source_velocity_interval(self):
+        node = self._node()
+        with (mock.patch.object(PROBE.time, "time", return_value=200.000),
+              mock.patch.object(
+                  PROBE.time, "monotonic", return_value=300.000)):
+            node._joint_state_callback(self._message(100.000, dq_offset=0.0))
+        with (mock.patch.object(PROBE.time, "time", return_value=250.000),
+              mock.patch.object(
+                  PROBE.time, "monotonic", return_value=350.000)):
+            node._joint_state_callback(self._message(100.005, dq_offset=0.1))
+
+        _q, _dq, _age, _source, _stamp, timing = (
+            node.get_joint_feedback_coherent_with_timing())
+
+        self.assertEqual(
+            timing["jointAccelerationSource"],
+            "joint_velocity_difference",
+        )
+        PROBE.np.testing.assert_allclose(
+            timing["jointAcceleration"], PROBE.np.full(7, 20.0),
+            rtol=0.0, atol=1e-5)
+
+    def test_nonmonotonic_header_uses_receipt_delta_without_mixing_epochs(self):
+        node = self._node()
+        with (mock.patch.object(PROBE.time, "time", return_value=200.000),
+              mock.patch.object(
+                  PROBE.time, "monotonic", return_value=300.000)):
+            node._joint_state_callback(self._message(100.000))
+        with (mock.patch.object(PROBE.time, "time", return_value=200.005),
+              mock.patch.object(
+                  PROBE.time, "monotonic", return_value=300.005)):
+            node._joint_state_callback(
+                self._message(99.000, q_offset=0.01))
+
+        self.assertAlmostEqual(
+            node.latest_joint_sample_stamp_s, 100.005, places=9)
+        self.assertEqual(
+            node.latest_joint_sample_stamp_source,
+            "receipt_nonmonotonic_header",
+        )
+
+    def test_missing_header_recovers_after_one_receipt_timed_boundary(self):
+        node = self._node()
+        samples = (
+            (100.000, 200.000, 300.000, 0.00),
+            (None, 200.012, 300.005, 0.01),
+            (100.010, 200.017, 300.010, 0.02),
+            (100.015, 200.022, 300.015, 0.03),
+        )
+        sources = []
+        effective_stamps = []
+        for header, wall, monotonic_s, q_offset in samples:
+            with (mock.patch.object(PROBE.time, "time", return_value=wall),
+                  mock.patch.object(
+                      PROBE.time, "monotonic", return_value=monotonic_s)):
+                node._joint_state_callback(
+                    self._message(header, q_offset=q_offset))
+            sources.append(node.latest_joint_sample_stamp_source)
+            effective_stamps.append(node.latest_joint_sample_stamp_s)
+
+        self.assertEqual(
+            sources,
+            ["header", "receipt", "receipt_header_recovery", "header"],
+        )
+        PROBE.np.testing.assert_allclose(
+            effective_stamps,
+            [100.000, 100.005, 100.010, 100.015],
+            rtol=0.0,
+            atol=1e-9,
+        )
+
+    def test_reused_header_with_changed_q_is_not_a_repeated_sample(self):
+        node = self._node()
+        with mock.patch.object(
+                PROBE.time, "monotonic", return_value=300.000):
+            node._joint_state_callback(self._message(100.000))
+        with mock.patch.object(
+                PROBE.time, "monotonic", return_value=300.006):
+            node._joint_state_callback(
+                self._message(100.000, q_offset=0.01))
+
+        self.assertAlmostEqual(
+            node.latest_joint_sample_stamp_s, 100.006, places=9)
+        self.assertEqual(
+            node.latest_joint_sample_stamp_source,
+            "receipt_nonmonotonic_header",
+        )
+
+    def test_header_clock_reset_resumes_header_delta_on_following_frame(self):
+        node = self._node()
+        for header, monotonic_s, q_offset in (
+            (100.000, 300.000, 0.00),
+            (1.000, 300.005, 0.01),
+            (1.005, 300.010, 0.02),
+        ):
+            with mock.patch.object(
+                    PROBE.time, "monotonic", return_value=monotonic_s):
+                node._joint_state_callback(
+                    self._message(header, q_offset=q_offset))
+
+        self.assertAlmostEqual(
+            node.latest_joint_sample_stamp_s, 100.010, places=9)
+        self.assertEqual(node.latest_joint_sample_stamp_source, "header")
+
+        snapshot = node.feedback_snapshot()
+        self.assertAlmostEqual(snapshot["jointHeaderStampS"], 1.005)
+        self.assertAlmostEqual(snapshot["jointSampleDtS"], 0.005)
+
+    def test_probe_forwards_coherent_sample_stamp_to_controller(self):
+        calls = []
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(control_dt=0.005)
+        probe.controller = SimpleNamespace(
+            predict=lambda *args, **kwargs: calls.append((args, kwargs)))
+        stamp_s = 123.456
+
+        probe._predict_policy_with_feedback(
+            PROBE.np.asarray([0.1, -0.2, 1.0]),
+            PROBE.np.asarray([0.0, 0.0, -1.0]),
+            valid=True,
+            age_s=0.01,
+            arm_q=PROBE.np.zeros(7),
+            arm_dq=PROBE.np.ones(7),
+            arm_sample_stamp_s=stamp_s,
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["arm_sample_stamp_s"], stamp_s)
+
+    def test_recording_keeps_inference_sample_after_competing_callback(self):
+        node = self._node()
+        with mock.patch.object(
+                PROBE.time, "monotonic", return_value=300.000):
+            node._joint_state_callback(
+                self._message(100.000, q_offset=0.01, dq_offset=0.10))
+        q_used, dq_used, _age, _source, _stamp, timing_used = (
+            node.get_joint_feedback_coherent_with_timing())
+
+        policy_obs = PROBE.np.zeros(67, dtype=PROBE.np.float32)
+        policy_obs[0:7] = q_used
+        policy_obs[7:14] = dq_used
+        trace = {
+            "obs": policy_obs.copy(),
+            "jointFeedbackTiming": dict(timing_used),
+        }
+
+        # Simulate a newer callback winning the race before the recorder reads
+        # the bridge a second time.
+        with mock.patch.object(
+                PROBE.time, "monotonic", return_value=300.005):
+            node._joint_state_callback(
+                self._message(100.005, q_offset=0.50, dq_offset=0.90))
+        ros_payload = node.feedback_snapshot()
+        self.assertNotEqual(
+            ros_payload["jointPosition"], PROBE._rounded_vector(q_used))
+
+        matched = PROBE._overlay_policy_trace_joint_feedback(
+            ros_payload, trace, policy_obs)
+
+        self.assertTrue(matched)
+        self.assertTrue(ros_payload["jointTimingMatchesPolicyObs"])
+        self.assertEqual(
+            ros_payload["jointPosition"], PROBE._rounded_vector(q_used))
+        self.assertEqual(
+            ros_payload["jointVelocity"], PROBE._rounded_vector(dq_used))
+        self.assertEqual(ros_payload["jointSampleStampS"], 100.0)
+        self.assertEqual(ros_payload["jointVelocitySource"], "joint_state")
+
+
+class CompensationFeedbackCoherenceTest(unittest.TestCase):
+
+    def test_simcode3_inverse_mpc_uses_modeled_applied_state(self):
+        modeled_q = PROBE.np.linspace(-0.1, 0.1, 7).astype(PROBE.np.float32)
+        measured_q = modeled_q + 0.5
+        captured = []
+        compensator = SimpleNamespace(
+            enabled=True,
+            command_buffer_len=19,
+            current_applied_q=lambda: modeled_q.copy(),
+            step=lambda **kwargs: (
+                captured.append(PROBE.np.asarray(kwargs["applied_q"]).copy())
+                or PROBE.np.asarray(kwargs["q_cmd"]).copy()),
+        )
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace()
+        probe.compensator = compensator
+        probe.compensation_was_enabled = True
+        probe.compensation_error = None
+        probe.ros_bridge = None
+        probe.controller = SimpleNamespace(latest_command_state=lambda: {
+            "velocity": PROBE.np.zeros(7, dtype=PROBE.np.float32),
+            "acceleration": PROBE.np.zeros(7, dtype=PROBE.np.float32),
+        })
+        probe._ensure_compensator = lambda _options: None
+        options = SimpleNamespace(
+            enable_compensation=True,
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
+        )
+
+        probe._apply_actuator_compensation(
+            PROBE.np.zeros(7), options, feedback_q_override=measured_q)
+
+        PROBE.np.testing.assert_array_equal(captured[0], modeled_q)
+        self.assertEqual(
+            probe.last_compensation_feedback_source,
+            "modeled_actuator_applied",
+        )
+
+    def test_policy_tick_uses_actor_sample_after_competing_callback(self):
+        actor_q = PROBE.np.linspace(-0.30, 0.30, 7).astype(
+            PROBE.np.float32)
+        callback_q = actor_q + PROBE.np.float32(0.40)
+        nominal_q = actor_q + PROBE.np.float32(0.01)
+
+        class RaceBridge:
+            def __init__(self):
+                self.latest_q = actor_q.copy()
+                self.read_count = 0
+                self.published = []
+
+            def get_joint_feedback(self):
+                self.read_count += 1
+                return self.latest_q.copy(), PROBE.np.zeros(7)
+
+            def publish_right_arm_command(self, q):
+                self.published.append(PROBE.np.asarray(q).copy())
+
+        class CapturingCompensator:
+            enabled = True
+            command_buffer_len = 1
+
+            def __init__(self):
+                self.reset_q = []
+                self.step_applied_q = []
+
+            def reset(self, q):
+                self.reset_q.append(PROBE.np.asarray(q).copy())
+
+            def step(self, *, q_cmd, qdot_cmd, qdd_cmd, applied_q):
+                del qdot_cmd, qdd_cmd
+                self.step_applied_q.append(PROBE.np.asarray(applied_q).copy())
+                return PROBE.np.asarray(q_cmd).copy()
+
+            def observe_published(self, _q):
+                return None
+
+        bridge = RaceBridge()
+        compensator = CapturingCompensator()
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            enable_camera_ball=False,
+            workspace_safety_mode="off",
+            enable_safety_limiter=False,
+        )
+        probe.ros_bridge = bridge
+        probe.controller = SimpleNamespace(
+            arm_cmd_q=nominal_q.copy(),
+            latest_command_state=lambda: {
+                "position": nominal_q.copy(),
+                "velocity": PROBE.np.zeros(7, dtype=PROBE.np.float32),
+                "acceleration": PROBE.np.zeros(7, dtype=PROBE.np.float32),
+            },
+        )
+        probe.compensator = compensator
+        probe.compensation_was_enabled = False
+        probe.compensation_error = None
+        probe._ensure_compensator = lambda _options: None
+        probe.safety_limiter = PROBE.RightArmCommandSafetyLimiter(
+            actor_q, dt=0.005)
+        probe.command_stream_active = True
+        probe.last_command_disable_hold = {}
+        probe.workspace_soft_filter = {}
+        probe.done_failsafe_active = False
+        probe.control_loop_tick = 0
+        probe.now_s = 0.005
+        probe.last_ball_pos = PROBE.np.zeros(3, dtype=PROBE.np.float32)
+        probe.last_ball_vel = PROBE.np.zeros(3, dtype=PROBE.np.float32)
+        probe.last_observed_ball_pos = PROBE.np.zeros(
+            3, dtype=PROBE.np.float32)
+        probe.last_observed_ball_vel = PROBE.np.zeros(
+            3, dtype=PROBE.np.float32)
+        probe.last_measured_ball_pos = PROBE.np.zeros(
+            3, dtype=PROBE.np.float32)
+        probe.last_measured_ball_vel = PROBE.np.zeros(
+            3, dtype=PROBE.np.float32)
+        probe.last_estimator_info = {}
+        probe._select_ball_source = lambda *_args, **_kwargs: (
+            PROBE.np.zeros(3, dtype=PROBE.np.float32),
+            PROBE.np.zeros(3, dtype=PROBE.np.float32),
+            True,
+            "drag",
+            None,
+            None,
+            None,
+        )
+        probe._apply_ball_noise = lambda p, v, *_args: (p.copy(), v.copy())
+        probe._resolve_control_ball_state = lambda p, v, *_args, **_kwargs: (
+            p.copy(), v.copy(), True, 0.0, {})
+
+        def actor_step(*_args, **_kwargs):
+            obs = PROBE.np.zeros(67, dtype=PROBE.np.float32)
+            obs[:7] = actor_q
+            probe.last_policy_execution_trace = {"obs": obs}
+            # A JointState callback completes after actor inference and before
+            # command publication/compensation.
+            bridge.latest_q = callback_q.copy()
+            return "policy", "", {}, 0.0, True
+
+        probe._run_one_control_step = actor_step
+        probe._step_sim_mirror = lambda *_args, **_kwargs: {}
+        probe._record_control_sample = lambda **_kwargs: None
+        options = SimpleNamespace(
+            publish_commands=True,
+            enable_compensation=True,
+            workspace_safety_mode="off",
+            ball_release_use_estimator_state=True,
+            comp_delay_ms=72.0,
+            comp_actuator_tau_s=0.074,
+        )
+
+        probe._run_control_tick_locked(
+            PROBE.np.zeros(3), PROBE.np.zeros(3), True, 0.0, options,
+            make_snapshot=False)
+
+        # Both first-enable reset and step must use the actor's atomic sample;
+        # the newer callback must not be read on this policy transition.
+        self.assertEqual(bridge.read_count, 0)
+        self.assertEqual(len(compensator.reset_q), 1)
+        self.assertEqual(len(compensator.step_applied_q), 1)
+        PROBE.np.testing.assert_array_equal(compensator.reset_q[0], actor_q)
+        PROBE.np.testing.assert_array_equal(
+            compensator.step_applied_q[0], actor_q)
+        self.assertEqual(
+            probe.last_compensation_feedback_source,
+            "policy_atomic_snapshot",
+        )
+
+        # Non-policy controllers intentionally retain the freshest-feedback
+        # behavior instead of reusing the previous actor snapshot.
+        probe._publish_control_command(
+            nominal_q,
+            options,
+            apply_compensation=True,
+            compensation_feedback_q=probe._policy_compensation_feedback_q(
+                "racket_tracking", False),
+        )
+        self.assertEqual(bridge.read_count, 1)
+        PROBE.np.testing.assert_array_equal(
+            compensator.step_applied_q[-1], callback_q)
+        self.assertEqual(
+            probe.last_compensation_feedback_source, "bridge_latest")
+
+
+class Simcode3BallSamplingContractTest(unittest.TestCase):
+
+    def test_fractional_90hz_refresh_count_on_200hz_clock(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(control_dt=0.005)
+        probe.policy_ball_sample_profile = None
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
+            control_mode="policy",
+            use_ball_estimator=False,
+            ball_observation_rate_hz=90.0,
+        )
+        sampled_positions = []
+        for step in range(200):
+            pos, _vel, valid, _age = (
+                probe._apply_policy_ball_sampling_contract(
+                    PROBE.np.full(3, step, dtype=PROBE.np.float32),
+                    PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                    True,
+                    0.0,
+                    options,
+                ))
+            self.assertTrue(valid)
+            sampled_positions.append(float(pos[0]))
+
+        refreshes = 1 + sum(
+            current != previous for previous, current in zip(
+                sampled_positions, sampled_positions[1:]))
+        self.assertEqual(refreshes, 90)
+        self.assertEqual(probe.policy_ball_sample_sequence, 90)
+
+    def test_fractional_60hz_refresh_and_age_match_training(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(control_dt=0.005)
+        probe.policy_ball_sample_profile = None
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
+            control_mode="policy",
+            use_ball_estimator=False,
+        )
+        valid_history = []
+        age_history = []
+        pos_history = []
+        for step in range(11):
+            pos, _vel, valid, age = probe._apply_policy_ball_sampling_contract(
+                PROBE.np.full(3, step, dtype=PROBE.np.float32),
+                PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                True,
+                0.0,
+                options,
+            )
+            valid_history.append(valid)
+            age_history.append(age)
+            pos_history.append(float(pos[0]))
+
+        self.assertTrue(all(valid_history))
+        self.assertEqual(pos_history[:4], [0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(
+            [i for i, age in enumerate(age_history) if age == 0.0],
+            [0, 4, 7, 10],
+        )
+        PROBE.np.testing.assert_allclose(
+            age_history[:5], [0.0, 0.005, 0.010, 0.015, 0.0])
+
+    def test_reentry_reset_makes_next_sample_fresh(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(control_dt=0.005)
+        probe.policy_ball_sample_profile = (
+            PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67)
+        probe.policy_ball_sample_step = 3
+        probe.policy_ball_sample_pos = PROBE.np.ones(3, dtype=PROBE.np.float32)
+        probe.policy_ball_sample_vel = PROBE.np.zeros(3, dtype=PROBE.np.float32)
+        probe.policy_ball_sample_age_s = 0.010
+        probe.policy_ball_sample_has_valid = True
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
+            control_mode="policy",
+            use_ball_estimator=False,
+        )
+
+        probe._reset_policy_ball_sampling_contract()
+        pos, _vel, valid, age = probe._apply_policy_ball_sampling_contract(
+            PROBE.np.full(3, 7.0, dtype=PROBE.np.float32),
+            PROBE.np.zeros(3, dtype=PROBE.np.float32),
+            True,
+            0.0,
+            options,
+        )
+
+        self.assertTrue(valid)
+        self.assertEqual(age, 0.0)
+        PROBE.np.testing.assert_array_equal(pos, PROBE.np.full(3, 7.0))
+
+    def test_simcode4_fractional_hold_keeps_observation_age_zero(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(control_dt=0.005)
+        probe.policy_ball_sample_profile = None
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE4_SERVO67,
+            control_mode="policy",
+            use_ball_estimator=False,
+        )
+        ages = []
+        positions = []
+        for step in range(11):
+            pos, _vel, valid, age = probe._apply_policy_ball_sampling_contract(
+                PROBE.np.full(3, step, dtype=PROBE.np.float32),
+                PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                True,
+                0.0,
+                options,
+            )
+            self.assertTrue(valid)
+            ages.append(age)
+            positions.append(float(pos[0]))
+        self.assertEqual(positions[:4], [0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(positions[4:7], [4.0, 4.0, 4.0])
+        self.assertEqual(ages, [0.0] * 11)
+
+
 class SourceSeqAlignmentTest(unittest.TestCase):
+
+    def test_joint_acceleration_uses_only_contiguous_source_seq_interval(self):
+        rows = []
+        for seq, velocity in ((10, 0.0), (11, 0.1), (13, 10.0)):
+            rows.append({
+                "sourceSeq": seq,
+                "sourceTimeS": seq * 0.005,
+                "policyObs": [0.0] * 7 + [velocity] * 7,
+            })
+
+        acceleration = PROBE._aligned_joint_acceleration(rows, "policyObs")
+
+        PROBE.np.testing.assert_allclose(
+            acceleration[0], PROBE.np.full(7, 20.0),
+            rtol=0.0, atol=1e-9)
+        self.assertTrue(PROBE.np.all(PROBE.np.isnan(acceleration[1:])))
+
+    def test_real_acceleration_uses_joint_sample_clock_not_policy_clock(self):
+        rows = []
+        for seq, stamp, velocity in (
+                (10, 1.000, 0.0),
+                (11, 1.000, 0.0),
+                (12, 1.020, 0.2)):
+            rows.append({
+                "sourceSeq": seq,
+                "sourceTimeS": seq * 0.005,
+                "policyObs": [0.0] * 7 + [velocity] * 7,
+                "ros": {"jointSampleStampS": stamp},
+            })
+
+        acceleration = PROBE._aligned_joint_acceleration(
+            rows, "policyObs", time_key="ros.jointSampleStampS")
+
+        self.assertTrue(PROBE.np.all(PROBE.np.isnan(acceleration[0])))
+        PROBE.np.testing.assert_allclose(
+            acceleration[1], PROBE.np.full(7, 10.0),
+            rtol=0.0, atol=1e-9)
 
     def test_joins_out_of_order_sim_results_by_source_seq(self):
         real = [real_sample(10), real_sample(11), real_sample(12, mode="release_gate")]
@@ -184,6 +995,190 @@ class SourceSeqAlignmentTest(unittest.TestCase):
         self.assertAlmostEqual(fast["completionHz"], 200.0, places=3)
 
 
+class IdealPd67ResetAndGapAnalysisTest(unittest.TestCase):
+
+    def test_idealpd67_reset_ball_matches_racket_launch_geometry(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.active_policy_profile = (
+            PROBE.OBSERVATION_PROFILE_SIMCODE2_IDEALPD67)
+        probe.reset_ball_rng = PROBE.np.random.default_rng(123)
+        probe.controller = SimpleNamespace(
+            _checkpoint_env_cfg={
+                "racket_launch_surface_gap_range_m": (0.005, 0.010),
+                "racket_launch_xy_jitter": 0.004,
+                "racket_launch_vxy_max": 0.003,
+                "racket_launch_vnormal_max": 0.003,
+                "racket_launch_edge_margin": 0.005,
+                "ball_launch_height": 0.30,
+            },
+            _compute_racket_launch_frame_base=lambda _q: (
+                PROBE.np.asarray(
+                    [0.12, -0.34, 1.01], dtype=PROBE.np.float32),
+                PROBE.np.asarray([1.0, 0.0, 0.0], dtype=PROBE.np.float32),
+                PROBE.np.asarray([0.0, 1.0, 0.0], dtype=PROBE.np.float32),
+                PROBE.np.asarray([0.0, 0.0, 1.0], dtype=PROBE.np.float32),
+                0.08,
+                0.002,
+                True,
+            ))
+
+        position, velocity, contract = probe._reset_ball_state(
+            PROBE.np.zeros(7, dtype=PROBE.np.float32))
+
+        self.assertLessEqual(abs(float(position[0]) - 0.12), 0.004001)
+        self.assertLessEqual(abs(float(position[1]) + 0.34), 0.004001)
+        self.assertGreaterEqual(float(position[2]), 1.037)
+        self.assertLessEqual(float(position[2]), 1.042001)
+        self.assertLessEqual(float(PROBE.np.max(PROBE.np.abs(velocity))), 0.003001)
+        self.assertEqual(contract["mode"], "racket_launch")
+        self.assertGreaterEqual(contract["surfaceGapM"], 0.005)
+        self.assertLessEqual(contract["surfaceGapM"], 0.010001)
+        self.assertNotAlmostEqual(float(position[2]), 1.31, places=2)
+
+    @staticmethod
+    def _gap_row(seq, *, profile, generation, episode, q_gap):
+        real_obs = [0.0] * 67
+        sim_obs = [0.0] * 67
+        for idx in range(7):
+            real_obs[idx] = float(q_gap)
+            real_obs[42 + idx] = 0.05
+            sim_obs[42 + idx] = 0.001
+        real_obs[20:26] = [0.1, -0.2, 1.3, 0.0, 0.0, -0.4]
+        sim_obs[20:26] = list(real_obs[20:26])
+        nominal = [0.1] * 7
+        compensated = [0.624] * 7
+        return {
+            "sourceSeq": seq,
+            "time": seq * 0.005,
+            "mode": "policy",
+            "policyExecuted": True,
+            "simAligned": True,
+            "simInputMatch": True,
+            "policyObs": real_obs,
+            "policyAction": [0.3] * 7,
+            "policyCommand": {"position": nominal},
+            "runtime": {
+                "activePolicyProfile": profile,
+                "policyGeneration": generation,
+            },
+            "command": {
+                "compensatedReferencePosition": compensated,
+                "publishedSafePosition": compensated,
+                "compensation": {"mpcMaxDeltaRad": 0.524},
+            },
+            "sim": {
+                "policyObs": sim_obs,
+                "policyAction": [0.0] * 7,
+                "policyCommand": [0.0] * 7,
+                "sync": {
+                    "episode": episode,
+                    "policyProfile": profile,
+                    "policyGeneration": generation,
+                },
+            },
+        }
+
+    def test_gap_analysis_selects_ideal_cohort_and_attributes_tracking(self):
+        legacy = [
+            self._gap_row(
+                seq,
+                profile=PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+                generation=1,
+                episode=2,
+                q_gap=0.0,
+            )
+            for seq in range(20)
+        ]
+        ideal = [
+            self._gap_row(
+                100 + seq,
+                profile=PROBE.OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
+                generation=3,
+                episode=4,
+                q_gap=0.0 if seq == 0 else 0.03,
+            )
+            for seq in range(12)
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp)
+            report = PROBE._analyze_sim_real_gap(
+                legacy + ideal,
+                output,
+                alignment={"alignmentValid": True},
+            )
+
+            self.assertEqual(
+                report["selectedCohort"]["policyProfile"],
+                PROBE.OBSERVATION_PROFILE_SIMCODE2_IDEALPD67)
+            self.assertEqual(report["simSampleCount"], 12)
+            self.assertEqual(
+                report["groups"]["ball_observation"]["maxAbs"], 0.0)
+            self.assertEqual(
+                report["diagnostics"]["primaryGapHint"],
+                "real_actuation_tracking")
+            self.assertAlmostEqual(
+                report["diagnostics"]["resetJointPositionRmsRad"],
+                0.0)
+            self.assertEqual(
+                report["diagnostics"]["compensationSaturation"][
+                    "anyJointTickFraction"],
+                1.0)
+            self.assertTrue((output / "sim2real_gap_timeseries.csv").is_file())
+            self.assertTrue((output / "sim2real_gap_timeseries.png").is_file())
+
+    def test_analysis_schema_marks_old_artifacts_for_regeneration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            analysis_dir = Path(tmp)
+            summary = analysis_dir / "analysis_summary.json"
+            summary.write_text(
+                json.dumps({"analysisSchemaVersion": 1}), encoding="utf-8")
+            self.assertLess(
+                PROBE._analysis_schema_version_from_dir(analysis_dir),
+                PROBE.ANALYSIS_SCHEMA_VERSION)
+            summary.write_text(
+                json.dumps({
+                    "analysisSchemaVersion": PROBE.ANALYSIS_SCHEMA_VERSION,
+                }),
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                PROBE._analysis_schema_version_from_dir(analysis_dir),
+                PROBE.ANALYSIS_SCHEMA_VERSION)
+
+    def test_control_proxy_reset_waits_for_matching_ack_not_stale_snapshot(self):
+        proxy = PROBE.ControlSubprocessProxy.__new__(
+            PROBE.ControlSubprocessProxy)
+        proxy.lock = threading.Lock()
+        proxy.command_q = queue.Queue(maxsize=1)
+        proxy.latest_snapshot = {
+            "mode": "old",
+            "controlResetRequestId": 0,
+        }
+        proxy.latest_recording_status = {"active": False}
+        proxy._reset_request_seq = 0
+        proxy._reset_in_progress = False
+
+        def acknowledge(**_kwargs):
+            try:
+                command = proxy.command_q.get_nowait()
+            except queue.Empty:
+                return
+            request_id = int(
+                command["payload"]["_controlResetRequestId"])
+            with proxy.lock:
+                proxy.latest_snapshot = {
+                    "mode": "reset",
+                    "controlResetRequestId": request_id,
+                }
+
+        proxy._drain_status = acknowledge
+        snapshot = proxy.reset({"policyProfile": "simcode2_idealpd67"})
+
+        self.assertEqual(snapshot["mode"], "reset")
+        self.assertEqual(snapshot["controlResetRequestId"], 1)
+        self.assertFalse(proxy._reset_in_progress)
+
+
 class RecorderCadenceTest(unittest.TestCase):
 
     def test_control_rate_recording_keeps_every_logical_tick(self):
@@ -227,7 +1222,205 @@ class RecorderCadenceTest(unittest.TestCase):
             [item["sample"]["sourceSeq"] for item in written], [0])
 
 
+@dataclass(frozen=True)
+class _CompensationOptions:
+    compensation_parameter_target: str
+    compensation_mode: str
+    comp_delay_ms: float
+    comp_actuator_tau_s: float
+    comp_actuator_gain: float
+    comp_mpc_beta: float
+    comp_mpc_delay_scale: float
+    comp_mpc_tau_scale: float
+    comp_mpc_horizon_steps: int
+    comp_mpc_tracking_weight: float
+    comp_mpc_nominal_weight: float
+    comp_mpc_delta_weight: float
+    comp_mpc_max_delta_rad: float
+
+
+class CompensationParameterRoutingTest(unittest.TestCase):
+
+    @staticmethod
+    def _probe():
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            compensation_mode="inverse_mpc",
+            comp_delay_ms=72.0,
+            comp_actuator_tau_s=0.074,
+            comp_actuator_gain=1.0,
+            comp_mpc_beta=1.2,
+            comp_mpc_delay_scale=1.05,
+            comp_mpc_tau_scale=0.75,
+            comp_mpc_horizon_steps=6,
+            comp_mpc_tracking_weight=1.0,
+            comp_mpc_nominal_weight=0.25,
+            comp_mpc_delta_weight=0.05,
+            comp_mpc_max_delta_rad=0.0,
+        )
+        return probe
+
+    @staticmethod
+    def _live(target):
+        return _CompensationOptions(
+            compensation_parameter_target=target,
+            compensation_mode="lead",
+            comp_delay_ms=11.0,
+            comp_actuator_tau_s=0.012,
+            comp_actuator_gain=1.3,
+            comp_mpc_beta=2.0,
+            comp_mpc_delay_scale=1.2,
+            comp_mpc_tau_scale=0.9,
+            comp_mpc_horizon_steps=9,
+            comp_mpc_tracking_weight=2.0,
+            comp_mpc_nominal_weight=0.4,
+            comp_mpc_delta_weight=0.1,
+            comp_mpc_max_delta_rad=0.2,
+        )
+
+    def test_real_target_keeps_live_real_and_startup_sim_parameters(self):
+        probe = self._probe()
+        live = self._live("real")
+
+        real = probe._real_compensation_options(live)
+        sim = probe._sim_compensation_options(live)
+
+        self.assertIs(real, live)
+        self.assertEqual(sim.compensation_mode, "inverse_mpc")
+        self.assertEqual(sim.comp_delay_ms, 72.0)
+        self.assertEqual(sim.comp_actuator_tau_s, 0.074)
+
+    def test_sim_target_keeps_live_sim_and_startup_real_parameters(self):
+        probe = self._probe()
+        probe.cfg.real_comp_delay_ms = 55.0
+        probe.cfg.real_comp_actuator_tau_s = 0.158
+        probe.cfg.real_comp_actuator_gain = 1.043
+        probe.cfg.real_comp_mpc_beta = 1.175
+        probe.cfg.real_comp_mpc_delay_scale = 1.176
+        probe.cfg.real_comp_mpc_tau_scale = 0.854
+        probe.cfg.real_comp_mpc_horizon_steps = 5
+        probe.cfg.real_comp_mpc_tracking_weight = 1.0
+        probe.cfg.real_comp_mpc_nominal_weight = 0.167
+        probe.cfg.real_comp_mpc_delta_weight = 0.08
+        probe.cfg.real_comp_mpc_max_delta_rad = 0.309
+        live = self._live("sim")
+
+        real = probe._real_compensation_options(live)
+        sim = probe._sim_compensation_options(live)
+
+        self.assertIs(sim, live)
+        self.assertEqual(real.compensation_mode, "inverse_mpc")
+        self.assertEqual(real.comp_delay_ms, 55.0)
+        self.assertEqual(real.comp_actuator_tau_s, 0.158)
+        self.assertEqual(real.comp_actuator_gain, 1.043)
+        self.assertEqual(real.comp_mpc_beta, 1.175)
+        self.assertEqual(real.comp_mpc_delay_scale, 1.176)
+        self.assertEqual(real.comp_mpc_tau_scale, 0.854)
+        self.assertEqual(real.comp_mpc_horizon_steps, 5)
+        self.assertEqual(real.comp_mpc_nominal_weight, 0.167)
+        self.assertEqual(real.comp_mpc_delta_weight, 0.08)
+        self.assertEqual(real.comp_mpc_max_delta_rad, 0.309)
+
+    def test_real_target_does_not_route_real_defaults_into_sim(self):
+        probe = self._probe()
+        probe.cfg.real_comp_delay_ms = 55.0
+        probe.cfg.real_comp_actuator_tau_s = 0.158
+        probe.cfg.real_comp_actuator_gain = 1.043
+        probe.cfg.real_comp_mpc_beta = 1.175
+        probe.cfg.real_comp_mpc_delay_scale = 1.176
+        probe.cfg.real_comp_mpc_tau_scale = 0.854
+        probe.cfg.real_comp_mpc_horizon_steps = 5
+        probe.cfg.real_comp_mpc_nominal_weight = 0.167
+        probe.cfg.real_comp_mpc_delta_weight = 0.08
+        probe.cfg.real_comp_mpc_max_delta_rad = 0.309
+        live = self._live("real")
+
+        sim = probe._sim_compensation_options(live)
+
+        self.assertEqual(sim.comp_delay_ms, 72.0)
+        self.assertEqual(sim.comp_actuator_tau_s, 0.074)
+        self.assertEqual(sim.comp_actuator_gain, 1.0)
+        self.assertEqual(sim.comp_mpc_beta, 1.2)
+        self.assertEqual(sim.comp_mpc_delay_scale, 1.05)
+        self.assertEqual(sim.comp_mpc_tau_scale, 0.75)
+        self.assertEqual(sim.comp_mpc_horizon_steps, 6)
+        self.assertEqual(sim.comp_mpc_nominal_weight, 0.25)
+        self.assertEqual(sim.comp_mpc_delta_weight, 0.05)
+        self.assertEqual(sim.comp_mpc_max_delta_rad, 0.0)
+
+
 class CpuSimMirrorActuatorModelTest(unittest.TestCase):
+
+    def test_simcode4_compensation_uses_actual_joint_feedback(self):
+        class _Compensator:
+            enabled = True
+
+            def __init__(self):
+                self.feedback = None
+
+            def step(self, *, q_cmd, qdot_cmd, qdd_cmd, applied_q):
+                self.feedback = PROBE.np.asarray(applied_q).copy()
+                return PROBE.np.asarray(q_cmd).copy()
+
+        mirror = PROBE.RealBallSimMirror.__new__(PROBE.RealBallSimMirror)
+        mirror._servo_planner_profile = True
+        mirror.compensator = _Compensator()
+        mirror.compensation_error = None
+        mirror.arm_applied_q = PROBE.np.full(
+            7, 1.0, dtype=PROBE.np.float32)
+        mirror.policy = SimpleNamespace(
+            latest_command_state=lambda: {
+                "velocity": PROBE.np.zeros(7, dtype=PROBE.np.float32),
+                "acceleration": PROBE.np.zeros(7, dtype=PROBE.np.float32),
+            })
+        mirror._ensure_compensator = lambda _options: None
+        options = SimpleNamespace(enable_compensation=True)
+        actual_q = PROBE.np.linspace(
+            -0.3, 0.3, 7, dtype=PROBE.np.float32)
+
+        mirror._apply_compensation(
+            PROBE.np.zeros(7, dtype=PROBE.np.float32),
+            options,
+            actual_q=actual_q,
+        )
+
+        PROBE.np.testing.assert_array_equal(
+            mirror.compensator.feedback, actual_q)
+
+    def test_simcode3_compensation_keeps_modeled_applied_feedback(self):
+        class _Compensator:
+            enabled = True
+
+            def __init__(self):
+                self.feedback = None
+
+            def step(self, *, q_cmd, qdot_cmd, qdd_cmd, applied_q):
+                self.feedback = PROBE.np.asarray(applied_q).copy()
+                return PROBE.np.asarray(q_cmd).copy()
+
+        mirror = PROBE.RealBallSimMirror.__new__(PROBE.RealBallSimMirror)
+        mirror._servo_planner_profile = False
+        mirror.compensator = _Compensator()
+        mirror.compensation_error = None
+        modeled_q = PROBE.np.linspace(
+            0.1, 0.7, 7, dtype=PROBE.np.float32)
+        mirror.arm_applied_q = modeled_q.copy()
+        mirror.policy = SimpleNamespace(
+            latest_command_state=lambda: {
+                "velocity": PROBE.np.zeros(7, dtype=PROBE.np.float32),
+                "acceleration": PROBE.np.zeros(7, dtype=PROBE.np.float32),
+            })
+        mirror._ensure_compensator = lambda _options: None
+        options = SimpleNamespace(enable_compensation=True)
+
+        mirror._apply_compensation(
+            PROBE.np.zeros(7, dtype=PROBE.np.float32),
+            options,
+            actual_q=PROBE.np.full(7, -2.0, dtype=PROBE.np.float32),
+        )
+
+        PROBE.np.testing.assert_array_equal(
+            mirror.compensator.feedback, modeled_q)
 
     def test_actuator_delay_filter_runs_after_compensation_reference(self):
         mirror = PROBE.RealBallSimMirror.__new__(PROBE.RealBallSimMirror)
@@ -270,6 +1463,50 @@ class CpuSimMirrorActuatorModelTest(unittest.TestCase):
         PROBE.np.testing.assert_allclose(applied_history[1], seed)
         PROBE.np.testing.assert_allclose(applied_history[2], compensated)
         PROBE.np.testing.assert_allclose(active_compensated, compensated)
+
+    def test_simcode5_cpu_mirror_uses_per_joint_second_order_actuator(self):
+        mirror = PROBE.RealBallSimMirror.__new__(PROBE.RealBallSimMirror)
+        mirror.dt = 0.01
+        mirror.cfg = SimpleNamespace(
+            comp_delay_ms=0.0,
+            comp_actuator_tau_s=0.0,
+            comp_actuator_gain=1.0,
+            policy_obs_dim=67,
+        )
+        mirror.policy = SimpleNamespace(
+            arm_q_low=PROBE.np.full(7, -10.0, dtype=PROBE.np.float32),
+            arm_q_high=PROBE.np.full(7, 10.0, dtype=PROBE.np.float32),
+        )
+        mirror._pure_actuator_profile = True
+        mirror._servo_planner_profile = False
+        mirror.pure_actuator_wn = PROBE.np.full(
+            7, 20.0, dtype=PROBE.np.float32)
+        mirror.pure_actuator_zeta = PROBE.np.full(
+            7, 0.4, dtype=PROBE.np.float32)
+        mirror.pure_actuator_gain = PROBE.np.ones(7, dtype=PROBE.np.float32)
+        mirror.pure_actuator_delay_steps = PROBE.np.asarray(
+            [0, 1, 0, 1, 0, 1, 0], dtype=PROBE.np.int32)
+        mirror.warm_arm_q = PROBE.np.zeros(7, dtype=PROBE.np.float32)
+        mirror.actuator_model_key = None
+        mirror.command_buffer = None
+        mirror.actuator_command_buffer = None
+        mirror.arm_q_ref_active = None
+        mirror.arm_actuator_q_ref_active = None
+        mirror.arm_applied_q = None
+        mirror.arm_applied_qvel = None
+
+        _active, active_actuator, applied = mirror._run_actuator_model(
+            PROBE.np.ones(7, dtype=PROBE.np.float32),
+            PROBE.np.ones(7, dtype=PROBE.np.float32),
+            mirror.cfg,
+            seed_q=PROBE.np.zeros(7, dtype=PROBE.np.float32),
+        )
+
+        self.assertGreater(float(applied[0]), 0.0)
+        self.assertEqual(float(applied[1]), 0.0)
+        self.assertEqual(float(active_actuator[0]), 1.0)
+        self.assertEqual(float(active_actuator[1]), 0.0)
+        self.assertGreater(float(mirror.arm_applied_qvel[0]), 0.0)
 
 
 class AnalysisJsonTest(unittest.TestCase):
@@ -401,7 +1638,7 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
             "impedance_soft",
         )
 
-    def test_soft_modes_only_remove_arm_workspace_done_conditions(self):
+    def test_soft_modes_share_hard_workspace_done_conditions(self):
         conditions = {
             "ee_x_out_of_workspace": True,
             "racket_predicted_too_far_from_anchor": True,
@@ -422,12 +1659,173 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
                 "ball_too_low",
             },
         )
-        self.assertEqual(soft, {
-            "ee_orientation_error_too_large": True,
-            "ball_too_low": True,
-        })
+        self.assertEqual(soft, hard)
 
-    def test_switching_to_soft_releases_arm_only_done_latch(self):
+    def test_soft_mode_routes_every_done_condition_to_reset(self):
+        self.assertEqual(
+            PROBE._workspace_done_action(
+                "position_soft", {"ball_x_out_of_bounds": True}),
+            "reset",
+        )
+        self.assertEqual(
+            PROBE._workspace_done_action(
+                "position_soft", {"ee_y_out_of_workspace": True}),
+            "reset",
+        )
+        self.assertEqual(
+            PROBE._workspace_done_action(
+                "position", {"ball_x_out_of_bounds": True}),
+            "parking",
+        )
+        self.assertEqual(
+            PROBE._workspace_done_action(
+                "position", {"ee_y_out_of_workspace": True}),
+            "stop",
+        )
+
+    def test_publishing_workspace_safety_uses_joint_feedback_fk(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        command_q = PROBE.np.zeros(7)
+        feedback_q = PROBE.np.zeros(7)
+        feedback_q[:3] = [0.20, -0.60, 1.60]
+        probe.controller = SimpleNamespace(
+            arm_cmd_q=command_q.copy(),
+            _compute_racket_pose_quat_base=lambda q: (
+                PROBE.np.asarray(q[:3], dtype=PROBE.np.float64),
+                PROBE.np.asarray([0.0, 0.0, 0.0, 1.0]),
+                True,
+            ),
+        )
+        probe.ros_bridge = SimpleNamespace(
+            get_joint_feedback_with_age=lambda: (
+                feedback_q.copy(), PROBE.np.zeros(7), 0.01, "joint_state"),
+        )
+
+        measured_pos, _quat, measured_ok = (
+            probe._workspace_safety_racket_pose(
+                SimpleNamespace(publish_commands=True)))
+        dry_run_pos, _quat, dry_run_ok = (
+            probe._workspace_safety_racket_pose(
+                SimpleNamespace(publish_commands=False)))
+
+        self.assertTrue(measured_ok)
+        self.assertTrue(dry_run_ok)
+        PROBE.np.testing.assert_allclose(measured_pos, feedback_q[:3])
+        PROBE.np.testing.assert_allclose(dry_run_pos, command_q[:3])
+        # The last call is dry-run; verify each path's selected source at call
+        # time by invoking the hardware path once more.
+        probe._workspace_safety_racket_pose(
+            SimpleNamespace(publish_commands=True))
+        self.assertEqual(
+            probe.last_workspace_safety_pose_source, "joint_state_fk")
+
+    def test_workspace_preflight_checks_all_translation_directions(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            workspace_safety_mode="position_soft",
+            ee_x_limits_m=(-0.3, 0.1),
+            ee_y_limits_m=(-0.5, -0.3),
+            ee_z_limits_m=(0.7, 1.4),
+        )
+
+        self.assertEqual(
+            probe._workspace_translation_done_conditions(
+                PROBE.np.asarray([0.2, -0.6, 1.5]),
+                True,
+                "position_soft",
+            ),
+            {
+                "ee_x_out_of_workspace": True,
+                "ee_y_out_of_workspace": True,
+                "ee_z_out_of_workspace": True,
+            },
+        )
+        self.assertEqual(
+            probe._workspace_translation_done_conditions(
+                PROBE.np.asarray([0.0, -0.4, 1.0]),
+                True,
+                "position_soft",
+            ),
+            {},
+        )
+        for point, expected in (
+            ([-0.31, -0.4, 1.0], "ee_x_out_of_workspace"),
+            ([0.11, -0.4, 1.0], "ee_x_out_of_workspace"),
+            ([0.0, -0.51, 1.0], "ee_y_out_of_workspace"),
+            ([0.0, -0.29, 1.0], "ee_y_out_of_workspace"),
+            ([0.0, -0.4, 0.69], "ee_z_out_of_workspace"),
+            ([0.0, -0.4, 1.41], "ee_z_out_of_workspace"),
+        ):
+            with self.subTest(point=point):
+                self.assertEqual(
+                    probe._workspace_translation_done_conditions(
+                        PROBE.np.asarray(point), True, "position_soft"),
+                    {expected: True},
+                )
+
+    def test_workspace_preflight_upgrades_latched_ball_done_before_gates(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.controller = SimpleNamespace(use_valid_ball_obs_age=True)
+        probe.cfg = SimpleNamespace(
+            control_dt=0.005,
+            ball_lost_timeout_s=0.6,
+            workspace_safety_mode="position_soft",
+            ee_x_limits_m=(-0.3, 0.1),
+            ee_y_limits_m=(-0.5, -0.3),
+            ee_z_limits_m=(0.7, 1.4),
+        )
+        probe.now_s = 1.0
+        probe.last_valid_time_s = None
+        probe.has_captured = True
+        probe.failsafe_active = False
+        probe.done_failsafe_active = True
+        probe.done_failsafe_reason = "ball_x_out_of_bounds"
+        probe.done_failsafe_conditions = {"ball_x_out_of_bounds": True}
+        probe._release_incompatible_done_latch = lambda _mode: False
+        probe._reset_recovery_active = lambda: False
+        probe._workspace_safety_racket_pose = lambda _options: (
+            PROBE.np.asarray([0.0, -0.51, 1.0]),
+            PROBE.np.asarray([0.0, 0.0, 0.0, 1.0]),
+            True,
+        )
+        probe._soft_workspace_reset_active = lambda: False
+        calls = []
+        probe._latch_soft_workspace_reset = (
+            lambda reason, conditions: calls.append(
+                ("latch", reason, dict(conditions))))
+        reset_q = PROBE.np.zeros(7)
+        probe._current_reset_pose_q = lambda: reset_q.copy()
+        probe._sync_policy_to_safe_pose = (
+            lambda q: calls.append(("sync", q.copy())))
+        probe._hold_racket_tracker = (
+            lambda reason, q: calls.append(("track", reason, q.copy())))
+        probe._hold_juggle_controller = (
+            lambda reason, q, **kwargs: calls.append(
+                ("juggle", reason, q.copy(), kwargs)))
+        probe._mark_policy_paused = lambda: calls.append(("paused",))
+        options = SimpleNamespace(
+            rl_use_valid_ball_obs_age=True,
+            workspace_safety_mode="position_soft",
+            control_mode="policy",
+            enable_ball_release_gate=True,
+        )
+
+        result = probe._run_one_control_step(
+            PROBE.np.zeros(3), PROBE.np.zeros(3), True, 0.0, options)
+
+        self.assertEqual(result[0], "done_failsafe")
+        self.assertEqual(result[1], "ee_y_out_of_workspace")
+        self.assertEqual(
+            result[2],
+            {
+                "ball_x_out_of_bounds": True,
+                "ee_y_out_of_workspace": True,
+            },
+        )
+        self.assertEqual(calls[0][0], "latch")
+        self.assertIn(("paused",), calls)
+
+    def test_switching_to_soft_keeps_arm_done_latched(self):
         probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
         probe.cfg = SimpleNamespace(workspace_safety_mode="predictive")
         probe.done_failsafe_active = True
@@ -436,10 +1834,14 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
 
         released = probe._release_incompatible_done_latch("position_soft")
 
-        self.assertTrue(released)
-        self.assertFalse(probe.done_failsafe_active)
-        self.assertEqual(probe.done_failsafe_reason, "")
-        self.assertEqual(probe.done_failsafe_conditions, {})
+        self.assertFalse(released)
+        self.assertTrue(probe.done_failsafe_active)
+        self.assertEqual(
+            probe.done_failsafe_reason, "ee_x_out_of_workspace")
+        self.assertEqual(
+            probe.done_failsafe_conditions,
+            {"ee_x_out_of_workspace": True},
+        )
 
     def test_switching_to_soft_keeps_ball_done_latched(self):
         probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
@@ -455,9 +1857,65 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
 
         self.assertFalse(released)
         self.assertTrue(probe.done_failsafe_active)
-        self.assertEqual(probe.done_failsafe_reason, "ball_too_low")
         self.assertEqual(
-            probe.done_failsafe_conditions, {"ball_too_low": True})
+            probe.done_failsafe_reason, "ee_x_out_of_workspace")
+        self.assertEqual(
+            probe.done_failsafe_conditions,
+            {
+                "ee_x_out_of_workspace": True,
+                "ball_too_low": True,
+            },
+        )
+
+    def test_soft_workspace_done_publishes_selected_reset_joint_pose(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        reset_q = PROBE.np.linspace(-0.3, 0.3, 7)
+        reset_seed_q = PROBE.np.linspace(0.1, 0.2, 7)
+        published = []
+        limiter_calls = []
+        limiter_resets = []
+
+        class RecordingLimiter:
+            def reset(self, q):
+                limiter_resets.append(PROBE.np.asarray(q).copy())
+
+            def filter(self, q, *, profile="normal"):
+                limiter_calls.append((PROBE.np.asarray(q).copy(), profile))
+                return PROBE.np.asarray(q).copy()
+
+        probe.reset_initial_pose_q = reset_q.copy()
+        probe.safe_q = PROBE.np.zeros(7)
+        probe.safety_limiter = RecordingLimiter()
+        probe.ros_bridge = SimpleNamespace(
+            get_joint_feedback=lambda: (
+                reset_seed_q.copy(), PROBE.np.zeros(7)),
+            publish_right_arm_command=lambda q: published.append(
+                PROBE.np.asarray(q).copy()),
+        )
+        probe._reset_compensator_to_current_arm = lambda q=None: None
+        probe.command_stream_active = True
+        probe.done_failsafe_active = True
+        probe.done_failsafe_reason = "ee_x_out_of_workspace"
+        probe._latch_soft_workspace_reset(
+            "ee_x_out_of_workspace",
+            {"ee_x_out_of_workspace": True},
+        )
+
+        did_publish = probe._publish_control_command(
+            PROBE.np.ones(7),
+            SimpleNamespace(publish_commands=True),
+        )
+
+        self.assertTrue(did_publish)
+        PROBE.np.testing.assert_allclose(limiter_resets, [reset_seed_q])
+        self.assertEqual(len(limiter_calls), 1)
+        PROBE.np.testing.assert_allclose(limiter_calls[0][0], reset_q)
+        self.assertEqual(limiter_calls[0][1], "reset")
+        PROBE.np.testing.assert_allclose(published, [reset_q])
+        self.assertEqual(
+            probe.last_command_arm["reason"],
+            "soft_workspace_reset_latched",
+        )
 
     @staticmethod
     def _probe_with_linear_fk(initial_q0=0.0):
@@ -613,10 +2071,9 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
         self.assertEqual(
             probe.workspace_soft_filter["projection"], "joint_velocity_qp")
 
-    def test_position_soft_runtime_uses_component_workspace_guard(self):
+    def test_position_soft_runtime_matches_hard_command_path(self):
         probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
         published = []
-        captured = {}
         probe.ros_bridge = SimpleNamespace(
             publish_right_arm_command=lambda q: published.append(
                 PROBE.np.asarray(q).copy()),
@@ -632,23 +2089,24 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
         probe.last_command_disable_hold = {}
         probe.workspace_soft_prediction_active = False
         probe.workspace_soft_filter = {}
+        probe.safety_limiter = PROBE.RightArmCommandSafetyLimiter(
+            PROBE.np.zeros(7), dt=0.005)
 
-        def fake_filter(raw, **kwargs):
-            captured.update(kwargs)
-            probe.workspace_soft_filter = {"active": False}
-            return PROBE.np.asarray(raw).copy()
+        def fail_if_called(*_args, **_kwargs):
+            self.fail("soft runtime must not apply the old workspace filter")
 
-        probe._filter_command_with_workspace_guard = fake_filter
+        probe._filter_command_with_workspace_guard = fail_if_called
+        probe._filter_command_with_workspace_soft_field = fail_if_called
         options = SimpleNamespace(
             publish_commands=True,
             workspace_safety_mode="position_soft",
         )
 
-        probe._publish_control_command(PROBE.np.zeros(7), options)
+        target = PROBE.np.linspace(-0.2, 0.2, 7)
+        probe._publish_control_command(target, options)
 
-        self.assertTrue(captured["apply_joint_limits"])
-        self.assertFalse(captured["predictive_hold"])
         self.assertEqual(len(published), 1)
+        PROBE.np.testing.assert_allclose(published[0], target)
 
     def test_publish_feedback_keeps_policy_compensation_and_safe_layers_separate(self):
         probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
@@ -679,7 +2137,8 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
         probe.last_command_disable_hold = {}
         probe.workspace_soft_filter = {}
 
-        def fake_compensation(q, _options):
+        def fake_compensation(q, _options, *, feedback_q_override=None):
+            self.assertIsNone(feedback_q_override)
             probe.compensation_was_enabled = True
             return PROBE.np.asarray(q, dtype=PROBE.np.float64) + 0.20
 
@@ -722,6 +2181,186 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
             probe.last_compensated_reference, nominal + 0.20)
         PROBE.np.testing.assert_allclose(
             probe.last_published_safe_reference, published[0])
+
+    def test_simcode4_plans_compensation_before_physical_plant(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        nominal = PROBE.np.zeros(7, dtype=PROBE.np.float64)
+        raw_compensated = PROBE.np.full(7, 0.40)
+        planned = PROBE.np.full(7, 0.02)
+        published = []
+        planner_inputs = []
+        observed_published = []
+        advances = []
+        applied_states = []
+        probe.ros_bridge = SimpleNamespace(
+            publish_right_arm_command=lambda q: published.append(
+                PROBE.np.asarray(q).copy()))
+        probe.cfg = SimpleNamespace(
+            workspace_safety_mode="off",
+            enable_safety_limiter=False,
+            comp_delay_ms=72.0,
+            comp_actuator_tau_s=0.074,
+            simcode4_real_servo_planner=True,
+        )
+        probe.controller = SimpleNamespace(_checkpoint_env_cfg={
+            "arm_servo_target_planner_before_actuator": True,
+        })
+        probe.safety_limiter = SimpleNamespace(
+            observe=lambda _q: None,
+        )
+        probe.servo_target_planner = SimpleNamespace(
+            step=lambda q: planner_inputs.append(
+                PROBE.np.asarray(q).copy()) or planned.copy(),
+        )
+
+        def advance_applied_model():
+            advances.append(True)
+            return PROBE.np.full(7, 0.05)
+
+        probe.compensator = SimpleNamespace(
+            advance_applied_model=advance_applied_model,
+            observe_applied_state=lambda q: applied_states.append(
+                PROBE.np.asarray(q).copy()),
+            observe_published=lambda q: observed_published.append(
+                PROBE.np.asarray(q).copy()),
+        )
+        probe.compensation_was_enabled = False
+        probe.command_stream_active = True
+        probe.last_command_disable_hold = {}
+        probe.workspace_soft_filter = {}
+
+        def fake_compensation(q, _options, *, feedback_q_override=None):
+            self.assertIsNone(feedback_q_override)
+            probe.compensation_was_enabled = True
+            return raw_compensated.copy()
+
+        probe._apply_actuator_compensation = fake_compensation
+        options = SimpleNamespace(
+            publish_commands=True,
+            workspace_safety_mode="off",
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE4_SERVO67,
+            comp_delay_ms=72.0,
+            comp_actuator_tau_s=0.074,
+        )
+
+        did_publish = probe._publish_control_command(
+            nominal, options, apply_compensation=True)
+
+        self.assertTrue(did_publish)
+        self.assertEqual(advances, [])
+        PROBE.np.testing.assert_allclose(planner_inputs, [raw_compensated])
+        self.assertEqual(applied_states, [])
+        PROBE.np.testing.assert_allclose(published[0], planned)
+        PROBE.np.testing.assert_allclose(observed_published, [planned])
+        self.assertFalse(probe.last_servo_drive_model_advanced)
+        PROBE.np.testing.assert_allclose(
+            probe.last_servo_planner_input_q, raw_compensated)
+        PROBE.np.testing.assert_allclose(
+            probe.last_servo_planner_output_q, planned)
+
+    def test_simcode4_opt_in_planner_blocks_incompatible_frozen_checkpoint(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        published = []
+        probe.ros_bridge = SimpleNamespace(
+            publish_right_arm_command=lambda q: published.append(
+                PROBE.np.asarray(q).copy()))
+        probe.cfg = SimpleNamespace(
+            workspace_safety_mode="off",
+            enable_safety_limiter=False,
+            comp_delay_ms=72.0,
+            comp_actuator_tau_s=0.074,
+            simcode4_real_servo_planner=True,
+        )
+        probe.controller = SimpleNamespace(_checkpoint_env_cfg={
+            "arm_servo_target_tracking_planner": True,
+            "arm_servo_target_planner_before_actuator": False,
+        })
+        probe.command_stream_active = True
+        probe.compensation_was_enabled = True
+        probe.last_simcode4_plant_order_matches_checkpoint = True
+        probe.last_simcode4_publish_block_reason = ""
+        options = SimpleNamespace(
+            publish_commands=True,
+            workspace_safety_mode="off",
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE4_SERVO67,
+            comp_delay_ms=72.0,
+            comp_actuator_tau_s=0.074,
+        )
+
+        did_publish = probe._publish_control_command(
+            PROBE.np.zeros(7), options, apply_compensation=True)
+
+        self.assertFalse(did_publish)
+        self.assertEqual(published, [])
+        self.assertFalse(probe.compensation_was_enabled)
+        self.assertFalse(
+            probe.last_simcode4_plant_order_matches_checkpoint)
+        self.assertIn(
+            "requires a deployable V6 checkpoint",
+            probe.last_simcode4_publish_block_reason,
+        )
+
+    def test_simcode4_default_planner_off_publishes_frozen_checkpoint(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        nominal = PROBE.np.zeros(7, dtype=PROBE.np.float64)
+        compensated = PROBE.np.full(7, 0.12)
+        published = []
+        observed = []
+        advanced = []
+        probe.ros_bridge = SimpleNamespace(
+            publish_right_arm_command=lambda q: published.append(
+                PROBE.np.asarray(q).copy()))
+        probe.cfg = SimpleNamespace(
+            workspace_safety_mode="off",
+            enable_safety_limiter=False,
+            comp_delay_ms=72.0,
+            comp_actuator_tau_s=0.074,
+            simcode4_real_servo_planner=False,
+        )
+        probe.controller = SimpleNamespace(_checkpoint_env_cfg={
+            "arm_servo_target_tracking_planner": True,
+            "arm_servo_target_planner_before_actuator": False,
+        })
+        probe.safety_limiter = SimpleNamespace(observe=lambda _q: None)
+        probe.servo_target_planner = SimpleNamespace(
+            step=lambda _q: self.fail(
+                "default simcode4 real path must not call servo planner"))
+        probe.compensator = SimpleNamespace(
+            observe_published=lambda q: observed.append(
+                PROBE.np.asarray(q).copy()),
+            advance_applied_model=lambda: advanced.append(True),
+        )
+        probe.compensation_was_enabled = False
+        probe.command_stream_active = True
+        probe.last_command_disable_hold = {}
+        probe.workspace_soft_filter = {}
+
+        def fake_compensation(q, _options, *, feedback_q_override=None):
+            self.assertIsNone(feedback_q_override)
+            probe.compensation_was_enabled = True
+            return compensated.copy()
+
+        probe._apply_actuator_compensation = fake_compensation
+        options = SimpleNamespace(
+            publish_commands=True,
+            workspace_safety_mode="off",
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE4_SERVO67,
+            comp_delay_ms=72.0,
+            comp_actuator_tau_s=0.074,
+        )
+
+        did_publish = probe._publish_control_command(
+            nominal, options, apply_compensation=True)
+
+        self.assertTrue(did_publish)
+        PROBE.np.testing.assert_allclose(published, [compensated])
+        PROBE.np.testing.assert_allclose(observed, [compensated])
+        self.assertEqual(advanced, [])
+        self.assertIsNone(probe.last_servo_planner_input_q)
+        self.assertIsNone(probe.last_servo_planner_output_q)
+        self.assertEqual(probe.last_simcode4_publish_block_reason, "")
+        self.assertFalse(
+            probe.last_simcode4_plant_order_matches_checkpoint)
 
     def test_position_soft_y_boundary_preserves_x_command(self):
         probe = self._probe_with_linear_fk(initial_q0=1.0)
@@ -1350,6 +2989,32 @@ class CommandDisableHoldTest(unittest.TestCase):
         self.assertFalse(probe.command_stream_active)
         self.assertTrue(
             probe.last_command_disable_hold["feedbackAvailable"])
+
+    def test_disabling_stream_never_publishes_stale_feedback_as_new_hold(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        feedback = PROBE.np.linspace(0.0, 0.3, 7)
+        published = []
+        probe.ros_bridge = SimpleNamespace(
+            get_joint_feedback_with_age=lambda: (
+                feedback.copy(), PROBE.np.zeros(7), 0.20, "test"),
+            publish_right_arm_command=lambda q: published.append(
+                PROBE.np.asarray(q).copy()),
+        )
+        probe.safety_limiter = PROBE.RightArmCommandSafetyLimiter(
+            PROBE.np.zeros(7), dt=0.005)
+        probe.command_stream_active = True
+        probe.last_command_disable_hold = {}
+        probe._reset_compensator_to_current_arm = lambda q=None: None
+
+        did_publish = probe._publish_hold_on_command_disable()
+
+        self.assertFalse(did_publish)
+        self.assertEqual(published, [])
+        self.assertFalse(probe.command_stream_active)
+        self.assertFalse(probe.last_command_disable_hold["published"])
+        self.assertFalse(probe.last_command_disable_hold["feedbackFresh"])
+        self.assertAlmostEqual(
+            probe.last_command_disable_hold["feedbackAgeS"], 0.20)
 
 
 class ControlSubprocessWorkspaceAckTest(unittest.TestCase):

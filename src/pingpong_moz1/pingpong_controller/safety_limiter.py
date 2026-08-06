@@ -14,6 +14,137 @@ from __future__ import annotations
 import numpy as np
 
 
+def stopping_velocity_limit(distance_rad, acc_limit_rad_s2, dt: float):
+    """Exact discrete stopping-speed cap used by simcode4's servo planner."""
+    distance = np.maximum(np.asarray(distance_rad, dtype=np.float64), 0.0)
+    acc_limit = np.asarray(acc_limit_rad_s2, dtype=np.float64)
+    dt_value = float(dt)
+    accel_step = acc_limit * dt_value
+    scaled = 8.0 * distance / np.maximum(acc_limit * dt_value**2, 1e-12)
+    brake_steps = np.floor(0.5 * (np.sqrt(1.0 + scaled) - 1.0))
+    return (
+        distance / (dt_value * (brake_steps + 1.0))
+        + 0.5 * accel_step * brake_steps
+    )
+
+
+def project_target_tracking_command_step(
+    target_rad,
+    current_cmd_rad,
+    current_vel_rad_s,
+    pos_low_rad,
+    pos_high_rad,
+    vel_limit_rad_s,
+    acc_limit_rad_s2,
+    dt: float,
+):
+    """NumPy equivalent of simcode4 ``project_target_tracking_*_jax``."""
+    target = np.asarray(target_rad, dtype=np.float64)
+    current = np.asarray(current_cmd_rad, dtype=np.float64)
+    velocity = np.asarray(current_vel_rad_s, dtype=np.float64)
+    pos_low = np.asarray(pos_low_rad, dtype=np.float64)
+    pos_high = np.asarray(pos_high_rad, dtype=np.float64)
+    vel_limit = np.asarray(vel_limit_rad_s, dtype=np.float64)
+    acc_limit = np.asarray(acc_limit_rad_s2, dtype=np.float64)
+    dt_value = float(dt)
+
+    position_margin = 2e-6
+    safe_low_pos = pos_low + position_margin
+    safe_high_pos = pos_high - position_margin
+    clipped_target = np.clip(target, safe_low_pos, safe_high_pos)
+    braking_margin = 2e-6
+    distance_low = np.maximum(current - safe_low_pos - braking_margin, 0.0)
+    distance_high = np.maximum(safe_high_pos - current - braking_margin, 0.0)
+    effective_acc = acc_limit * 0.9998
+    effective_vel = vel_limit * 0.99999
+    stop_low = stopping_velocity_limit(distance_low, effective_acc, dt_value)
+    stop_high = stopping_velocity_limit(distance_high, effective_acc, dt_value)
+    accel_step = effective_acc * dt_value
+    interval_low = np.maximum(
+        np.maximum(-effective_vel, velocity - accel_step),
+        np.maximum((safe_low_pos - current) / dt_value, -stop_low),
+    )
+    interval_high = np.minimum(
+        np.minimum(effective_vel, velocity + accel_step),
+        np.minimum((safe_high_pos - current) / dt_value, stop_high),
+    )
+    feasible = bool(np.all(interval_low <= interval_high + 5e-5))
+    interval_mid = 0.5 * (interval_low + interval_high)
+    bounded_low = np.minimum(interval_low, interval_mid)
+    bounded_high = np.maximum(interval_high, interval_mid)
+    position_error = clipped_target - current
+    target_stop_speed = stopping_velocity_limit(
+        np.abs(position_error), effective_acc, dt_value)
+    desired_velocity = np.sign(position_error) * np.minimum(
+        np.abs(position_error) / dt_value, target_stop_speed)
+    next_velocity = np.clip(desired_velocity, bounded_low, bounded_high)
+    next_position = current + next_velocity * dt_value
+    return next_position, next_velocity, interval_low, interval_high, feasible
+
+
+class ServoTargetTrackingPlanner:
+    """Causal stateful simcode4 drive-side position target planner."""
+
+    def __init__(
+        self,
+        initial_cmd_rad,
+        *,
+        dt: float = 0.005,
+        velocity_scale: float = 1.0,
+        acceleration_scale: float = 0.8,
+    ) -> None:
+        self.dt = float(dt)
+        self.velocity_scale = float(velocity_scale)
+        self.acceleration_scale = float(acceleration_scale)
+        if not np.isfinite(self.dt) or self.dt <= 0.0:
+            raise ValueError("dt must be positive and finite")
+        if not 0.0 < self.velocity_scale <= 1.0:
+            raise ValueError("velocity_scale must be in (0, 1]")
+        if not 0.0 < self.acceleration_scale <= 1.0:
+            raise ValueError("acceleration_scale must be in (0, 1]")
+        self.vel_limit_rad_s = np.deg2rad(
+            RightArmCommandSafetyLimiter.VEL_LIMIT_DEG_S
+        ) * self.velocity_scale
+        self.acc_limit_rad_s2 = np.deg2rad(
+            RightArmCommandSafetyLimiter.ACC_LIMIT_DEG_S2
+        ) * self.acceleration_scale
+        self.last_interval_low = np.zeros(7, dtype=np.float64)
+        self.last_interval_high = np.zeros(7, dtype=np.float64)
+        self.last_feasible = True
+        self.reset(initial_cmd_rad)
+
+    def reset(self, current_cmd_rad) -> None:
+        current = np.asarray(current_cmd_rad, dtype=np.float64).reshape(-1)
+        if current.shape != (7,) or not np.all(np.isfinite(current)):
+            raise ValueError("current_cmd_rad must be a finite length-7 array")
+        self.last_cmd = np.clip(
+            current,
+            RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
+            RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
+        )
+        self.last_vel = np.zeros(7, dtype=np.float64)
+
+    def step(self, target_rad) -> np.ndarray:
+        target = np.asarray(target_rad, dtype=np.float64).reshape(-1)
+        if target.shape != (7,) or not np.all(np.isfinite(target)):
+            return self.last_cmd.copy()
+        result = project_target_tracking_command_step(
+            target,
+            self.last_cmd,
+            self.last_vel,
+            RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
+            RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
+            self.vel_limit_rad_s,
+            self.acc_limit_rad_s2,
+            self.dt,
+        )
+        (next_position, next_velocity, self.last_interval_low,
+         self.last_interval_high, self.last_feasible) = result
+        self.last_cmd = np.asarray(next_position, dtype=np.float64)
+        self.last_vel = np.asarray(next_velocity, dtype=np.float64)
+        return self.last_cmd.copy()
+
+
 class RightArmCommandSafetyLimiter:
     """Three-layer (position / velocity / acceleration) safety limiter.
 

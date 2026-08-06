@@ -3,9 +3,12 @@
 <package format="3">
   <name>pingpong_replay</name>
   <version>0.0.0</version>
-  <description>Replay a recorded RL right-arm trajectory (stage4g_action_trace.csv)
-    on the real robot via /mx_mix_command. Supports four input modes:
-    action, angular acceleration (qdd), angular velocity (qvel), and angle (q).</description>
+  <description>Replay recorded RL right-arm trajectories on the real robot via
+    /mx_mix_command. Supports legacy and simcode2/3/4 presets plus
+    action, qdd, qvel, nominal, compensated, and simulation-actual inputs.</description>
+
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>python3-pandas</exec_depend>
   <maintainer email="yjk2261123518@163.com">jacky</maintainer>
   <license>TODO: License declaration</license>
 

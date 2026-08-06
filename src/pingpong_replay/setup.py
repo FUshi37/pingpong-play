@@ -15,8 +15,8 @@ setup(
     zip_safe=True,
     maintainer='jacky',
     maintainer_email='yjk2261123518@163.com',
-    description='Replay recorded RL right-arm trajectory on the real robot '
-                'via /mx_mix_command (action/qdd/qvel/angle input modes).',
+    description='Replay nominal, compensated, or simulation-actual legacy '
+                'and simcode2/3/4 right-arm trajectories.',
     license='TODO: License declaration',
     extras_require={
         'test': [

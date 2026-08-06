@@ -22,7 +22,8 @@ On hardware the delay and lag are physically real, so we do NOT re-simulate
 them.  Each control tick we:
 
   1. take the nominal ``(q_cmd, qdot_cmd, qdd_cmd)`` for this step,
-  2. read the real joint feedback ``applied_q`` from ``/joint_states``,
+  2. provide the feedback state used by the training contract (the shipped
+     simcode3 checkpoint uses the delayed/filter-modelled ``arm_applied_q``),
   3. run the same ``compensate_q_ref`` (inverse_mpc / inverse_smith / lead) to
      get the pre-distorted ``q_ref_latest``,
   4. publish ``q_ref_latest`` and let the real actuator's physical delay + lag
@@ -30,9 +31,9 @@ them.  Each control tick we:
 
 The command buffer is still maintained internally because the inverse-Smith /
 inverse-MPC predictors roll a first-order filter forward over the queued
-commands (``predict_filtered_command_before_delay``) starting from the measured
-``applied_q`` -- i.e. the compensation is closed-loop on the real tracking
-error, which is the whole point.
+commands (``predict_filtered_command_before_delay``).  ``applied_q`` is an
+explicit input so legacy deployments may use encoder feedback while simcode3
+uses the same delayed/filter-modelled state as its training environment.
 
 Defaults below are the values the shipped ``inverse_mpc`` checkpoint was trained
 with (extracted from ``18_stage4g_strong_contact_dr_inverse_mpc.pkl``'s
@@ -61,8 +62,8 @@ class CommandCompensator:
     """Maintain the command buffer and pre-distort each nominal joint command.
 
     One instance is created per replay run. The caller feeds the nominal
-    ``(q_cmd, qdot_cmd, qdd_cmd)`` for the current step together with the latest
-    measured joint position ``applied_q``; :meth:`step` returns the compensated
+    ``(q_cmd, qdot_cmd, qdd_cmd)`` for the current step together with the chosen
+    compensation feedback ``applied_q``; :meth:`step` returns the compensated
     command to publish and advances the internal command buffer exactly as
     ``MJXPolicyController.predict`` does on every tick.
 
@@ -165,6 +166,7 @@ class CommandCompensator:
             0, self.command_buffer_len - 1))
 
         self.command_buffer: Optional[np.ndarray] = None
+        self._applied_q: Optional[np.ndarray] = None
         self._initialized = False
 
     @property
@@ -183,9 +185,65 @@ class CommandCompensator:
             raise ValueError(f"q_init must be a finite length-{self.n_joints} array")
         self.command_buffer = np.broadcast_to(
             q0, (self.command_buffer_len, self.n_joints)).copy()
+        self._applied_q = q0.copy()
         if self._warm_q is None:
             self._warm_q = q0.copy()
         self._initialized = True
+
+    def current_applied_q(self) -> np.ndarray:
+        """Return the previous-tick actuator state used during training."""
+        if not self._initialized or self._applied_q is None:
+            raise RuntimeError("compensator must be reset before reading applied_q")
+        return self._applied_q.copy()
+
+    def observe_applied_state(self, q_applied: np.ndarray) -> None:
+        """Set the modeled state after a downstream drive-side planner.
+
+        Simcode4 computes its FOPDT proposal from the previous planner output,
+        then projects that proposal through the servo trajectory planner.  The
+        projected state—not the unlimited FOPDT proposal—is therefore the
+        causal state for the next tick.  This updates only that state; unlike
+        :meth:`observe_published`, it deliberately leaves the upstream raw
+        compensated-command delay buffer unchanged.
+        """
+        q = np.asarray(q_applied, dtype=np.float32).reshape(-1)
+        if q.shape != (self.n_joints,) or not np.all(np.isfinite(q)):
+            raise ValueError(
+                f"q_applied must be a finite length-{self.n_joints} array")
+        if not self._initialized:
+            self.reset(q)
+            return
+        self._applied_q = self._clip(q).astype(np.float32)
+
+    def advance_applied_model(self) -> np.ndarray:
+        """Advance delayed command + first-order actuator state by one tick.
+
+        Call this after :meth:`observe_published`, so a downstream safety
+        modification replaces the newest queued command before the training
+        plant model is advanced. The returned state is inverse-compensation
+        feedback for the next tick; it is not published to the robot.
+        """
+        if not self._initialized or self.command_buffer is None:
+            raise RuntimeError("compensator must be reset before advancing")
+        assert self._applied_q is not None
+        active_idx = (
+            self.command_buffer_len - 1 - self.delay_steps
+            if self.delay_conditioning else self.command_buffer_len - 1
+        )
+        active_q = self.command_buffer[int(active_idx)]
+        warm = self._warm_q
+        if warm is None:
+            warm = np.zeros((self.n_joints,), dtype=np.float32)
+        gain_target = warm + self.actuator_gain * (active_q - warm)
+        if self.actuator_tau_s <= 1e-6:
+            applied = gain_target
+        else:
+            alpha = self.dt / (self.actuator_tau_s + self.dt)
+            applied = self._applied_q + np.float32(alpha) * (
+                gain_target - self._applied_q)
+        self._applied_q = self._clip(
+            np.asarray(applied, dtype=np.float32)).astype(np.float32)
+        return self._applied_q.copy()
 
     def observe_published(self, q_published: np.ndarray) -> None:
         """Replace the newest buffered reference with what was really sent.
@@ -215,8 +273,8 @@ class CommandCompensator:
         """Return the compensated joint command to publish for this tick.
 
         ``q_cmd`` / ``qdot_cmd`` / ``qdd_cmd`` are the nominal command state for
-        the step (from the recorded trajectory); ``applied_q`` is the latest
-        measured right-arm position. Mirrors the compensate->push sequence in
+        the step (from the recorded trajectory); ``applied_q`` is the selected
+        inverse-model feedback state. Mirrors the compensate->push sequence in
         ``MJXPolicyController.predict`` (lines 942-982). When ``mode == "none"``
         this returns ``q_cmd`` unchanged (only clipping to limits).
         """

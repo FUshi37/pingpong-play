@@ -14,6 +14,7 @@
   <depend>mc_core_interface</depend>
   <depend>python3-numpy</depend>
   <depend>python3-opencv</depend>
+  <depend>python3-yaml</depend>
 
   <!-- Note: ultralytics and pyrealsense2 should be installed via pip -->
   <!-- pip install ultralytics pyrealsense2 -->

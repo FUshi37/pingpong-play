@@ -8,6 +8,7 @@ setup(
     packages=find_packages(exclude=['test']),
     package_data={
         package_name: [
+            'ball_tracker/*.yaml',
             'models/*',
             'output/*',
         ],
@@ -18,7 +19,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools'],
+    install_requires=['setuptools', 'numpy', 'PyYAML'],
     zip_safe=True,
     maintainer='jacky',
     maintainer_email='yjk2261123518@163.com',
@@ -34,6 +35,7 @@ setup(
             'pingpong_node = pingpong_controller.pingpong_node:main',
             'enhanced_trajectory_visualizer = pingpong_controller.enhanced_trajectory_visualizer:main',
             'mocap_calibration = pingpong_controller.mocap_calibration:main',
+            'mocap_ball_state_node = pingpong_controller.mocap_ball_state_node:main',
         ],
     },
 )

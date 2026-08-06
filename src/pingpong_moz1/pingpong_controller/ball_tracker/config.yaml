@@ -1,0 +1,35 @@
+# Hybrid ball state estimator configuration. All values use SI units.
+ball_tracker:
+  gravity_m_s2: [0.0, 0.0, -9.81]
+  # D455 optical-frame uncertainty fitted from the six fixed-racket drop runs
+  # recorded on 2026-07-21. Motion/depth residuals were materially larger than
+  # the former [3, 3, 5] mm assumption, especially around racket occlusion.
+  measurement_std_m: [0.008, 0.012, 0.020]
+  acceleration_process_std_m_s3: [6.0, 6.0, 10.0]
+
+  initial_position_std_m: 0.005
+  initial_velocity_std_m_s: 2.0
+  initial_acceleration_std_m_s2: 2.0
+  # Squared Mahalanobis radius of 6. The detector already performs geometric
+  # outlier rejection; this gate prevents one valid motion frame from starting
+  # the long reject/timeout chain observed with the former 16.27 threshold.
+  innovation_gate_chi2: 36.0
+
+  max_prediction_duration_s: 0.200
+  max_predict_step_s: 0.020
+
+  vertical_axis: 2
+  contact_distance_threshold_m: 0.050
+  contact_candidate_timeout_s: 0.120
+  min_descending_speed_m_s: 0.050
+  impact_delta_velocity_threshold_m_s: 2.0
+  min_post_impact_upward_speed_m_s: 0.150
+  post_impact_velocity_std_m_s: 0.50
+  # Keep the hard-reset state active across several 60 Hz frames so the same
+  # shallow rebound is not counted twice while the velocity estimate settles.
+  post_impact_mode_duration_s: 0.080
+
+  impact_prediction_max_time_s: 0.600
+  impact_min_approach_speed_m_s: 0.010
+  impact_plane_tolerance_m: 0.00001
+  covariance_eigenvalue_floor: 1.0e-12

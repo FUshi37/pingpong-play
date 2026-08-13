@@ -43,6 +43,113 @@ class HybridBallDetector:
     3. 如果YOLO失败 → 回退到全图IR检测（容错）
     """
 
+    # Adaptive ranging keeps stereo authoritative at every distance. Geometry
+    # is only a weak anomaly reference/fallback; it is never selected merely
+    # because the ball is close to the camera.
+    ADAPTIVE_SENSOR_JUMP_MM = 200.0
+    ADAPTIVE_SENSOR_MAX_MM = 1000.0
+    ADAPTIVE_SENSOR_GEOMETRY_GAP_MM = 300.0
+    # Independent scale-consistency guard.  The morphology ellipse radius is
+    # measured from the IR image, while the projected radius is implied by the
+    # stereo sensor depth.  A large relative mismatch means the selected
+    # stereo surface is unlikely to belong to the detected ball.
+    ADAPTIVE_SENSOR_RADIUS_MISMATCH_RATIO = 0.22
+    # The D455 can enter a near-range floor before it produces the large jump
+    # caught above.  Detect that precursor from three causal camera frames:
+    # stereo remains almost stationary while two independent image cues say
+    # the rapidly rising ball is still approaching.  Three 90 Hz frames span
+    # only about 22 ms, short enough for a sub-second juggling flight, while
+    # the image-speed condition avoids mistaking the real trajectory apex for
+    # a depth plateau.
+    ADAPTIVE_NEAR_FIELD_WINDOW_FRAMES = 3
+    ADAPTIVE_NEAR_FIELD_MAX_SENSOR_MM = 400.0
+    ADAPTIVE_NEAR_FIELD_MAX_SENSOR_APPROACH_MM = 8.0
+    ADAPTIVE_NEAR_FIELD_MIN_GEOMETRY_APPROACH_MM = 12.0
+    ADAPTIVE_NEAR_FIELD_MIN_RADIUS_GROWTH_RATIO = 0.05
+    ADAPTIVE_NEAR_FIELD_MIN_UPWARD_PIXEL_SPEED_PX_S = 500.0
+    ADAPTIVE_NEAR_FIELD_MAX_WINDOW_S = 0.050
+    ADAPTIVE_SENSOR_RECOVERY_FRAMES = 2
+    ADAPTIVE_PREDICTION_MAX_S = 0.20
+    ADAPTIVE_MAX_DEPTH_SPEED_MM_S = 10000.0
+    ADAPTIVE_GEOMETRY_CORRECTION_GAIN = 0.25
+    ADAPTIVE_GEOMETRY_CORRECTION_LIMIT_MM = 120.0
+
+    # Robot-attached, fixed-ball calibration (30 independent racket poses,
+    # 2026-08-12).  RealSense returns the first stereo surface on the ball,
+    # while backprojection needs the optical-axis depth of the ball centre.
+    # The fitted offset varies mildly with range, so use a bounded affine
+    # model instead of blindly adding the nominal 20 mm physical radius.
+    # Clamping the calibration input keeps out-of-range behaviour continuous
+    # and prevents extrapolation from creating a large correction.
+    SENSOR_CENTER_DEPTH_REFERENCE_MM = 500.0
+    SENSOR_CENTER_DEPTH_INTERCEPT_MM = 14.96392834
+    SENSOR_CENTER_DEPTH_SLOPE_PER_100_MM = -1.99083073
+    SENSOR_CENTER_DEPTH_VALID_MIN_MM = 328.0
+    SENSOR_CENTER_DEPTH_VALID_MAX_MM = 682.0
+
+    # Optional observation-quality experiments.  These constants intentionally
+    # stay conservative and live in detector/output units (mm, mm/s).  All
+    # associated features default off so the legacy camera path is bit-for-bit
+    # selected unless an operator enables a switch.
+    MOTION_GATE_XY_BASE_MM = 50.0
+    # At 90 Hz, normal depth/transform noise is far below 50 mm.  The previous
+    # 80 mm base admitted the 85 mm late-frame vertical innovation in recording
+    # 20260812_152353, which then pulled the launch fit from about 2.7 m/s down
+    # to 1.2 m/s.  The time allowance below still covers model acceleration.
+    MOTION_GATE_Z_BASE_MM = 50.0
+    MOTION_GATE_REACQUISITION_MM = 120.0
+    MOTION_GATE_MAX_DT_S = 0.080
+    # A short camera/depth gap must not disable the gate.  Beyond this
+    # horizon the old ballistic state is too stale to be authoritative, so
+    # reacquisition is confirmed by two mutually-consistent fresh 3D points.
+    MOTION_GATE_MAX_REACQUISITION_DT_S = 0.45
+    MOTION_REACQUISITION_CONFIRM_MAX_GAP_S = 0.050
+    MOTION_GATE_MAX_SPEED_MM_S = 6000.0
+    PHYSICS_VELOCITY_MIN_FRAMES = 5
+    PHYSICS_VELOCITY_GRAVITY_MM_S2 = 9800.0
+    PHYSICS_VELOCITY_MAX_GAP_S = 0.050
+    # The free-flight fit is also used as a low-latency endpoint position
+    # smoother.  It evaluates the fitted trajectory at the newest timestamp,
+    # rather than averaging old positions, so it does not add a half-window
+    # phase delay.  The correction cap protects the policy from a bad fit.
+    TRAJECTORY_POSITION_MAX_CORRECTION_MM = 12.0
+    # The fitted endpoint correction may change sign between adjacent camera
+    # frames.  Bounding each correction only against the raw point permits a
+    # 24 mm correction swing on top of real motion, so cap the final published
+    # endpoint against the previous published endpoint as well.  This is an
+    # output-continuity guard, not a second measurement gate.
+    TRAJECTORY_POSITION_MAX_OUTPUT_SPEED_MM_S = 6000.0
+    FLIGHT_VELOCITY_UPDATE_GAIN = 0.65
+    FLIGHT_VELOCITY_MAX_CORRECTION_MM_S = 450.0
+    # Small fit residuals are dominated by depth/centroid noise and should not
+    # receive the same gain as a genuine model mismatch.  Ramp causally to the
+    # established 0.65 gain so fast flight/reacquisition keeps its response.
+    # Kept as an offline tuning hook.  The three-day real corpus showed that
+    # residual-dependent gain slightly increased p95 velocity error, so the
+    # production default remains the fixed, validated gain.
+    FLIGHT_VELOCITY_ADAPTIVE_GAIN_ENABLED = False
+    FLIGHT_VELOCITY_MIN_UPDATE_GAIN = 0.35
+    FLIGHT_VELOCITY_FULL_GAIN_RESIDUAL_MM_S = 650.0
+    # A supported ball is not in free fall.  With a fresh racket pose the
+    # relative ball/racket motion is authoritative; the tighter no-racket
+    # fallback is used by offline tests and stand-alone detector tools.
+    SUPPORTED_RACKET_DISTANCE_MM = 80.0
+    SUPPORTED_RELATIVE_SPEED_MM_S = 450.0
+    SUPPORTED_NO_RACKET_SPAN_MM = 1.5
+    SUPPORTED_NO_RACKET_SPEED_MM_S = 80.0
+    RACKET_STATE_MAX_AGE_S = 0.080
+    RACKET_STATE_FALLBACK_MAX_AGE_S = 0.250
+    # Impact reset is deliberately two-phase.  A single noisy positive dz is
+    # only a candidate; a second fresh rising sample confirms the impossible
+    # ballistic reversal before pre-impact history is discarded.
+    IMPACT_CONFIRM_MAX_GAP_S = 0.035
+    IMPACT_CONFIRM_MIN_TOTAL_RISE_MM = 4.0
+    IMPACT_MAX_RACKET_DISTANCE_MM = 120.0
+    IMPACT_CONFIRM_MAX_RACKET_DISTANCE_MM = 150.0
+    IMPACT_RECENT_RACKET_DISTANCE_MM = 180.0
+    IMPACT_NO_RACKET_THRESHOLD_SCALE = 1.50
+    IR_CONTOUR_EDGE_MARGIN_PX = 1.0
+
     def __init__(self,
                  yolo_model_path,
                  ball_diameter_mm=40.0,
@@ -73,6 +180,7 @@ class HybridBallDetector:
                  print_every=10,
                  offline_camera_params: Optional[dict] = None,
                  depth_mode='sensor',
+                 sensor_surface_to_center_depth_enabled=False,
                  pixel_kalman_enabled=True,
                  pixel_kalman_process_noise_pos=0.3,
                  pixel_kalman_process_noise_vel=3.0,
@@ -82,6 +190,17 @@ class HybridBallDetector:
                  ir_depth_kalman_enabled=False,
                  synchronized_depth_enabled=False,
                  depth_temporal_window_frames=5,
+                 velocity_least_squares_enabled=True,
+                 velocity_window_frames=3,
+                 clear_buffers_on_detection_loss_enabled=False,
+                 motion_consistency_gate_enabled=False,
+                 physics_constrained_velocity_enabled=False,
+                 trajectory_position_smoothing_enabled=False,
+                 impact_velocity_reset_enabled=True,
+                 impact_min_downward_velocity_m_s=0.25,
+                 impact_min_upward_velocity_m_s=0.25,
+                 impact_min_velocity_jump_m_s=0.80,
+                 impact_refractory_s=0.08,
                  candidate_filter_enabled=True,
                  candidate_min_brightness=23000.0,
                  candidate_max_depth_disagreement_mm=180.0,
@@ -109,6 +228,8 @@ class HybridBallDetector:
         self.depth_scale = depth_scale
         self.depth_neighborhood_px = depth_neighborhood_px
         self.depth_mode = self._normalize_depth_mode(depth_mode)
+        self.sensor_surface_to_center_depth_enabled = bool(
+            sensor_surface_to_center_depth_enabled)
         self.print_every = print_every
         self.pixel_kalman_enabled = bool(pixel_kalman_enabled)
         self.pixel_kalman_process_noise_pos = max(
@@ -126,6 +247,31 @@ class HybridBallDetector:
         self.depth_temporal_window_frames = (
             self._normalize_depth_temporal_window(
                 depth_temporal_window_frames))
+        self.velocity_least_squares_enabled = bool(
+            velocity_least_squares_enabled)
+        self.velocity_window_frames = self._normalize_velocity_window(
+            velocity_window_frames)
+        self.clear_buffers_on_detection_loss_enabled = bool(
+            clear_buffers_on_detection_loss_enabled)
+        self.motion_consistency_gate_enabled = bool(
+            motion_consistency_gate_enabled)
+        self.physics_constrained_velocity_enabled = bool(
+            physics_constrained_velocity_enabled)
+        self.trajectory_position_smoothing_enabled = bool(
+            trajectory_position_smoothing_enabled)
+        self.impact_velocity_reset_enabled = bool(
+            impact_velocity_reset_enabled)
+        self.impact_min_downward_velocity_mm_s = 1000.0 * max(
+            0.0, float(impact_min_downward_velocity_m_s))
+        self.impact_min_upward_velocity_mm_s = 1000.0 * max(
+            0.0, float(impact_min_upward_velocity_m_s))
+        self.impact_min_velocity_jump_mm_s = 1000.0 * max(
+            0.0, float(impact_min_velocity_jump_m_s))
+        self.impact_refractory_s = max(
+            0.0, float(impact_refractory_s))
+        self.last_velocity_impact_time = None
+        self.last_velocity_impact_detected = False
+        self.last_velocity_ready = False
         self.candidate_filter_enabled = bool(candidate_filter_enabled)
         self.candidate_min_brightness = max(
             0.0, float(candidate_min_brightness))
@@ -439,7 +585,47 @@ class HybridBallDetector:
     @staticmethod
     def _normalize_depth_mode(mode):
         value = str(mode).strip().lower()
-        return value if value in ('sensor', 'geometry') else 'sensor'
+        return value if value in ('sensor', 'geometry', 'adaptive') else 'sensor'
+
+    def _reset_adaptive_depth_state(self):
+        """Reset trusted-sensor history and anomaly recovery state."""
+        self.depth_mode = self._normalize_depth_mode(
+            getattr(self, 'depth_mode', 'sensor'))
+        self.adaptive_sensor_history = deque(maxlen=3)
+        self.adaptive_near_field_history = deque(
+            maxlen=self.ADAPTIVE_NEAR_FIELD_WINDOW_FRAMES - 1)
+        self.adaptive_sensor_anomaly_active = False
+        self.adaptive_sensor_recovery_count = 0
+        self.adaptive_last_raw_sensor_mm = None
+        self.adaptive_frame_index = 0
+        self.adaptive_last_geometry_mm = None
+        self.adaptive_last_output_depth_mm = None
+        self._pending_adaptive_sensor_sample = None
+        self._pending_adaptive_near_field_sample = None
+        self._pending_adaptive_state_snapshot = None
+        self.last_depth_selection = {
+            'mode': self.depth_mode,
+            'method': None,
+            'sensor_weight': None,
+            'disagreement_mm': None,
+            'sensor_rejected': False,
+            'rejection_reason': None,
+            'sensor_jump_mm': None,
+            'observed_radius_px': None,
+            'sensor_projected_radius_px': None,
+            'radius_mismatch_ratio': None,
+            'near_field_scale_stall': False,
+            'near_field_window_samples': 0,
+            'near_field_window_span_s': None,
+            'near_field_sensor_approach_mm': None,
+            'near_field_geometry_approach_mm': None,
+            'near_field_radius_growth_ratio': None,
+            'near_field_upward_pixel_speed_px_s': None,
+            'prediction_mm': None,
+            'prediction_residual_mm': None,
+            'prediction_horizon_s': None,
+            'sensor_recovery_count': 0,
+        }
 
     def set_depth_mode(self, mode):
         """Change the preferred depth source without rebuilding the camera."""
@@ -454,6 +640,80 @@ class HybridBallDetector:
         depth_history = getattr(self, 'depth_history', None)
         if depth_history is not None:
             depth_history.clear()
+        self._reset_adaptive_depth_state()
+
+    def configure_sensor_surface_to_center_depth(self, *, enabled):
+        """Toggle calibrated stereo surface-to-ball-centre reconstruction.
+
+        Raw stereo depth remains unchanged for anomaly guards, adaptive-depth
+        recovery, and temporal depth history.  Only a trusted sensor-derived
+        depth is corrected immediately before 3D backprojection.  Clearing
+        downstream 3D state on a live toggle prevents the intentional depth
+        step from being interpreted as ball velocity or a motion outlier.
+        """
+        enabled = bool(enabled)
+        if enabled == self.sensor_surface_to_center_depth_enabled:
+            return
+        self.sensor_surface_to_center_depth_enabled = enabled
+        depth_history = getattr(self, 'depth_history', None)
+        if depth_history is not None:
+            depth_history.clear()
+        ir_depth_kf = getattr(self, 'ir_depth_kf', None)
+        if ir_depth_kf is not None:
+            ir_depth_kf.reset()
+        self.position_history = deque(maxlen=self._velocity_history_maxlen())
+        self._reset_velocity_tracking_state()
+        self.motion_last_trusted_time = None
+        self.motion_last_trusted_position = None
+        self.motion_last_trusted_velocity = None
+        self.motion_last_innovation_mm = None
+        self.motion_last_gate_reason = None
+        self.observation_gap_active = True
+        # This toggle deliberately preserves 2D tracking.  Therefore do not
+        # claim that the full loss-buffer clear already ran: if the following
+        # frame is actually lost, the configured clear-on-loss path must still
+        # be allowed to clear pixel/candidate state.
+        self.observation_buffers_cleared_for_gap = False
+        self.motion_reacquisition_candidates.clear()
+        self.motion_reacquisition_seed = None
+
+    def _sensor_surface_to_center_depth(self, depth_mm, depth_method):
+        """Return final reconstruction depth and auditable diagnostics."""
+        surface_depth_mm = float(depth_mm)
+        sensor_derived = str(depth_method or '') in {
+            'sensor', 'adaptive_sensor'}
+        diagnostics = {
+            'sensor_surface_to_center_depth_enabled': bool(
+                self.sensor_surface_to_center_depth_enabled),
+            'sensor_surface_to_center_depth_applied': False,
+            'sensor_surface_depth_mm': (
+                surface_depth_mm if sensor_derived else None),
+            'sensor_center_depth_mm': None,
+            'sensor_center_depth_correction_mm': None,
+            'sensor_center_depth_calibration_clamped': False,
+        }
+        if (not self.sensor_surface_to_center_depth_enabled
+                or not sensor_derived):
+            return surface_depth_mm, diagnostics
+
+        calibration_depth_mm = float(np.clip(
+            surface_depth_mm,
+            self.SENSOR_CENTER_DEPTH_VALID_MIN_MM,
+            self.SENSOR_CENTER_DEPTH_VALID_MAX_MM))
+        correction_mm = (
+            self.SENSOR_CENTER_DEPTH_INTERCEPT_MM
+            + self.SENSOR_CENTER_DEPTH_SLOPE_PER_100_MM
+            * (calibration_depth_mm
+               - self.SENSOR_CENTER_DEPTH_REFERENCE_MM) / 100.0)
+        center_depth_mm = surface_depth_mm + correction_mm
+        diagnostics.update({
+            'sensor_surface_to_center_depth_applied': True,
+            'sensor_center_depth_mm': float(center_depth_mm),
+            'sensor_center_depth_correction_mm': float(correction_mm),
+            'sensor_center_depth_calibration_clamped': bool(
+                calibration_depth_mm != surface_depth_mm),
+        })
+        return float(center_depth_mm), diagnostics
 
     def configure_pixel_kalman(
             self, *, enabled, process_noise_pos, process_noise_vel,
@@ -507,6 +767,158 @@ class HybridBallDetector:
             self.depth_history = deque(
                 maxlen=self.depth_temporal_window_frames)
             self.position_history.clear()
+            self._reset_velocity_tracking_state()
+
+    @staticmethod
+    def _normalize_velocity_window(value):
+        return max(2, min(9, int(value)))
+
+    def configure_velocity_estimation(
+            self, *, least_squares_enabled, window_frames,
+            impact_reset_enabled, impact_min_downward_velocity_m_s,
+            impact_min_upward_velocity_m_s,
+            impact_min_velocity_jump_m_s, impact_refractory_s):
+        """Apply the camera velocity estimator contract at frame boundary.
+
+        A configuration change clears the old samples so a live web update
+        cannot combine positions produced under two different estimators.
+        Thresholds enter the public API in m/s while detector positions and
+        returned velocities use millimetres and mm/s.
+        """
+        least_squares_enabled = bool(least_squares_enabled)
+        window_frames = self._normalize_velocity_window(window_frames)
+        impact_reset_enabled = bool(impact_reset_enabled)
+        min_down = 1000.0 * max(
+            0.0, float(impact_min_downward_velocity_m_s))
+        min_up = 1000.0 * max(
+            0.0, float(impact_min_upward_velocity_m_s))
+        min_jump = 1000.0 * max(
+            0.0, float(impact_min_velocity_jump_m_s))
+        refractory_s = max(0.0, float(impact_refractory_s))
+        changed = (
+            least_squares_enabled != self.velocity_least_squares_enabled
+            or window_frames != self.velocity_window_frames
+            or impact_reset_enabled != self.impact_velocity_reset_enabled
+            or min_down != self.impact_min_downward_velocity_mm_s
+            or min_up != self.impact_min_upward_velocity_mm_s
+            or min_jump != self.impact_min_velocity_jump_mm_s
+            or refractory_s != self.impact_refractory_s)
+        self.velocity_least_squares_enabled = least_squares_enabled
+        self.velocity_window_frames = window_frames
+        self.impact_velocity_reset_enabled = impact_reset_enabled
+        self.impact_min_downward_velocity_mm_s = min_down
+        self.impact_min_upward_velocity_mm_s = min_up
+        self.impact_min_velocity_jump_mm_s = min_jump
+        self.impact_refractory_s = refractory_s
+        if changed:
+            self.position_history = deque(maxlen=self._velocity_history_maxlen())
+            self.last_velocity_impact_time = None
+            self.last_velocity_impact_detected = False
+            self._reset_velocity_tracking_state()
+
+    def configure_observation_quality(
+            self, *, clear_buffers_on_detection_loss_enabled,
+            motion_consistency_gate_enabled,
+            physics_constrained_velocity_enabled,
+            trajectory_position_smoothing_enabled=False):
+        """Apply opt-in camera observation-quality experiments atomically."""
+        clear_on_loss = bool(clear_buffers_on_detection_loss_enabled)
+        motion_gate = bool(motion_consistency_gate_enabled)
+        physics_velocity = bool(physics_constrained_velocity_enabled)
+        trajectory_position_smoothing = bool(
+            trajectory_position_smoothing_enabled)
+        changed = (
+            clear_on_loss != self.clear_buffers_on_detection_loss_enabled
+            or motion_gate != self.motion_consistency_gate_enabled
+            or physics_velocity != self.physics_constrained_velocity_enabled
+            or trajectory_position_smoothing
+            != self.trajectory_position_smoothing_enabled)
+        self.clear_buffers_on_detection_loss_enabled = clear_on_loss
+        self.motion_consistency_gate_enabled = motion_gate
+        self.physics_constrained_velocity_enabled = physics_velocity
+        self.trajectory_position_smoothing_enabled = (
+            trajectory_position_smoothing)
+        if changed:
+            self.position_history = deque(maxlen=self._velocity_history_maxlen())
+            self.last_velocity_impact_time = None
+            self.last_velocity_impact_detected = False
+            self._reset_velocity_tracking_state()
+            self.motion_last_trusted_time = None
+            self.motion_last_trusted_position = None
+            self.motion_last_trusted_velocity = None
+            self.motion_last_innovation_mm = None
+            self.motion_last_gate_reason = None
+            self.observation_gap_active = False
+            self.observation_buffers_cleared_for_gap = False
+            self.motion_reacquisition_candidates.clear()
+            self.motion_reacquisition_seed = None
+
+    def _velocity_history_maxlen(self):
+        if getattr(self, 'physics_constrained_velocity_enabled', False):
+            return max(
+                int(self.velocity_window_frames),
+                int(self.PHYSICS_VELOCITY_MIN_FRAMES))
+        return int(self.velocity_window_frames)
+
+    def _reset_velocity_tracking_state(self):
+        """Reset one causal motion segment without resetting diagnostics."""
+        self.last_velocity_ready = False
+        self.velocity_motion_state = 'initializing'
+        self.velocity_model = 'unready'
+        self.pending_impact = None
+        self.post_impact_lateral_prior = None
+        self.last_velocity_output = np.zeros(3, dtype=np.float64)
+        self.last_velocity_output_time = None
+        self.velocity_restart_reference_time = None
+        self.velocity_restart_reference_velocity = None
+        self.last_velocity_restart_bridge_used = False
+        self.last_position_estimate = None
+        self.last_position_filter_residual_mm = None
+        self.last_velocity_filter_correction_mm_s = None
+        self.last_impact_racket_distance_mm = None
+        self.last_impact_racket_gate_used = False
+        self.last_impact_racket_state_age_s = None
+        self.last_impact_candidate_rejection_reason = None
+        self.last_impact_pair_vertical_velocity_mm_s = None
+        self.last_impact_previous_vertical_velocity_mm_s = None
+        self.last_impact_evidence_source = None
+
+    def set_racket_state(self, position_m, timestamp_s=None):
+        """Publish the latest racket centre for optional contact validation.
+
+        The detector runs in a camera thread while robot kinematics are
+        updated by the control thread.  Replacing one immutable tuple keeps
+        this hand-off lock-free.  Racket information is used only when the
+        detector output is already in ``base_link``; trajectory reversal still
+        provides a stand-alone fallback for offline tools.
+        """
+        if getattr(self, 'output_frame', 'base_link') != 'base_link':
+            self.latest_racket_state = None
+            return
+        try:
+            position_mm = (
+                np.asarray(position_m, dtype=np.float64).reshape(3) * 1000.0)
+            stamp = time.time() if timestamp_s is None else float(timestamp_s)
+        except (TypeError, ValueError):
+            return
+        if not np.all(np.isfinite(position_mm)) or not math.isfinite(stamp):
+            return
+        previous = getattr(self, 'latest_racket_state', None)
+        velocity_mm_s = np.zeros(3, dtype=np.float64)
+        if previous is not None:
+            dt = float(stamp - previous[0])
+            if 1.0e-4 < dt <= 0.10:
+                velocity_mm_s = (position_mm - previous[1]) / dt
+                speed = float(np.linalg.norm(velocity_mm_s))
+                if speed > self.MOTION_GATE_MAX_SPEED_MM_S:
+                    velocity_mm_s *= (
+                        self.MOTION_GATE_MAX_SPEED_MM_S / speed)
+        self.latest_racket_state = (
+            stamp, position_mm.copy(), velocity_mm_s.copy())
+
+    def clear_racket_state(self):
+        """Invalidate contact geometry when current racket FK is unavailable."""
+        self.latest_racket_state = None
 
     def _check_cuda(self):
         """检查CUDA是否可用"""
@@ -518,6 +930,16 @@ class HybridBallDetector:
 
     def _init_runtime_state(self):
         """初始化在线/离线共享的运行时状态（计数、队列、深度门等）。"""
+        self.sensor_surface_to_center_depth_enabled = bool(getattr(
+            self, 'sensor_surface_to_center_depth_enabled', False))
+        self.clear_buffers_on_detection_loss_enabled = bool(getattr(
+            self, 'clear_buffers_on_detection_loss_enabled', False))
+        self.motion_consistency_gate_enabled = bool(getattr(
+            self, 'motion_consistency_gate_enabled', False))
+        self.physics_constrained_velocity_enabled = bool(getattr(
+            self, 'physics_constrained_velocity_enabled', False))
+        self.trajectory_position_smoothing_enabled = bool(getattr(
+            self, 'trajectory_position_smoothing_enabled', False))
         # 状态
         self.frame_count = 0
         self.last_yolo_bbox = None  # 最近的YOLO bbox
@@ -534,6 +956,8 @@ class HybridBallDetector:
         self.ir_detections = 0
         self.hybrid_detections = 0
         self.fallback_detections = 0
+        self.ir_edge_rejected_count = 0
+        self.ir_roi_edge_rejected_count = 0
 
         self.fps_queue = deque(maxlen=30)
         self.yolo_time_queue = deque(maxlen=10)
@@ -545,7 +969,17 @@ class HybridBallDetector:
         self.color_last_timestamp_ms = None
         self.color_fps_queue = deque(maxlen=60)
 
-        self.position_history = deque(maxlen=5)
+        self.position_history = deque(maxlen=self._velocity_history_maxlen())
+        self._reset_velocity_tracking_state()
+        self.velocity_restart_bridge_count = 0
+        self.last_velocity_impact_time = None
+        self.last_velocity_impact_detected = False
+        self.velocity_impact_confirmed_count = 0
+        self.velocity_impact_rejected_count = 0
+        self.velocity_impact_candidate_count = 0
+        self.impact_racket_gate_required = bool(getattr(
+            self, 'impact_racket_gate_required', False))
+        self.latest_racket_state = None
         self.last_observation_time = None
         self.candidate_position_history = deque(maxlen=2)
         self.candidate_filter_stats = {
@@ -559,6 +993,20 @@ class HybridBallDetector:
 
         # 像素坐标历史（用于平滑可视化）
         self.pixel_history = deque(maxlen=5)  # (cx, cy, radius)
+        self.observation_gap_active = False
+        self.observation_buffers_cleared_for_gap = False
+        self.observation_buffer_clear_count = 0
+        self.motion_last_trusted_time = None
+        self.motion_last_trusted_position = None
+        self.motion_last_trusted_velocity = None
+        self.motion_last_innovation_mm = None
+        self.motion_last_gate_reason = None
+        self.motion_gate_accepted_count = 0
+        self.motion_gate_rejected_count = 0
+        self.motion_impact_confirmation_bypass_count = 0
+        self.motion_impact_candidate_bypass_count = 0
+        self.motion_reacquisition_candidates = deque(maxlen=2)
+        self.motion_reacquisition_seed = None
 
         # 2D像素卡尔曼滤波器（核心平滑机制）
         # 参数调优：静止球高稳定性，运动球低延迟
@@ -578,6 +1026,7 @@ class HybridBallDetector:
         # fallback only because the morphology radius follows a projector-dot
         # blob rather than the physical ball boundary.
         self.depth_source_state = 'sensor'
+        self._reset_adaptive_depth_state()
 
         # FPS calculation uses the RealSense hardware frame timestamp.
         self.last_frame_timestamp = None
@@ -586,6 +1035,10 @@ class HybridBallDetector:
         # and offline detection paths.
         self.background_intensity = None
         self.depth_correction_model = None
+        self.depth_correction_model_error = None
+        self._pending_adaptive_sensor_sample = None
+        self._pending_adaptive_near_field_sample = None
+        self._pending_adaptive_state_snapshot = None
         # self.depth_correction_model_path is set at the start of __init__.
         self._load_depth_correction_model(self.depth_correction_model_path)
 
@@ -683,18 +1136,32 @@ class HybridBallDetector:
                 stats['rejected_brightness'] += 1
                 continue
 
+            geom_depth_raw_mm = self._geometry_depth_mm(
+                candidate.get('geometry_radius_px', candidate['radius']))
+            geom_depth_corrected_mm = self._apply_depth_correction(
+                geom_depth_raw_mm)
+            # Keep the adaptive anomaly guard on the calibrated pinhole
+            # quantity used by the existing experiments.  Correction models
+            # are applied only when geometry is explicitly selected; this
+            # prevents an old morphology-specific model from silently moving
+            # the independent sensor-validity threshold.
+            geom_depth_mm = (
+                geom_depth_corrected_mm
+                if self.depth_mode == 'geometry'
+                else geom_depth_raw_mm)
             sensor_depth_mm = self._get_depth_from_depthmap(
                 candidate['cx'], candidate['cy'], depth_image,
-                candidate.get('mask'), candidate.get('mask_origin'))
-            geom_depth_mm = self._apply_depth_correction(
-                self._geometry_depth_mm(candidate['radius']))
+                candidate.get('mask'), candidate.get('mask_origin'),
+                prefer_near_surface=(self.depth_mode == 'adaptive'),
+                geometry_hint_mm=geom_depth_mm)
             depth_disagreement_mm = None
             if sensor_depth_mm is not None and geom_depth_mm is not None:
                 depth_disagreement_mm = abs(
                     float(sensor_depth_mm) - float(geom_depth_mm))
                 if (self.candidate_max_depth_disagreement_mm > 0.0
                         and depth_disagreement_mm
-                        > self.candidate_max_depth_disagreement_mm):
+                        > self.candidate_max_depth_disagreement_mm
+                        and self.depth_mode != 'adaptive'):
                     stats['rejected_depth'] += 1
                     continue
 
@@ -728,6 +1195,9 @@ class HybridBallDetector:
             enriched['selection_motion_distance_px'] = motion_distance_px
             enriched['selection_sensor_depth_mm'] = sensor_depth_mm
             enriched['selection_geom_depth_mm'] = geom_depth_mm
+            enriched['selection_geom_depth_raw_mm'] = geom_depth_raw_mm
+            enriched['selection_geom_depth_corrected_mm'] = (
+                geom_depth_corrected_mm)
             enriched['selection_depth_disagreement_mm'] = depth_disagreement_mm
             accepted.append(enriched)
 
@@ -747,12 +1217,33 @@ class HybridBallDetector:
             try:
                 with open(model_path, 'rb') as f:
                     self.depth_correction_model = pickle.load(f)
+                if not isinstance(self.depth_correction_model, dict):
+                    raise ValueError('depth correction model must be a dict')
+                model_type = self.depth_correction_model.get('type')
+                if model_type not in {
+                        'linear', 'polynomial', 'piecewise_linear'}:
+                    raise ValueError(
+                        f'unsupported depth correction model: {model_type}')
+                # Exercise the schema while loading.  The deployed model is
+                # piecewise-linear; the old runtime printed it as loaded but
+                # silently returned the uncorrected value for every frame.
+                probe = self._apply_depth_correction(500.0)
+                if probe is None or not np.isfinite(probe) or probe <= 0.0:
+                    raise ValueError('depth correction model produced invalid depth')
                 print(f"✓ 加载深度校正模型: {model_path}")
-                print(f"  模型类型: {self.depth_correction_model['type']}")
-                print(f"  训练误差: {self.depth_correction_model['error']:.1f}mm")
-                print(f"  训练样本: {self.depth_correction_model['n_samples']}个")
+                print(f"  模型类型: {model_type}")
+                if self.depth_correction_model.get('error') is not None:
+                    print(
+                        f"  训练误差: "
+                        f"{float(self.depth_correction_model['error']):.1f}mm")
+                if self.depth_correction_model.get('n_samples') is not None:
+                    print(
+                        f"  训练样本: "
+                        f"{int(self.depth_correction_model['n_samples'])}个")
+                self.depth_correction_model_error = None
             except Exception as e:
                 print(f"⚠️  加载深度校正模型失败: {e}")
+                self.depth_correction_model_error = str(e)
                 self.depth_correction_model = None
         else:
             print(f"  未找到深度校正模型: {model_path}")
@@ -763,18 +1254,34 @@ class HybridBallDetector:
             return depth_raw_mm
 
         model = self.depth_correction_model
-        if model['type'] == 'linear':
-            # depth_corrected = scale * depth_raw + offset
+        try:
+            depth = float(depth_raw_mm)
             params = model['params']
-            return depth_raw_mm * params['scale'] + params['offset']
-        elif model['type'] == 'polynomial':
-            # depth_corrected = a*depth^2 + b*depth + c
-            params = model['params']
-            return (params['a'] * depth_raw_mm**2 +
-                   params['b'] * depth_raw_mm +
-                   params['c'])
-        else:
+            if model['type'] == 'linear':
+                corrected = depth * float(params['scale']) + float(
+                    params['offset'])
+            elif model['type'] == 'polynomial':
+                corrected = (
+                    float(params['a']) * depth ** 2
+                    + float(params['b']) * depth
+                    + float(params['c']))
+            elif model['type'] == 'piecewise_linear':
+                branch = (
+                    params['near']
+                    if depth <= float(params['breakpoint'])
+                    else params['far'])
+                corrected = (
+                    depth * float(branch['scale'])
+                    + float(branch['offset']))
+            else:
+                return depth_raw_mm
+            if np.isfinite(corrected) and corrected > 0.0:
+                return float(corrected)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            # A calibration file is optional.  A malformed one must never
+            # turn an otherwise finite geometry observation into NaN.
             return depth_raw_mm
+        return depth_raw_mm
 
     @staticmethod
     def _rs_intrinsics_to_dict(intr):
@@ -851,6 +1358,46 @@ class HybridBallDetector:
             # 深度：邻域采样半径 + 单目几何深度校正模型路径。
             'depth_neighborhood_px': int(self.depth_neighborhood_px),
             'depth_mode': str(self.depth_mode),
+            'sensor_surface_to_center_depth': {
+                'enabled': bool(
+                    self.sensor_surface_to_center_depth_enabled),
+                'reference_mm': float(
+                    self.SENSOR_CENTER_DEPTH_REFERENCE_MM),
+                'intercept_mm': float(
+                    self.SENSOR_CENTER_DEPTH_INTERCEPT_MM),
+                'slope_per_100_mm': float(
+                    self.SENSOR_CENTER_DEPTH_SLOPE_PER_100_MM),
+                'valid_min_mm': float(
+                    self.SENSOR_CENTER_DEPTH_VALID_MIN_MM),
+                'valid_max_mm': float(
+                    self.SENSOR_CENTER_DEPTH_VALID_MAX_MM),
+            },
+            'adaptive_depth': {
+                'sensor_jump_mm': float(self.ADAPTIVE_SENSOR_JUMP_MM),
+                'sensor_max_mm': float(self.ADAPTIVE_SENSOR_MAX_MM),
+                'sensor_geometry_gap_mm': float(
+                    self.ADAPTIVE_SENSOR_GEOMETRY_GAP_MM),
+                'sensor_radius_mismatch_ratio': float(
+                    self.ADAPTIVE_SENSOR_RADIUS_MISMATCH_RATIO),
+                'near_field_window_frames': int(
+                    self.ADAPTIVE_NEAR_FIELD_WINDOW_FRAMES),
+                'near_field_max_sensor_mm': float(
+                    self.ADAPTIVE_NEAR_FIELD_MAX_SENSOR_MM),
+                'near_field_max_sensor_approach_mm': float(
+                    self.ADAPTIVE_NEAR_FIELD_MAX_SENSOR_APPROACH_MM),
+                'near_field_min_geometry_approach_mm': float(
+                    self.ADAPTIVE_NEAR_FIELD_MIN_GEOMETRY_APPROACH_MM),
+                'near_field_min_radius_growth_ratio': float(
+                    self.ADAPTIVE_NEAR_FIELD_MIN_RADIUS_GROWTH_RATIO),
+                'near_field_min_upward_pixel_speed_px_s': float(
+                    self.ADAPTIVE_NEAR_FIELD_MIN_UPWARD_PIXEL_SPEED_PX_S),
+                'near_field_max_window_s': float(
+                    self.ADAPTIVE_NEAR_FIELD_MAX_WINDOW_S),
+                'sensor_recovery_frames': int(
+                    self.ADAPTIVE_SENSOR_RECOVERY_FRAMES),
+                'prediction_max_s': float(
+                    self.ADAPTIVE_PREDICTION_MAX_S),
+            },
             'depth_correction_model_path': str(
                 self.depth_correction_model_path),
         }
@@ -1012,6 +1559,17 @@ class HybridBallDetector:
         threshold = int(self.background_intensity + max(80, self.background_intensity * 0.5))
         return np.clip(threshold, 150, 240)
 
+    def _ir_contour_is_edge_clipped(
+            self, cx, cy, radius, image_shape):
+        """Reject a fitted circle whose silhouette reaches the IR boundary."""
+        height, width = image_shape[:2]
+        margin = float(self.IR_CONTOUR_EDGE_MARGIN_PX)
+        return bool(
+            float(cx) - float(radius) <= margin
+            or float(cy) - float(radius) <= margin
+            or float(cx) + float(radius) >= float(width - 1) - margin
+            or float(cy) + float(radius) >= float(height - 1) - margin)
+
     def _detect_in_ir(
             self, ir_image, roi=None, depth_image=None,
             observation_time=None):
@@ -1074,13 +1632,30 @@ class HybridBallDetector:
             if area < 20:
                 continue
 
+            bx, by, bw, bh = cv2.boundingRect(cnt)
+            if roi is not None:
+                roi_margin = int(math.ceil(self.IR_CONTOUR_EDGE_MARGIN_PX))
+                if (bx <= roi_margin or by <= roi_margin
+                        or bx + bw >= work_ir.shape[1] - roi_margin
+                        or by + bh >= work_ir.shape[0] - roi_margin):
+                    # A fitted centre/radius from a contour cut by the search
+                    # ROI is biased.  Reject it here so _detect_core performs
+                    # its immediate full-frame fallback on the same frame.
+                    self.ir_roi_edge_rejected_count += 1
+                    continue
+
             if len(cnt) >= 5:
                 try:
                     # 椭圆拟合（已经是亚像素精度）
                     ellipse = cv2.fitEllipse(cnt)
-                    (cx_ellipse, cy_ellipse), (minor, major), angle = ellipse
+                    (cx_ellipse, cy_ellipse), axes, angle = ellipse
+                    minor, major = sorted(float(value) for value in axes)
 
-                    radius = minor / 2.0
+                    # OpenCV does not promise that fitEllipse returns axes in
+                    # minor/major order.  For an anisotropic camera, the
+                    # area-equivalent radius paired with sqrt(fx*fy) is also
+                    # less noisy than arbitrarily using one semi-axis.
+                    radius = 0.5 * math.sqrt(minor * major)
                     if not (self.ir_params['min_radius'] < radius < self.ir_params['max_radius']):
                         continue
 
@@ -1088,8 +1663,8 @@ class HybridBallDetector:
                     if aspect_ratio < self.ir_params['circularity_min']:
                         continue
 
-                    circle_area = np.pi * radius * radius
-                    area_circularity = area / (circle_area + 1e-6)
+                    ellipse_area = np.pi * 0.25 * minor * major
+                    area_circularity = area / (ellipse_area + 1e-6)
                     if not (0.6 < area_circularity < 1.4):
                         continue
 
@@ -1113,11 +1688,14 @@ class HybridBallDetector:
                     coarse_cx, coarse_cy = cx, cy
                     cx, cy, center_refine_shift = refine_ir_ball_center(
                         ir_image, (coarse_cx, coarse_cy), radius)
+                    if self._ir_contour_is_edge_clipped(
+                            cx, cy, radius, ir_image.shape):
+                        self.ir_edge_rejected_count += 1
+                        continue
 
                     # Keep only a contour-bounded mask.  The old full-frame
                     # mask caused multiple 848x480 allocations and scans for
                     # every valid candidate.
-                    bx, by, bw, bh = cv2.boundingRect(cnt)
                     mask = np.zeros((bh, bw), dtype=np.uint8)
                     local_cnt = cnt - np.array([[[bx, by]]], dtype=cnt.dtype)
                     cv2.drawContours(mask, [local_cnt], -1, 255, thickness=-1)
@@ -1131,7 +1709,18 @@ class HybridBallDetector:
                         'cy_coarse': coarse_cy,
                         'center_refine_shift_px': center_refine_shift,
                         'radius': radius,
+                        'geometry_radius_px': radius,
+                        'ellipse_minor_px': minor,
+                        'ellipse_major_px': major,
                         'aspect_ratio': aspect_ratio,
+                        'area_circularity': area_circularity,
+                        'geometry_quality_valid': bool(
+                            aspect_ratio >= max(
+                                0.70,
+                                float(self.ir_params['circularity_min']))
+                            and 0.70 <= area_circularity <= 1.30
+                            and center_refine_shift <= max(
+                                4.0, 0.20 * radius)),
                         'brightness': brightness,
                         'threshold': int(threshold),
                         'mask': mask,
@@ -1167,7 +1756,8 @@ class HybridBallDetector:
 
     def _get_depth_from_depthmap(
             self, cx_px, cy_px, depth_image, ball_mask=None,
-            mask_origin=None):
+            mask_origin=None, prefer_near_surface=False,
+            geometry_hint_mm=None):
         """从深度图读取深度（增强稳定性，减少近距离跳变）"""
         if depth_image is None:
             return None
@@ -1179,7 +1769,8 @@ class HybridBallDetector:
         if not (0 <= cx < w and 0 <= cy < h):
             return None
 
-        # 采样策略：优先使用mask，fallback到邻域
+        # 采样策略：legacy模式优先使用mask、fallback到邻域；adaptive
+        # 同时保留mask近分位数和球心小窗口，利用几何深度选择更可信者。
         depths = None
         if ball_mask is not None:
             if ball_mask.shape[:2] == depth_image.shape[:2]:
@@ -1200,17 +1791,38 @@ class HybridBallDetector:
                 if np.count_nonzero(sel) >= 5:
                     depths = depth_region[sel]
 
+        r = self.depth_neighborhood_px
+        patch = depth_image[max(0, cy-r):min(h, cy+r+1),
+                           max(0, cx-r):min(w, cx+r+1)]
+        center_depths = patch[patch > 0]
         if depths is None:
-            r = self.depth_neighborhood_px
-            patch = depth_image[max(0, cy-r):min(h, cy+r+1),
-                               max(0, cx-r):min(w, cx+r+1)]
-            depths = patch[patch > 0]
+            depths = center_depths
 
         if depths.size < 3:
             return None
 
-        # 使用中位数而非25分位数，更鲁棒
-        depth_raw = float(np.median(depths)) * self.depth_scale * 1000.0
+        # In adaptive mode the ball is known to be in front of any background
+        # inside the dilated IR contour. A near percentile therefore preserves
+        # the sparse foreground samples which a median can replace with the
+        # wall/monitor behind the ball. Legacy sensor mode intentionally keeps
+        # its historical median behavior.
+        if prefer_near_surface:
+            estimates = [float(np.percentile(depths, 25.0))]
+            if center_depths.size >= 3:
+                estimates.append(float(np.median(center_depths)))
+            hint = (
+                float(geometry_hint_mm)
+                if geometry_hint_mm is not None
+                and np.isfinite(geometry_hint_mm)
+                and float(geometry_hint_mm) > 0.0 else None)
+            if hint is None:
+                depth_sample = min(estimates)
+            else:
+                depth_sample = min(
+                    estimates, key=lambda value: abs(value - hint))
+        else:
+            depth_sample = float(np.median(depths))
+        depth_raw = depth_sample * self.depth_scale * 1000.0
 
         if depth_raw < 100.0 or depth_raw > 5000.0:
             return None
@@ -1226,11 +1838,25 @@ class HybridBallDetector:
         """
         if radius_px is None or radius_px <= 1e-3:
             return None
-        f = (self.ir_fx + self.ir_fy) / 2.0
+        # ``radius_px`` is the area-equivalent ellipse radius.  Pair it with
+        # the geometric-mean focal length so swapping fitEllipse axes or
+        # fx/fy anisotropy cannot create a range jump.
+        f = math.sqrt(float(self.ir_fx) * float(self.ir_fy))
         return (f * self.ball_diameter_mm) / (2.0 * radius_px)
 
-    def _select_depth(self, sensor_depth_mm, geom_depth_mm):
-        """Prefer measured stereo depth; use geometry only as a fallback.
+    def _projected_ball_radius_px(self, depth_mm):
+        """Return the apparent ball radius implied by an axial depth."""
+        if depth_mm is None or not np.isfinite(depth_mm) or depth_mm <= 1e-3:
+            return None
+        f = math.sqrt(float(self.ir_fx) * float(self.ir_fy))
+        return f * self.ball_diameter_mm / (2.0 * float(depth_mm))
+
+    def _select_depth(
+            self, sensor_depth_mm, geom_depth_mm,
+            observation_time=None, observed_radius_px=None,
+            observed_cy_px=None,
+            defer_commit=False):
+        """Select or fuse stereo and monocular geometry depth.
 
         The morphology radius describes the connected projector-dot blob, not
         the physical ball silhouette.  Robot-attached-ball recordings show
@@ -1240,23 +1866,377 @@ class HybridBallDetector:
         Returns:
             (depth_raw_mm, method_str) 或 (None, 'none')
         """
+        sensor = (
+            float(sensor_depth_mm)
+            if sensor_depth_mm is not None and np.isfinite(sensor_depth_mm)
+            else None)
+        geometry = (
+            float(geom_depth_mm)
+            if geom_depth_mm is not None and np.isfinite(geom_depth_mm)
+            else None)
+
+        if self.depth_mode == 'adaptive':
+            return self._select_adaptive_depth(
+                sensor, geometry, observation_time, observed_radius_px,
+                observed_cy_px,
+                defer_commit=defer_commit)
+
+        self.last_depth_selection = {
+            'mode': self.depth_mode,
+            'method': None,
+            'sensor_weight': None,
+            'disagreement_mm': (
+                abs(sensor - geometry)
+                if sensor is not None and geometry is not None else None),
+            'sensor_rejected': False,
+            'rejection_reason': None,
+            'sensor_jump_mm': None,
+            'observed_radius_px': None,
+            'sensor_projected_radius_px': None,
+            'radius_mismatch_ratio': None,
+            'near_field_scale_stall': False,
+            'near_field_window_samples': 0,
+            'near_field_window_span_s': None,
+            'near_field_sensor_approach_mm': None,
+            'near_field_geometry_approach_mm': None,
+            'near_field_radius_growth_ratio': None,
+            'near_field_upward_pixel_speed_px_s': None,
+            'prediction_mm': None,
+            'prediction_residual_mm': None,
+            'prediction_horizon_s': None,
+            'sensor_recovery_count': 0,
+        }
         if self.depth_mode == 'geometry':
-            if geom_depth_mm is not None:
+            if geometry is not None:
                 self.depth_source_state = 'geometry'
-                return geom_depth_mm, 'geometry'
-            if sensor_depth_mm is not None:
+                self.last_depth_selection['method'] = 'geometry'
+                return geometry, 'geometry'
+            if sensor is not None:
                 self.depth_source_state = 'sensor_fallback'
-                return sensor_depth_mm, 'sensor'
+                self.last_depth_selection['method'] = 'sensor_fallback'
+                return sensor, 'sensor'
         else:
-            if sensor_depth_mm is not None:
+            if sensor is not None:
                 self.depth_source_state = 'sensor'
-                return sensor_depth_mm, 'sensor'
-            if geom_depth_mm is not None:
+                self.last_depth_selection['method'] = 'sensor'
+                return sensor, 'sensor'
+            if geometry is not None:
                 self.depth_source_state = 'geometry_fallback'
-                return geom_depth_mm, 'geometry'
+                self.last_depth_selection['method'] = 'geometry_fallback'
+                return geometry, 'geometry'
         return None, 'none'
 
-    def _stabilize_depth(self, depth_raw):
+    def _adaptive_depth_time(self, observation_time):
+        if observation_time is not None:
+            try:
+                value = float(observation_time)
+            except (TypeError, ValueError):
+                value = float('nan')
+            if np.isfinite(value):
+                return value
+        self.adaptive_frame_index += 1
+        return self.adaptive_frame_index / max(float(self.fps), 1.0)
+
+    def _predict_adaptive_sensor_depth(self, now):
+        history = list(self.adaptive_sensor_history)
+        if not history:
+            return None, None
+        last_time, last_depth = history[-1]
+        horizon = max(0.0, float(now - last_time))
+        if horizon > self.ADAPTIVE_PREDICTION_MAX_S:
+            return None, horizon
+        velocity = 0.0
+        if len(history) >= 2:
+            times = np.asarray([row[0] for row in history], dtype=np.float64)
+            depths = np.asarray([row[1] for row in history], dtype=np.float64)
+            centered = times - float(np.mean(times))
+            denominator = float(centered @ centered)
+            if denominator > 1e-8:
+                velocity = float(
+                    centered @ (depths - float(np.mean(depths)))
+                    / denominator)
+                velocity = float(np.clip(
+                    velocity,
+                    -self.ADAPTIVE_MAX_DEPTH_SPEED_MM_S,
+                    self.ADAPTIVE_MAX_DEPTH_SPEED_MM_S,
+                ))
+        prediction = max(100.0, float(last_depth + velocity * horizon))
+        return prediction, horizon
+
+    def _adaptive_fallback_depth(self, prediction, geometry):
+        if prediction is not None:
+            depth = float(prediction)
+            method = 'adaptive_prediction'
+            if geometry is not None:
+                correction = float(np.clip(
+                    geometry - prediction,
+                    -self.ADAPTIVE_GEOMETRY_CORRECTION_LIMIT_MM,
+                    self.ADAPTIVE_GEOMETRY_CORRECTION_LIMIT_MM,
+                ))
+                depth += self.ADAPTIVE_GEOMETRY_CORRECTION_GAIN * correction
+                method = 'adaptive_prediction_geometry'
+            return max(100.0, depth), method
+        if geometry is not None:
+            return geometry, 'adaptive_geometry_fallback'
+        return None, 'none'
+
+    def _near_field_scale_stall_diagnostics(
+            self, now, sensor, geometry, observed_radius_px,
+            observed_cy_px):
+        """Detect the short precursor to a near-range stereo depth jump.
+
+        Three independent trends must agree over three causal camera frames.
+        This keeps the window near 22 ms at 90 Hz and prevents a noisy IR
+        radius near the true trajectory apex from rejecting valid stereo.
+        """
+        diagnostics = {
+            'near_field_scale_stall': False,
+            'near_field_window_samples': 0,
+            'near_field_window_span_s': None,
+            'near_field_sensor_approach_mm': None,
+            'near_field_geometry_approach_mm': None,
+            'near_field_radius_growth_ratio': None,
+            'near_field_upward_pixel_speed_px_s': None,
+        }
+        values = (sensor, geometry, observed_radius_px, observed_cy_px)
+        if any(value is None or not np.isfinite(value) for value in values):
+            return False, diagnostics, None
+        radius = float(observed_radius_px)
+        if radius <= 1.0e-3:
+            return False, diagnostics, None
+        sample = (
+            float(now), float(sensor), float(geometry), radius,
+            float(observed_cy_px))
+        window = list(self.adaptive_near_field_history) + [sample]
+        diagnostics['near_field_window_samples'] = len(window)
+        if len(window) < self.ADAPTIVE_NEAR_FIELD_WINDOW_FRAMES:
+            return False, diagnostics, sample
+
+        oldest = window[-self.ADAPTIVE_NEAR_FIELD_WINDOW_FRAMES]
+        newest = window[-1]
+        span_s = float(newest[0] - oldest[0])
+        sensor_approach_mm = float(oldest[1] - newest[1])
+        geometry_approach_mm = float(oldest[2] - newest[2])
+        radius_growth_ratio = float(newest[3] / oldest[3] - 1.0)
+        upward_pixel_speed_px_s = (
+            float(oldest[4] - newest[4]) / span_s
+            if span_s > 1.0e-6 else 0.0)
+        diagnostics.update({
+            'near_field_window_span_s': span_s,
+            'near_field_sensor_approach_mm': sensor_approach_mm,
+            'near_field_geometry_approach_mm': geometry_approach_mm,
+            'near_field_radius_growth_ratio': radius_growth_ratio,
+            'near_field_upward_pixel_speed_px_s': (
+                upward_pixel_speed_px_s),
+        })
+        detected = bool(
+            1.0e-6 < span_s <= self.ADAPTIVE_NEAR_FIELD_MAX_WINDOW_S
+            and newest[1] <= self.ADAPTIVE_NEAR_FIELD_MAX_SENSOR_MM
+            and sensor_approach_mm
+            <= self.ADAPTIVE_NEAR_FIELD_MAX_SENSOR_APPROACH_MM
+            and geometry_approach_mm
+            >= self.ADAPTIVE_NEAR_FIELD_MIN_GEOMETRY_APPROACH_MM
+            and radius_growth_ratio
+            >= self.ADAPTIVE_NEAR_FIELD_MIN_RADIUS_GROWTH_RATIO
+            and upward_pixel_speed_px_s
+            >= self.ADAPTIVE_NEAR_FIELD_MIN_UPWARD_PIXEL_SPEED_PX_S)
+        diagnostics['near_field_scale_stall'] = detected
+        return detected, diagnostics, sample
+
+    def _select_adaptive_depth(
+            self, sensor, geometry, observation_time,
+            observed_radius_px=None, observed_cy_px=None, *,
+            defer_commit=False):
+        """Use stereo unless any configured anomaly check marks it invalid.
+
+        During a short stereo failure, predict camera-axis depth from the last
+        trusted sensor samples and weakly correct that prediction with noisy
+        monocular geometry.  The checks are deliberately independent:
+        frame-to-frame sensor jump, absolute sensor maximum, disagreement
+        with geometry, IR-radius/projected-radius disagreement, and a
+        three-frame near-field scale stall.  Geometry never replaces a sensor
+        sample which passes all checks merely because the ball is close.
+        """
+        now = self._adaptive_depth_time(observation_time)
+        state_snapshot = {
+            'anomaly_active': bool(self.adaptive_sensor_anomaly_active),
+            'recovery_count': int(self.adaptive_sensor_recovery_count),
+            'last_raw_sensor_mm': self.adaptive_last_raw_sensor_mm,
+            'last_geometry_mm': self.adaptive_last_geometry_mm,
+            'last_output_depth_mm': self.adaptive_last_output_depth_mm,
+            'depth_source_state': self.depth_source_state,
+            'near_field_history': list(self.adaptive_near_field_history),
+        }
+        self._pending_adaptive_sensor_sample = None
+        self._pending_adaptive_near_field_sample = None
+        self._pending_adaptive_state_snapshot = None
+        prediction, prediction_horizon = (
+            self._predict_adaptive_sensor_depth(now))
+        disagreement = (
+            abs(sensor - geometry)
+            if sensor is not None and geometry is not None else None)
+        # Compare with the immediately preceding raw sensor frame, including
+        # rejected frames.  This implements a literal consecutive-frame jump
+        # test and also lets a sensor which has settled recover cleanly.
+        previous_sensor = self.adaptive_last_raw_sensor_mm
+        sensor_jump = (
+            abs(sensor - previous_sensor)
+            if sensor is not None and previous_sensor is not None else None)
+        self.adaptive_last_raw_sensor_mm = sensor
+        prediction_residual = (
+            abs(sensor - prediction)
+            if sensor is not None and prediction is not None else None)
+        observed_radius = (
+            float(observed_radius_px)
+            if (observed_radius_px is not None
+                and np.isfinite(observed_radius_px)
+                and float(observed_radius_px) > 1e-3)
+            else None)
+        sensor_projected_radius = self._projected_ball_radius_px(sensor)
+        radius_mismatch_ratio = None
+        if observed_radius is not None and sensor_projected_radius is not None:
+            radius_mismatch_ratio = (
+                abs(observed_radius - sensor_projected_radius)
+                / max(observed_radius, sensor_projected_radius))
+        (
+            near_field_scale_bad,
+            near_field_diagnostics,
+            near_field_sample,
+        ) = self._near_field_scale_stall_diagnostics(
+            now, sensor, geometry, observed_radius, observed_cy_px)
+        jump_bad = (
+            sensor_jump is not None
+            and sensor_jump > self.ADAPTIVE_SENSOR_JUMP_MM)
+        sensor_too_far = (
+            sensor is not None and sensor > self.ADAPTIVE_SENSOR_MAX_MM)
+        geometry_bad = (
+            disagreement is not None
+            and disagreement > self.ADAPTIVE_SENSOR_GEOMETRY_GAP_MM)
+        radius_bad = (
+            radius_mismatch_ratio is not None
+            and radius_mismatch_ratio
+            > self.ADAPTIVE_SENSOR_RADIUS_MISMATCH_RATIO)
+        detected_anomaly = bool(
+            jump_bad or sensor_too_far or geometry_bad or radius_bad
+            or near_field_scale_bad)
+
+        reasons = []
+        if jump_bad:
+            reasons.append('sensor_jump')
+        if sensor_too_far:
+            reasons.append('sensor_over_1000mm')
+        if geometry_bad:
+            reasons.append('geometry_disagreement')
+        if radius_bad:
+            reasons.append('radius_disagreement')
+        if near_field_scale_bad:
+            reasons.append('near_field_scale_stall')
+
+        if sensor is None:
+            detected_anomaly = True
+            reasons.append('sensor_unavailable')
+
+        if self.adaptive_sensor_anomaly_active:
+            recovery_good = bool(sensor is not None and not detected_anomaly)
+            if recovery_good:
+                self.adaptive_sensor_recovery_count += 1
+            else:
+                self.adaptive_sensor_recovery_count = 0
+            if (self.adaptive_sensor_recovery_count
+                    >= self.ADAPTIVE_SENSOR_RECOVERY_FRAMES):
+                self.adaptive_sensor_anomaly_active = False
+                self.adaptive_sensor_recovery_count = 0
+            else:
+                detected_anomaly = True
+                if recovery_good:
+                    reasons.append('sensor_recovering')
+        elif detected_anomaly:
+            self.adaptive_sensor_anomaly_active = True
+            self.adaptive_sensor_recovery_count = 0
+
+        if detected_anomaly:
+            # Recovery must build a new consecutive scale window; otherwise a
+            # pre-fault sample could be combined with a post-gap measurement.
+            self.adaptive_near_field_history.clear()
+
+        if not detected_anomaly and sensor is not None:
+            if defer_commit:
+                self._pending_adaptive_sensor_sample = (now, sensor)
+                self._pending_adaptive_near_field_sample = near_field_sample
+                self._pending_adaptive_state_snapshot = state_snapshot
+            else:
+                self.adaptive_sensor_history.append((now, sensor))
+                if near_field_sample is not None:
+                    self.adaptive_near_field_history.append(near_field_sample)
+            depth_mm = sensor
+            method = 'adaptive_sensor'
+            sensor_weight = 1.0
+            self.depth_source_state = 'sensor'
+        else:
+            depth_mm, method = self._adaptive_fallback_depth(
+                prediction, geometry)
+            sensor_weight = 0.0
+            self.depth_source_state = (
+                'prediction' if prediction is not None else 'geometry')
+
+        self.adaptive_last_geometry_mm = geometry
+        self.adaptive_last_output_depth_mm = depth_mm
+        rejection_reason = ','.join(dict.fromkeys(reasons)) or None
+        self.last_depth_selection = {
+            'mode': 'adaptive', 'method': method,
+            'sensor_weight': sensor_weight,
+            'disagreement_mm': disagreement,
+            'sensor_rejected': bool(detected_anomaly),
+            'rejection_reason': rejection_reason,
+            'sensor_jump_mm': sensor_jump,
+            'observed_radius_px': observed_radius,
+            'sensor_projected_radius_px': sensor_projected_radius,
+            'radius_mismatch_ratio': radius_mismatch_ratio,
+            **near_field_diagnostics,
+            'prediction_mm': prediction,
+            'prediction_residual_mm': prediction_residual,
+            'prediction_horizon_s': prediction_horizon,
+            'sensor_recovery_count': int(
+                self.adaptive_sensor_recovery_count),
+        }
+        return depth_mm, method
+
+    def _finalize_adaptive_depth_selection(self, accepted):
+        """Commit a sensor sample only after the complete 3D frame passes.
+
+        Adaptive depth selection runs before backprojection and the motion
+        gate.  Deferring this write prevents a wrong IR candidate with a
+        plausible depth from contaminating the trusted depth predictor.
+        """
+        sample = self._pending_adaptive_sensor_sample
+        near_field_sample = self._pending_adaptive_near_field_sample
+        snapshot = self._pending_adaptive_state_snapshot
+        self._pending_adaptive_sensor_sample = None
+        self._pending_adaptive_near_field_sample = None
+        self._pending_adaptive_state_snapshot = None
+        if sample is None:
+            return
+        if bool(accepted):
+            self.adaptive_sensor_history.append(sample)
+            if near_field_sample is not None:
+                self.adaptive_near_field_history.append(near_field_sample)
+            return
+        if snapshot is None:
+            return
+        self.adaptive_sensor_anomaly_active = bool(
+            snapshot['anomaly_active'])
+        self.adaptive_sensor_recovery_count = int(
+            snapshot['recovery_count'])
+        self.adaptive_last_raw_sensor_mm = snapshot['last_raw_sensor_mm']
+        self.adaptive_last_geometry_mm = snapshot['last_geometry_mm']
+        self.adaptive_last_output_depth_mm = snapshot[
+            'last_output_depth_mm']
+        self.depth_source_state = snapshot['depth_source_state']
+        self.adaptive_near_field_history.clear()
+        self.adaptive_near_field_history.extend(
+            snapshot.get('near_field_history', ()))
+
+    def _stabilize_depth(self, depth_raw, *, commit=True):
         """深度时域稳定化：去尖峰(Hampel 软钳制) + 中位数平滑。
 
         统一作用于 sensor / geometry 两条路径，压近距离深度噪声导致的左图
@@ -1270,16 +2250,19 @@ class HybridBallDetector:
             dev = depth_raw - med
             if abs(dev) > gate:
                 depth_raw = med + np.sign(dev) * gate
-        hist.append(depth_raw)
-        if len(hist) >= 3:
-            return float(np.median(list(hist)))
+        preview = list(hist)
+        preview.append(depth_raw)
+        if commit:
+            hist.append(depth_raw)
+        if len(preview) >= 3:
+            return float(np.median(preview[-int(hist.maxlen):]))
         return depth_raw
 
-    def _depth_for_reconstruction(self, depth_raw):
+    def _depth_for_reconstruction(self, depth_raw, *, commit=True):
         """Select same-frameset raw depth or legacy temporal median depth."""
         if bool(getattr(self, 'synchronized_depth_enabled', False)):
             return float(depth_raw)
-        return self._stabilize_depth(depth_raw)
+        return self._stabilize_depth(depth_raw, commit=commit)
 
     def _backproject_to_3d(self, cx_px, cy_px, depth_mm):
         """反投影到IR 3D坐标系（使用IR内参）"""
@@ -1358,21 +2341,913 @@ class HybridBallDetector:
         pos_base_homo = self.T_base_camera @ pos_homo
         return (pos_base_homo[:3] * 1000.0).tolist()
 
-    def _calculate_velocity(self):
-        """从历史计算速度"""
+    @staticmethod
+    def _robust_line_fit(relative_time, values):
+        """Small causal Huber IRLS fit returning slope/intercept/residuals."""
+        t = np.asarray(relative_time, dtype=np.float64).reshape(-1)
+        y = np.asarray(values, dtype=np.float64).reshape(-1)
+        design = np.column_stack((t, np.ones_like(t)))
+        coefficient, *_ = np.linalg.lstsq(design, y, rcond=None)
+        for _ in range(4):
+            residual = y - design @ coefficient
+            median = float(np.median(residual))
+            mad = float(np.median(np.abs(residual - median)))
+            scale = max(1.0, 1.4826 * mad)
+            cutoff = 1.5 * scale
+            abs_residual = np.abs(residual)
+            weights = np.ones_like(abs_residual)
+            mask = abs_residual > cutoff
+            weights[mask] = cutoff / np.maximum(abs_residual[mask], 1.0e-9)
+            weighted_design = design * np.sqrt(weights)[:, None]
+            weighted_values = y * np.sqrt(weights)
+            updated, *_ = np.linalg.lstsq(
+                weighted_design, weighted_values, rcond=None)
+            if np.linalg.norm(updated - coefficient) < 1.0e-9:
+                coefficient = updated
+                break
+            coefficient = updated
+        return coefficient, y - design @ coefficient
+
+    def _calculate_physics_constrained_velocity(self, history):
+        """Fit x/y linearly and z with fixed gravity over one flight segment."""
+        _, velocity = self._fit_trajectory_state(history, gravity=True)
+        if not np.all(np.isfinite(velocity)):
+            return np.zeros(3, dtype=np.float64)
+        speed = float(np.linalg.norm(velocity))
+        if speed > self.MOTION_GATE_MAX_SPEED_MM_S:
+            velocity *= self.MOTION_GATE_MAX_SPEED_MM_S / max(speed, 1.0e-9)
+        return velocity
+
+    def _fit_trajectory_state(self, history, *, gravity):
+        """Return causal endpoint position/velocity from timestamped samples."""
+        timestamps = np.asarray(
+            [float(sample[0]) for sample in history], dtype=np.float64)
+        positions = np.asarray(
+            [sample[1] for sample in history], dtype=np.float64)
+        if (len(timestamps) < 2 or positions.ndim != 2
+                or positions.shape[1] != 3
+                or not np.all(np.isfinite(timestamps))
+                or not np.all(np.isfinite(positions))):
+            fallback = (
+                positions[-1].copy()
+                if positions.ndim == 2 and len(positions)
+                else np.zeros(3, dtype=np.float64))
+            return fallback, np.zeros(3, dtype=np.float64)
+        relative_time = timestamps - timestamps[-1]
+        endpoint = np.zeros(3, dtype=np.float64)
+        velocity = np.zeros(3, dtype=np.float64)
+        for axis in (0, 1):
+            coefficient, _ = self._robust_line_fit(
+                relative_time, positions[:, axis])
+            velocity[axis] = coefficient[0]
+            endpoint[axis] = coefficient[1]
+        gravity_compensated_z = positions[:, 2].copy()
+        if gravity:
+            gravity_compensated_z += (
+                0.5 * float(self.PHYSICS_VELOCITY_GRAVITY_MM_S2)
+                * relative_time ** 2)
+        coefficient, _ = self._robust_line_fit(
+            relative_time, gravity_compensated_z)
+        velocity[2] = coefficient[0]
+        endpoint[2] = coefficient[1]
+        return endpoint, velocity
+
+    def _racket_context(self, now, ball_position, *, max_age_s):
+        state = getattr(self, 'latest_racket_state', None)
+        if state is None:
+            return None
+        age = float(now - state[0])
+        if abs(age) > float(max_age_s):
+            return None
+        racket_position = np.asarray(state[1], dtype=np.float64).reshape(3)
+        racket_velocity = np.asarray(state[2], dtype=np.float64).reshape(3)
+        return {
+            'age_s': age,
+            'position': racket_position,
+            'velocity': racket_velocity,
+            'distance_mm': float(np.linalg.norm(
+                np.asarray(ball_position, dtype=np.float64).reshape(3)
+                - racket_position)),
+        }
+
+    def _fresh_racket_context(self, now, ball_position):
+        return self._racket_context(
+            now, ball_position, max_age_s=self.RACKET_STATE_MAX_AGE_S)
+
+    def _history_is_supported(self, history, now):
+        """Detect a ball carried by the racket, not a free-flight apex."""
+        if len(history) < self.PHYSICS_VELOCITY_MIN_FRAMES:
+            return False, None, None
+        endpoint, unconstrained_velocity = self._fit_trajectory_state(
+            history, gravity=False)
+        positions = np.asarray([sample[1] for sample in history])
+        centre = np.median(positions, axis=0)
+        span = float(np.max(np.linalg.norm(positions - centre, axis=1)))
+        racket = self._fresh_racket_context(now, history[-1][1])
+        if racket is not None:
+            relative_speed = float(np.linalg.norm(
+                unconstrained_velocity - racket['velocity']))
+            supported = bool(
+                racket['distance_mm'] <= self.SUPPORTED_RACKET_DISTANCE_MM
+                and relative_speed <= self.SUPPORTED_RELATIVE_SPEED_MM_S)
+            return supported, endpoint, racket
+        supported = bool(
+            span <= self.SUPPORTED_NO_RACKET_SPAN_MM
+            and float(np.linalg.norm(unconstrained_velocity))
+            <= self.SUPPORTED_NO_RACKET_SPEED_MM_S)
+        return supported, endpoint, None
+
+    def _supported_exit_confirmed(self, now, position):
+        if not self.position_history:
+            return True
+        previous_time, previous_position = self.position_history[-1]
+        dt = float(now - previous_time)
+        if dt <= 1.0e-4:
+            return False
+        pair_velocity = (
+            np.asarray(position, dtype=np.float64)
+            - np.asarray(previous_position, dtype=np.float64)) / dt
+        racket = self._fresh_racket_context(now, position)
+        if racket is not None:
+            return bool(
+                racket['distance_mm']
+                > self.SUPPORTED_RACKET_DISTANCE_MM + 20.0
+                or np.linalg.norm(pair_velocity - racket['velocity'])
+                > self.SUPPORTED_RELATIVE_SPEED_MM_S + 200.0)
+        anchor = self.last_position_estimate
+        displacement = (
+            float(np.linalg.norm(np.asarray(position) - anchor))
+            if anchor is not None else 0.0)
+        return bool(
+            displacement > 2.5
+            and np.linalg.norm(pair_velocity) > 200.0)
+
+    def _bounded_endpoint_position(self, raw_position, fitted_position):
+        raw = np.asarray(raw_position, dtype=np.float64).reshape(3)
+        fitted = np.asarray(fitted_position, dtype=np.float64).reshape(3)
+        correction = fitted - raw
+        correction_norm = float(np.linalg.norm(correction))
+        limit = self.TRAJECTORY_POSITION_MAX_CORRECTION_MM
+        if correction_norm > limit:
+            correction *= limit / max(correction_norm, 1.0e-9)
+        return raw + correction
+
+    def _commit_velocity_output(
+            self, now, raw_position, fitted_position, velocity, *,
+            ready, motion_state, velocity_model,
+            velocity_correction=None):
+        raw = np.asarray(raw_position, dtype=np.float64).reshape(3)
+        fitted = np.asarray(fitted_position, dtype=np.float64).reshape(3)
+        if self.trajectory_position_smoothing_enabled:
+            output_position = self._bounded_endpoint_position(raw, fitted)
+        else:
+            output_position = raw.copy()
+        if (self.trajectory_position_smoothing_enabled
+                and self.last_position_estimate is not None
+                and self.last_velocity_output_time is not None):
+            dt = float(now - self.last_velocity_output_time)
+            if 1.0e-5 < dt <= self.MOTION_GATE_MAX_REACQUISITION_DT_S:
+                step = output_position - self.last_position_estimate
+                step_norm = float(np.linalg.norm(step))
+                max_step = (
+                    self.TRAJECTORY_POSITION_MAX_OUTPUT_SPEED_MM_S * dt)
+                if step_norm > max_step:
+                    output_position = (
+                        self.last_position_estimate
+                        + step * (max_step / max(step_norm, 1.0e-9)))
+        output_velocity = np.asarray(
+            velocity, dtype=np.float64).reshape(3).copy()
+        speed = float(np.linalg.norm(output_velocity))
+        if speed > self.MOTION_GATE_MAX_SPEED_MM_S:
+            output_velocity *= self.MOTION_GATE_MAX_SPEED_MM_S / speed
+        self.last_position_estimate = output_position.copy()
+        self.last_position_filter_residual_mm = float(np.linalg.norm(
+            output_position - raw))
+        self.last_velocity_output = output_velocity.copy()
+        self.last_velocity_output_time = float(now)
+        self.last_velocity_ready = bool(ready)
+        self.velocity_motion_state = str(motion_state)
+        self.velocity_model = str(velocity_model)
+        self.last_velocity_filter_correction_mm_s = (
+            None if velocity_correction is None
+            else float(np.linalg.norm(velocity_correction)))
+        return output_velocity.tolist()
+
+    def _stabilize_flight_velocity(self, now, fitted_velocity):
+        fitted = np.asarray(fitted_velocity, dtype=np.float64).reshape(3)
+        self.last_velocity_restart_bridge_used = False
+        restart_bridge = False
+        if (self.last_velocity_ready
+                and self.last_velocity_output_time is not None
+                and self.velocity_motion_state in {
+                    'flight', 'post_impact_fast', 'launch_fast'}):
+            reference_time = float(self.last_velocity_output_time)
+            reference_velocity = self.last_velocity_output.copy()
+            max_gap_s = self.PHYSICS_VELOCITY_MAX_GAP_S
+        elif (self.velocity_restart_reference_time is not None
+                and self.velocity_restart_reference_velocity is not None):
+            # A loss boundary clears the five-frame position window, but the
+            # last complete flight velocity remains a valid causal prior.  Use
+            # it exactly once when the restarted estimator first becomes ready;
+            # otherwise its noisy first fit is exposed as a zero -> fitted
+            # impulse (the raw detector component of frame 000234).
+            reference_time = float(self.velocity_restart_reference_time)
+            reference_velocity = np.asarray(
+                self.velocity_restart_reference_velocity,
+                dtype=np.float64).reshape(3).copy()
+            max_gap_s = self.MOTION_GATE_MAX_REACQUISITION_DT_S
+            restart_bridge = True
+        else:
+            return fitted, None
+        dt = float(now - reference_time)
+        if not 1.0e-5 < dt <= max_gap_s:
+            if restart_bridge:
+                self.velocity_restart_reference_time = None
+                self.velocity_restart_reference_velocity = None
+            return fitted, None
+        predicted = reference_velocity
+        predicted[2] -= self.PHYSICS_VELOCITY_GRAVITY_MM_S2 * dt
+        residual = fitted - predicted
+        update_gain = float(self.FLIGHT_VELOCITY_UPDATE_GAIN)
+        if bool(getattr(
+                self, 'FLIGHT_VELOCITY_ADAPTIVE_GAIN_ENABLED', False)):
+            minimum_gain = min(
+                update_gain,
+                max(0.0, float(self.FLIGHT_VELOCITY_MIN_UPDATE_GAIN)))
+            full_gain_residual = max(
+                1.0,
+                float(self.FLIGHT_VELOCITY_FULL_GAIN_RESIDUAL_MM_S))
+            residual_ratio = float(np.clip(
+                np.linalg.norm(residual) / full_gain_residual, 0.0, 1.0))
+            # Smoothstep has zero slope at both ends, avoiding a gain kink in
+            # the velocity output when a residual crosses the tuning scale.
+            blend = residual_ratio * residual_ratio * (
+                3.0 - 2.0 * residual_ratio)
+            update_gain = minimum_gain + (
+                update_gain - minimum_gain) * blend
+        correction = update_gain * residual
+        correction_norm = float(np.linalg.norm(correction))
+        limit = self.FLIGHT_VELOCITY_MAX_CORRECTION_MM_S
+        if correction_norm > limit:
+            correction *= limit / max(correction_norm, 1.0e-9)
+        if restart_bridge:
+            self.velocity_restart_reference_time = None
+            self.velocity_restart_reference_velocity = None
+            self.last_velocity_restart_bridge_used = True
+            self.velocity_restart_bridge_count += 1
+        return predicted + correction, correction
+
+    def _impact_candidate(self, now, position):
+        self.last_impact_candidate_rejection_reason = None
+        self.last_impact_pair_vertical_velocity_mm_s = None
+        self.last_impact_previous_vertical_velocity_mm_s = None
+        self.last_impact_evidence_source = None
+        self.last_impact_racket_state_age_s = None
+        self.last_impact_racket_distance_mm = None
+        self.last_impact_racket_gate_used = False
+
+        def reject(reason):
+            self.last_impact_candidate_rejection_reason = str(reason)
+            return None
+
+        if not self.impact_velocity_reset_enabled:
+            return reject('disabled')
+        if self.velocity_motion_state != 'flight':
+            return reject('not_in_flight')
+        if not self.last_velocity_ready:
+            return reject('velocity_not_ready')
         if len(self.position_history) < 2:
+            return reject('history_too_short')
+        if self.observation_gap_active:
+            return reject('observation_gap')
+        previous_time, previous_position = self.position_history[-1]
+        dt = float(now - previous_time)
+        if not 1.0e-4 < dt <= self.IMPACT_CONFIRM_MAX_GAP_S:
+            return reject('sample_gap')
+        previous_velocity = self.last_velocity_output.copy()
+        raw_position = np.asarray(position, dtype=np.float64).reshape(3)
+        pair_velocity = (
+            raw_position
+            - np.asarray(previous_position, dtype=np.float64)) / dt
+        evidence_position = raw_position
+        evidence_source = 'raw_3d'
+        if (self.last_position_estimate is not None
+                and self.last_velocity_output_time is not None
+                and abs(float(previous_time)
+                        - float(self.last_velocity_output_time))
+                <= 1.0e-5):
+            preview = list(self.position_history)
+            preview.append((float(now), raw_position.tolist()))
+            preview = preview[-self._velocity_history_maxlen():]
+            preview_endpoint, _ = self._fit_trajectory_state(
+                preview, gravity=True)
+            filtered_position = self._bounded_endpoint_position(
+                raw_position, preview_endpoint)
+            filtered_pair_velocity = (
+                filtered_position - self.last_position_estimate) / dt
+            if filtered_pair_velocity[2] > pair_velocity[2]:
+                pair_velocity = filtered_pair_velocity
+                evidence_position = filtered_position
+                evidence_source = 'causal_endpoint'
+        self.last_impact_pair_vertical_velocity_mm_s = float(
+            pair_velocity[2])
+        self.last_impact_previous_vertical_velocity_mm_s = float(
+            previous_velocity[2])
+        self.last_impact_evidence_source = evidence_source
+        refractory_ok = (
+            self.last_velocity_impact_time is None
+            or float(now - self.last_velocity_impact_time)
+            >= self.impact_refractory_s)
+        if not refractory_ok:
+            return reject('refractory')
+        racket = self._fresh_racket_context(now, evidence_position)
+        fresh_racket = racket is not None
+        if racket is None:
+            racket = self._racket_context(
+                now, evidence_position,
+                max_age_s=self.RACKET_STATE_FALLBACK_MAX_AGE_S)
+        racket_gate_used = racket is not None
+        self.last_impact_racket_gate_used = racket_gate_used
+        racket_distance = (
+            None if racket is None else float(racket['distance_mm']))
+        self.last_impact_racket_distance_mm = racket_distance
+        self.last_impact_racket_state_age_s = (
+            None if racket is None else float(racket['age_s']))
+        racket_limit = (
+            self.IMPACT_MAX_RACKET_DISTANCE_MM
+            if fresh_racket else self.IMPACT_RECENT_RACKET_DISTANCE_MM)
+        if racket is not None and racket_distance > racket_limit:
+            return reject('racket_too_far')
+        if (racket is None
+                and bool(getattr(self, 'impact_racket_gate_required', False))):
+            return reject('racket_state_unavailable')
+        threshold_scale = (
+            1.0 if racket is not None
+            else self.IMPACT_NO_RACKET_THRESHOLD_SCALE)
+        if (previous_velocity[2]
+                > -threshold_scale
+                * self.impact_min_downward_velocity_mm_s):
+            return reject('insufficient_downward_velocity')
+        if (pair_velocity[2]
+                < threshold_scale * self.impact_min_upward_velocity_mm_s):
+            return reject('insufficient_upward_velocity')
+        if (pair_velocity[2] - previous_velocity[2]
+                < threshold_scale * self.impact_min_velocity_jump_mm_s):
+            return reject('insufficient_velocity_jump')
+        if np.linalg.norm(pair_velocity) > self.MOTION_GATE_MAX_SPEED_MM_S:
+            return reject('pair_speed_limit')
+        self.last_impact_candidate_rejection_reason = None
+        return {
+            'pre_time': float(previous_time),
+            'pre_position': np.asarray(
+                previous_position, dtype=np.float64).copy(),
+            'first_time': float(now),
+            'first_position': np.asarray(position, dtype=np.float64).copy(),
+            'first_evidence_position': evidence_position.copy(),
+            'pre_velocity': previous_velocity,
+            'first_pair_velocity': pair_velocity,
+            'racket_gate_used': racket_gate_used,
+            'racket_distance_mm': racket_distance,
+            'racket_state_age_s': (
+                None if racket is None else float(racket['age_s'])),
+            'evidence_source': evidence_source,
+        }
+
+    def _confirm_pending_impact(self, now, position):
+        pending = self.pending_impact
+        if pending is None:
+            return False
+        dt = float(now - pending['first_time'])
+        current = np.asarray(position, dtype=np.float64).reshape(3)
+        if not 1.0e-4 < dt <= self.IMPACT_CONFIRM_MAX_GAP_S:
+            return False
+        pair_velocity = (current - pending['first_position']) / dt
+        total_rise = float(current[2] - pending['pre_position'][2])
+        if pending['racket_gate_used']:
+            racket = self._racket_context(
+                now, current,
+                max_age_s=self.RACKET_STATE_FALLBACK_MAX_AGE_S)
+            if (racket is not None
+                    and racket['distance_mm']
+                    > self.IMPACT_RECENT_RACKET_DISTANCE_MM):
+                return False
+        return bool(
+            pair_velocity[2] >= self.impact_min_upward_velocity_mm_s
+            and total_rise >= self.IMPACT_CONFIRM_MIN_TOTAL_RISE_MM
+            and np.linalg.norm(pair_velocity)
+            <= self.MOTION_GATE_MAX_SPEED_MM_S)
+
+    def _post_impact_state(self, now, position, *, confirmed=False):
+        endpoint, fitted_velocity = self._fit_trajectory_state(
+            list(self.position_history), gravity=True)
+        sample_count = len(self.position_history)
+        if (self.post_impact_lateral_prior is not None
+                and sample_count < self.PHYSICS_VELOCITY_MIN_FRAMES):
+            alpha = float(np.clip(
+                (sample_count - 1)
+                / max(self.PHYSICS_VELOCITY_MIN_FRAMES - 1, 1),
+                0.0, 1.0))
+            fitted_velocity[:2] = (
+                (1.0 - alpha) * self.post_impact_lateral_prior
+                + alpha * fitted_velocity[:2])
+        velocity_correction = None
+        if not confirmed:
+            fitted_velocity, velocity_correction = (
+                self._stabilize_flight_velocity(now, fitted_velocity))
+        if sample_count >= self.PHYSICS_VELOCITY_MIN_FRAMES:
+            motion_state = 'flight'
+            model = 'robust_xy_linear_z_gravity'
+            self.post_impact_lateral_prior = None
+        else:
+            motion_state = 'post_impact_fast'
+            model = 'post_impact_fast_gravity'
+        return self._commit_velocity_output(
+            now, position, endpoint, fitted_velocity,
+            ready=True, motion_state=motion_state,
+            velocity_model=model,
+            velocity_correction=velocity_correction)
+
+    def _append_physics_velocity_sample(self, now, position):
+        raw_position = np.asarray(position, dtype=np.float64).reshape(3)
+        history = self.position_history
+        self.last_velocity_impact_detected = False
+
+        if (history and float(now - history[-1][0])
+                > self.PHYSICS_VELOCITY_MAX_GAP_S):
+            history.clear()
+            self._reset_velocity_tracking_state()
+
+        if self.pending_impact is not None:
+            if self._confirm_pending_impact(now, raw_position):
+                pending = self.pending_impact
+                history.clear()
+                history.append((
+                    pending['first_time'],
+                    pending['first_position'].tolist()))
+                history.append((float(now), raw_position.tolist()))
+                self.pending_impact = None
+                self.last_velocity_impact_time = pending['first_time']
+                self.last_velocity_impact_detected = True
+                self.velocity_impact_confirmed_count += 1
+                self.last_impact_racket_gate_used = bool(
+                    pending['racket_gate_used'])
+                self.last_impact_racket_distance_mm = (
+                    pending['racket_distance_mm'])
+                self.post_impact_lateral_prior = (
+                    pending['pre_velocity'][:2].copy())
+                return self._post_impact_state(
+                    now, raw_position, confirmed=True)
+            pending = self.pending_impact
+            self.pending_impact = None
+            self.velocity_impact_rejected_count += 1
+            history.append((
+                pending['first_time'], pending['first_position'].tolist()))
+            self.velocity_motion_state = 'flight'
+
+        if self.velocity_motion_state == 'supported':
+            trial = list(history) + [(float(now), raw_position.tolist())]
+            trial = trial[-self._velocity_history_maxlen():]
+            supported, endpoint, racket = self._history_is_supported(
+                trial, now)
+            if supported or not self._supported_exit_confirmed(
+                    now, raw_position):
+                history.append((float(now), raw_position.tolist()))
+                if endpoint is None:
+                    endpoint, _ = self._fit_trajectory_state(
+                        list(history), gravity=False)
+                supported_velocity = (
+                    racket['velocity'] if racket is not None
+                    else np.zeros(3, dtype=np.float64))
+                return self._commit_velocity_output(
+                    now, raw_position, endpoint, supported_velocity,
+                    ready=True, motion_state='supported',
+                    velocity_model='racket_supported')
+            previous = history[-1] if history else None
+            history.clear()
+            if previous is not None:
+                history.append(previous)
+            history.append((float(now), raw_position.tolist()))
+            endpoint, fitted_velocity = self._fit_trajectory_state(
+                list(history), gravity=True)
+            return self._commit_velocity_output(
+                now, raw_position, endpoint, fitted_velocity,
+                ready=True, motion_state='launch_fast',
+                velocity_model='launch_fast_gravity')
+
+        impact = self._impact_candidate(now, raw_position)
+        if impact is not None:
+            self.pending_impact = impact
+            self.velocity_impact_candidate_count += 1
+            self.last_impact_racket_gate_used = bool(
+                impact['racket_gate_used'])
+            self.last_impact_racket_distance_mm = (
+                impact['racket_distance_mm'])
+            held_velocity = impact['pre_velocity'].copy()
+            dt = (
+                float(now - self.last_velocity_output_time)
+                if self.last_velocity_output_time is not None else 0.0)
+            if dt > 0.0:
+                held_velocity[2] -= (
+                    self.PHYSICS_VELOCITY_GRAVITY_MM_S2 * dt)
+            return self._commit_velocity_output(
+                now, raw_position, raw_position, held_velocity,
+                ready=True, motion_state='impact_confirming',
+                velocity_model='pre_impact_hold')
+
+        history.append((float(now), raw_position.tolist()))
+        if self.velocity_motion_state in {'post_impact_fast', 'launch_fast'}:
+            return self._post_impact_state(now, raw_position)
+
+        if len(history) < self.PHYSICS_VELOCITY_MIN_FRAMES:
+            return self._commit_velocity_output(
+                now, raw_position, raw_position, np.zeros(3),
+                ready=False, motion_state='initializing',
+                velocity_model='unready')
+
+        supported, endpoint, racket = self._history_is_supported(
+            list(history), now)
+        if supported:
+            supported_velocity = (
+                racket['velocity'] if racket is not None
+                else np.zeros(3, dtype=np.float64))
+            return self._commit_velocity_output(
+                now, raw_position, endpoint, supported_velocity,
+                ready=True, motion_state='supported',
+                velocity_model='racket_supported')
+
+        endpoint, fitted_velocity = self._fit_trajectory_state(
+            list(history), gravity=True)
+        fitted_velocity, correction = self._stabilize_flight_velocity(
+            now, fitted_velocity)
+        return self._commit_velocity_output(
+            now, raw_position, endpoint, fitted_velocity,
+            ready=True, motion_state='flight',
+            velocity_model='robust_xy_linear_z_gravity',
+            velocity_correction=correction)
+
+    def _calculate_velocity(self):
+        """Estimate velocity from one uninterrupted flight segment."""
+        physics_enabled = bool(getattr(
+            self, 'physics_constrained_velocity_enabled', False))
+        required_frames = (
+            int(self.PHYSICS_VELOCITY_MIN_FRAMES)
+            if physics_enabled else 2)
+        self.last_velocity_ready = False
+        if len(self.position_history) < required_frames:
             return [0, 0, 0]
 
         history = list(self.position_history)
-        t0, p0 = history[0]
-        t1, p1 = history[-1]
-        dt = t1 - t0
-
-        if dt < 1e-4:
+        timestamps = np.asarray(
+            [float(sample[0]) for sample in history], dtype=np.float64)
+        positions = np.asarray(
+            [sample[1] for sample in history], dtype=np.float64)
+        if (positions.ndim != 2 or positions.shape[1] != 3
+                or not np.all(np.isfinite(timestamps))
+                or not np.all(np.isfinite(positions))):
             return [0, 0, 0]
+        if physics_enabled:
+            velocity = self._calculate_physics_constrained_velocity(history)
+            if not np.all(np.isfinite(velocity)):
+                return [0, 0, 0]
+            self.last_velocity_ready = True
+            return velocity.tolist()
+        if not self.velocity_least_squares_enabled:
+            dt = float(timestamps[-1] - timestamps[0])
+            if dt < 1e-4:
+                return [0, 0, 0]
+            self.last_velocity_ready = True
+            return ((positions[-1] - positions[0]) / dt).tolist()
 
-        velocity = [(p1[i] - p0[i]) / dt for i in range(3)]
-        return velocity
+        centered_time = timestamps - float(np.mean(timestamps))
+        denominator = float(np.dot(centered_time, centered_time))
+        if denominator < 1e-8:
+            return [0, 0, 0]
+        centered_position = positions - np.mean(positions, axis=0)
+        self.last_velocity_ready = True
+        return ((centered_time @ centered_position) / denominator).tolist()
+
+    def _append_velocity_sample(self, now, position):
+        """Append one trusted 3D point to the active motion segment.
+
+        Impact confirmation has the same two-frame contract for both the
+        legacy and physics-constrained estimators: the first reversal is held
+        out of history and a second rising point must confirm it.  This keeps
+        a one-frame position glitch from resetting velocity state and avoids
+        publishing a zero-velocity discontinuity at a real contact.
+        """
+        self.last_velocity_impact_detected = False
+        if getattr(self, 'physics_constrained_velocity_enabled', False):
+            return self._append_physics_velocity_sample(now, position)
+        history = self.position_history
+        raw_position = np.asarray(position, dtype=np.float64).reshape(3)
+        if self.pending_impact is not None:
+            if self._confirm_pending_impact(now, raw_position):
+                pending = self.pending_impact
+                history.clear()
+                history.append((
+                    pending['first_time'],
+                    pending['first_position'].tolist()))
+                history.append((float(now), raw_position.tolist()))
+                self.pending_impact = None
+                self.last_velocity_impact_time = pending['first_time']
+                self.last_velocity_impact_detected = True
+                self.velocity_impact_confirmed_count += 1
+                self.last_impact_racket_gate_used = bool(
+                    pending['racket_gate_used'])
+                self.last_impact_racket_distance_mm = (
+                    pending['racket_distance_mm'])
+            else:
+                pending = self.pending_impact
+                self.pending_impact = None
+                self.velocity_impact_rejected_count += 1
+                history.append((
+                    pending['first_time'],
+                    pending['first_position'].tolist()))
+                self.velocity_motion_state = 'flight'
+
+        impact = self._impact_candidate(now, raw_position)
+        if impact is not None:
+            self.pending_impact = impact
+            self.velocity_impact_candidate_count += 1
+            self.last_impact_racket_gate_used = bool(
+                impact['racket_gate_used'])
+            self.last_impact_racket_distance_mm = (
+                impact['racket_distance_mm'])
+            return self._commit_velocity_output(
+                now, raw_position, raw_position, impact['pre_velocity'],
+                ready=True, motion_state='impact_confirming',
+                velocity_model='pre_impact_hold')
+
+        already_appended = bool(
+            history and abs(float(history[-1][0]) - float(now)) < 1.0e-9)
+        if not already_appended:
+            history.append((float(now), raw_position.tolist()))
+        velocity = self._calculate_velocity()
+        fitted_position = raw_position
+        if (self.trajectory_position_smoothing_enabled
+                and len(history) >= 2):
+            fitted_position, _ = self._fit_trajectory_state(
+                list(history), gravity=False)
+        return self._commit_velocity_output(
+            now, raw_position, fitted_position, velocity,
+            ready=self.last_velocity_ready,
+            motion_state=('flight' if self.last_velocity_ready
+                          else 'initializing'),
+            velocity_model=(
+                'least_squares'
+                if self.velocity_least_squares_enabled else 'endpoint'))
+
+    def _clear_observation_buffers(self, *, preserve_depth_guard=False):
+        """Clear every temporal state that can leak across a detection gap."""
+        restart_reference = None
+        if (self.last_velocity_ready
+                and self.last_velocity_output_time is not None
+                and self.velocity_motion_state == 'flight'
+                and np.all(np.isfinite(self.last_velocity_output))):
+            restart_reference = (
+                float(self.last_velocity_output_time),
+                self.last_velocity_output.copy())
+        self.depth_history.clear()
+        self.position_history.clear()
+        self.pixel_history.clear()
+        self.candidate_position_history.clear()
+        self.ir_depth_kf.reset()
+        self.pixel_kf.reset()
+        if not preserve_depth_guard:
+            self._reset_adaptive_depth_state()
+        self.last_velocity_impact_time = None
+        self.last_velocity_impact_detected = False
+        self._reset_velocity_tracking_state()
+        if restart_reference is not None:
+            (self.velocity_restart_reference_time,
+             self.velocity_restart_reference_velocity) = restart_reference
+        self.observation_buffer_clear_count += 1
+
+    def _handle_observation_loss(self, reason, *, preserve_depth_guard=False):
+        self.observation_gap_active = True
+        # Impact confirmation may never bridge a missing/untrusted frame.  A
+        # candidate that cannot be verified is discarded together with the
+        # old segment so it cannot later mix pre/post-impact samples.
+        if self.pending_impact is not None:
+            self.position_history.clear()
+            self.velocity_impact_rejected_count += 1
+            self._reset_velocity_tracking_state()
+        # One 90 Hz IR miss is only about 11 ms.  Keep a continuous-flight
+        # fit across that isolated flicker; two consecutive IR misses, or any
+        # depth/3D fault, establish a real segment boundary immediately.
+        isolated_ir_flicker = bool(
+            str(reason) == 'ir_detection_lost'
+            and int(self.ir_tracking_miss_count) < 2)
+        should_clear = bool(
+            self.clear_buffers_on_detection_loss_enabled
+            and not isolated_ir_flicker
+            and not self.observation_buffers_cleared_for_gap)
+        if should_clear:
+            self._clear_observation_buffers(
+                preserve_depth_guard=preserve_depth_guard)
+            self.observation_buffers_cleared_for_gap = True
+        self.motion_last_gate_reason = str(reason)
+
+    def _confirm_stale_reacquisition(self, now, position):
+        """Require two fresh, physically-consistent points after a long gap."""
+        candidates = self.motion_reacquisition_candidates
+        if not candidates:
+            candidates.append((float(now), position.copy()))
+            self.motion_last_gate_reason = 'reacquisition_confirming'
+            self.motion_gate_rejected_count += 1
+            return False
+        previous_time, previous_position = candidates[-1]
+        dt = float(now - previous_time)
+        displacement = position - previous_position
+        speed = (
+            float(np.linalg.norm(displacement) / dt)
+            if dt > 1.0e-6 else float('inf'))
+        if (dt <= 1.0e-6
+                or dt > self.MOTION_REACQUISITION_CONFIRM_MAX_GAP_S
+                or speed > self.MOTION_GATE_MAX_SPEED_MM_S):
+            candidates.clear()
+            candidates.append((float(now), position.copy()))
+            self.motion_last_gate_reason = 'reacquisition_inconsistent'
+            self.motion_gate_rejected_count += 1
+            return False
+        self.motion_reacquisition_seed = (
+            float(previous_time), previous_position.copy())
+        candidates.clear()
+        self.motion_last_gate_reason = 'reacquisition_confirmed'
+        self.motion_gate_accepted_count += 1
+        return True
+
+    def _motion_measurement_consistent(self, now, position):
+        """Gate a 3D point against the last trusted ballistic state."""
+        position = np.asarray(position, dtype=np.float64).reshape(3)
+        self.motion_last_innovation_mm = None
+        self.motion_last_gate_reason = None
+        if not self.motion_consistency_gate_enabled:
+            return True
+        # A real racket impact is intentionally discontinuous with the
+        # pre-impact ballistic state.  The velocity estimator has already
+        # required a first rising sample, optional racket proximity, minimum
+        # downward/upward speeds and a minimum velocity jump before creating
+        # ``pending_impact``.  Its *second* rising sample must reach the impact
+        # state machine; applying the ordinary flight gate first otherwise
+        # rejects precisely the sample needed to confirm contact.  This was
+        # visible in the 20260812_212449/212631 recordings: impact confirmation
+        # was starved, then reacquisition incorrectly reused the old downward
+        # velocity.  The preview is side-effect free; the normal append path
+        # still performs and owns the actual confirmation/reset.
+        if (self.pending_impact is not None
+                and self._confirm_pending_impact(now, position)):
+            self.motion_last_gate_reason = 'impact_confirmation_bypass'
+            self.motion_gate_accepted_count += 1
+            self.motion_impact_confirmation_bypass_count += 1
+            return True
+        if (self.motion_last_trusted_time is None
+                or self.motion_last_trusted_position is None
+                or self.motion_last_trusted_velocity is None):
+            return True
+        dt = float(now - self.motion_last_trusted_time)
+        if dt <= 1.0e-6:
+            return True
+        if dt > self.MOTION_GATE_MAX_REACQUISITION_DT_S:
+            return self._confirm_stale_reacquisition(now, position)
+        expected = (
+            self.motion_last_trusted_position
+            + self.motion_last_trusted_velocity * dt)
+        expected = expected.copy()
+        expected[2] -= 0.5 * self.PHYSICS_VELOCITY_GRAVITY_MM_S2 * dt * dt
+        innovation = position - expected
+        self.motion_last_innovation_mm = innovation.copy()
+        if (self.observation_gap_active
+                or dt > self.MOTION_GATE_MAX_DT_S):
+            xy_limit = self.MOTION_GATE_REACQUISITION_MM
+            z_limit = self.MOTION_GATE_REACQUISITION_MM
+        else:
+            # Add a small time-dependent allowance for acceleration/model error.
+            xy_limit = self.MOTION_GATE_XY_BASE_MM + 250.0 * dt
+            z_limit = self.MOTION_GATE_Z_BASE_MM + 500.0 * dt
+        speed = float(np.linalg.norm(
+            position - self.motion_last_trusted_position) / dt)
+        reason = None
+        if float(np.linalg.norm(innovation[:2])) > xy_limit:
+            reason = 'xy_innovation'
+        elif abs(float(innovation[2])) > z_limit:
+            reason = 'z_innovation'
+        elif speed > self.MOTION_GATE_MAX_SPEED_MM_S:
+            reason = 'speed_limit'
+        if reason is not None:
+            # The first contact-reversal point can itself be inconsistent with
+            # the pre-impact ballistic state (20260812_212631).  Let it reach
+            # the estimator only when it already passes the complete impact
+            # candidate contract, including racket proximity when required.
+            # The estimator then holds pre-impact velocity and still requires
+            # a second rising point, so one isolated 3D glitch cannot commit a
+            # reset merely because it bypassed this gate.
+            if (not self.observation_gap_active
+                    and self._impact_candidate(now, position) is not None):
+                self.motion_last_gate_reason = 'impact_candidate_bypass'
+                self.motion_gate_accepted_count += 1
+                self.motion_impact_candidate_bypass_count += 1
+                return True
+            if self.observation_gap_active:
+                # The old ballistic model can be wrong after an impact or a
+                # longer depth fault.  Two fresh, mutually-consistent trusted
+                # 3D points are stronger evidence than indefinitely holding
+                # the stale prediction, while still rejecting an isolated
+                # false blob on the first frame.
+                if self._confirm_stale_reacquisition(now, position):
+                    return True
+                return False
+            self.motion_last_gate_reason = reason
+            self.motion_gate_rejected_count += 1
+            return False
+        self.motion_gate_accepted_count += 1
+        return True
+
+    def _remember_motion_state(
+            self, now, position, velocity, *, velocity_ready=True):
+        position_array = np.asarray(
+            position, dtype=np.float64).reshape(3).copy()
+        velocity_array = np.asarray(
+            velocity, dtype=np.float64).reshape(3).copy()
+        if not velocity_ready:
+            reference = self.motion_reacquisition_seed
+            if reference is None and (
+                    self.motion_last_trusted_time is not None
+                    and self.motion_last_trusted_position is not None):
+                reference = (
+                    self.motion_last_trusted_time,
+                    self.motion_last_trusted_position)
+            if reference is not None:
+                dt = float(now - float(reference[0]))
+                if 1.0e-6 < dt <= self.PHYSICS_VELOCITY_MAX_GAP_S:
+                    velocity_array = (
+                        position_array
+                        - np.asarray(reference[1], dtype=np.float64)) / dt
+                    # Convert the interval-average ballistic Z velocity to
+                    # the current endpoint velocity.
+                    velocity_array[2] -= (
+                        0.5 * self.PHYSICS_VELOCITY_GRAVITY_MM_S2 * dt)
+        self.motion_last_trusted_time = float(now)
+        self.motion_last_trusted_position = position_array
+        self.motion_last_trusted_velocity = velocity_array
+        self.observation_gap_active = False
+        self.observation_buffers_cleared_for_gap = False
+        self.motion_reacquisition_candidates.clear()
+        self.motion_reacquisition_seed = None
+
+    def _selected_depth_is_trusted(self, depth_method):
+        """Return whether the selected range may enter any 3D state history."""
+        method = str(depth_method or '')
+        if self.depth_mode == 'adaptive':
+            return bool(
+                method == 'adaptive_sensor'
+                and not self.last_depth_selection.get(
+                    'sensor_rejected', False))
+        if self.depth_mode == 'sensor':
+            # Geometry fallback is useful for diagnostics, but it is not an
+            # equivalent measurement on a tilted camera and must not be
+            # presented as a valid XYZ sample.
+            return method == 'sensor'
+        # Explicit geometry mode is an operator-selected experiment.  Its
+        # sensor fallback is also a physical depth measurement.
+        return method in {'geometry', 'sensor'}
+
+    def _snapshot_ir_tracking_state(self):
+        """Capture 2D state so a later 3D rejection can be rolled back."""
+        pixel_filter = self.pixel_kf
+        return {
+            'candidate_history': list(self.candidate_position_history),
+            'pixel_filter': pixel_filter,
+            'pixel_initialized': bool(pixel_filter.initialized),
+            'pixel_state': pixel_filter.state.copy(),
+            'pixel_covariance': pixel_filter.P.copy(),
+            'pixel_consecutive_outliers': int(
+                pixel_filter.consecutive_outliers),
+            'pixel_total_updates': int(pixel_filter.total_updates),
+            'pixel_outliers_rejected': int(
+                pixel_filter.outliers_rejected),
+        }
+
+    def _restore_ir_tracking_state(self, snapshot):
+        """Undo a candidate that failed depth or transformed-3D validation."""
+        if not isinstance(snapshot, dict):
+            return
+        self.candidate_position_history.clear()
+        self.candidate_position_history.extend(
+            snapshot.get('candidate_history', ()))
+        pixel_filter = snapshot.get('pixel_filter')
+        # A concurrent runtime reconfiguration may have installed a new
+        # filter.  Never overwrite that new object's tuning/state.
+        if pixel_filter is None or self.pixel_kf is not pixel_filter:
+            return
+        pixel_filter.initialized = bool(snapshot['pixel_initialized'])
+        pixel_filter.state = snapshot['pixel_state'].copy()
+        pixel_filter.P = snapshot['pixel_covariance'].copy()
+        pixel_filter.consecutive_outliers = int(
+            snapshot['pixel_consecutive_outliers'])
+        pixel_filter.total_updates = int(snapshot['pixel_total_updates'])
+        pixel_filter.outliers_rejected = int(
+            snapshot['pixel_outliers_rejected'])
 
     def _transform_ir_to_rgb_pixel(self, ir_x, ir_y, depth_m):
         """
@@ -1445,7 +3320,17 @@ class HybridBallDetector:
         depth_frame = frames.get_depth_frame()
 
         if not ir_frame or not depth_frame:
-            return {'detected': False, 'position': [0, 0, 0], 'velocity': [0, 0, 0]}
+            self._handle_observation_loss('missing_realsense_frame')
+            return {
+                'detected': False, 'position': [0, 0, 0],
+                'velocity': [0, 0, 0],
+                'raw_measurement': {
+                    'observation_state': 'detection_loss',
+                    'observation_reason': 'missing_realsense_frame',
+                    'measurement_trusted_3d': False,
+                    'velocity_ready': False,
+                },
+            }
 
         # 修复：FPS计算使用IR帧时间戳（IR是主循环频率）
         current_timestamp = ir_frame.get_timestamp()  # 毫秒
@@ -1496,8 +3381,17 @@ class HybridBallDetector:
         self.last_observation_time = now
 
         if rgb_image is None or ir_image is None:
-            return {'detected': False, 'position': [0, 0, 0],
-                    'velocity': [0, 0, 0]}
+            self._handle_observation_loss('missing_offline_image')
+            return {
+                'detected': False, 'position': [0, 0, 0],
+                'velocity': [0, 0, 0],
+                'raw_measurement': {
+                    'observation_state': 'detection_loss',
+                    'observation_reason': 'missing_offline_image',
+                    'measurement_trusted_3d': False,
+                    'velocity_ready': False,
+                },
+            }
         started = time.perf_counter()
         result = self._detect_core(rgb_image, ir_image, depth_image, now)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -1633,6 +3527,7 @@ class HybridBallDetector:
         # 步骤2：IR检测（优先在ROI内，失败立即全图兜底）
         t_ir = time.time()
         ir_detection = None
+        ir_tracking_snapshot = self._snapshot_ir_tracking_state()
 
         if use_roi:
             # 优先在ROI内检测
@@ -1655,31 +3550,193 @@ class HybridBallDetector:
             self.ir_tracking_miss_count += 1
             if not self.yolo_enabled and self.ir_tracking_miss_count >= 2:
                 self.candidate_position_history.clear()
-            return {'detected': False, 'position': [0, 0, 0], 'velocity': [0, 0, 0],
-                   'detection_method': detection_method}
+            self._handle_observation_loss('ir_detection_lost')
+            return {
+                'detected': False, 'position': [0, 0, 0],
+                'velocity': [0, 0, 0],
+                'detection_method': detection_method,
+                'raw_measurement': {
+                    'observation_state': 'detection_loss',
+                    'observation_reason': 'ir_detection_lost',
+                    'measurement_trusted_3d': False,
+                    'velocity_ready': False,
+                    'detection_method': detection_method,
+                    'observation_gap_active': True,
+                    'observation_buffer_clear_count': int(
+                        self.observation_buffer_clear_count),
+                    'ir_edge_rejected_count': int(
+                        self.ir_edge_rejected_count),
+                    'ir_roi_edge_rejected_count': int(
+                        self.ir_roi_edge_rejected_count),
+                },
+            }
         self.ir_tracking_miss_count = 0
 
         # 步骤3：获取深度
         # 3a. sensor（双目硬件深度，远场准）与 geometry（单目 Z=f*D/2r，近场稳）都算出来
+        geom_depth_raw_mm = ir_detection.get(
+            'selection_geom_depth_raw_mm')
+        if geom_depth_raw_mm is None:
+            geom_depth_raw_mm = self._geometry_depth_mm(
+                ir_detection.get(
+                    'geometry_radius_px', ir_detection['radius']))
+        geom_depth_corrected_mm = ir_detection.get(
+            'selection_geom_depth_corrected_mm')
+        if geom_depth_corrected_mm is None:
+            geom_depth_corrected_mm = self._apply_depth_correction(
+                geom_depth_raw_mm)
+        geom_depth_mm = (
+            geom_depth_corrected_mm
+            if self.depth_mode == 'geometry'
+            else geom_depth_raw_mm)
+
         sensor_depth_mm = ir_detection.get('selection_sensor_depth_mm')
-        if sensor_depth_mm is None:
+        # Adaptive mode intentionally recomputes the sample with a foreground
+        # percentile even if candidate scoring already cached a legacy median.
+        if sensor_depth_mm is None or self.depth_mode == 'adaptive':
             depth_sample_cx = ir_detection.get(
                 'cx_raw', ir_detection['cx'])
             depth_sample_cy = ir_detection.get(
                 'cy_raw', ir_detection['cy'])
             sensor_depth_mm = self._get_depth_from_depthmap(
                 depth_sample_cx, depth_sample_cy, depth_image,
-                ir_detection['mask'], ir_detection.get('mask_origin'))
-        geom_depth_mm = ir_detection.get('selection_geom_depth_mm')
-        if geom_depth_mm is None:
-            geom_depth_mm = self._apply_depth_correction(
-                self._geometry_depth_mm(ir_detection['radius']))
+                ir_detection['mask'], ir_detection.get('mask_origin'),
+                prefer_near_surface=(self.depth_mode == 'adaptive'),
+                geometry_hint_mm=geom_depth_mm)
 
-        # 3b. 带迟滞的距离门选择深度源（近场锁geometry / 远场用sensor，避免逐帧横跳）
-        depth_raw, depth_method = self._select_depth(sensor_depth_mm, geom_depth_mm)
+        # 3b. sensor模式保持原值；adaptive任一异常条件命中时短时接管。
+        depth_raw, depth_method = self._select_depth(
+            sensor_depth_mm, geom_depth_mm, now,
+            observed_radius_px=(
+                ir_detection.get('geometry_radius_px')
+                if ir_detection.get('geometry_quality_valid', True)
+                else None),
+            observed_cy_px=(
+                ir_detection.get('cy_raw', ir_detection.get('cy'))
+                if ir_detection.get('geometry_quality_valid', True)
+                else None),
+            defer_commit=True)
         if depth_raw is None:
-            return {'detected': False, 'position': [0, 0, 0], 'velocity': [0, 0, 0],
-                   'detection_method': detection_method}
+            self._finalize_adaptive_depth_selection(False)
+            self._restore_ir_tracking_state(ir_tracking_snapshot)
+            self._handle_observation_loss('depth_unavailable')
+            return {
+                'detected': False, 'position': [0, 0, 0],
+                'velocity': [0, 0, 0],
+                'detection_method': detection_method,
+                'raw_measurement': {
+                    'cx': ir_detection['cx'],
+                    'cy': ir_detection['cy'],
+                    'cx_raw': ir_detection.get('cx_raw'),
+                    'cy_raw': ir_detection.get('cy_raw'),
+                    'radius': ir_detection['radius'],
+                    'observation_state': 'depth_fault',
+                    'observation_reason': 'depth_unavailable',
+                    'measurement_trusted_3d': False,
+                    'velocity_ready': False,
+                    'depth_mode': self.depth_mode,
+                    'sensor_surface_to_center_depth_enabled': bool(
+                        self.sensor_surface_to_center_depth_enabled),
+                    'sensor_surface_to_center_depth_applied': False,
+                    'depth_sensor_rejected': bool(
+                        self.depth_mode == 'adaptive'),
+                    'depth_rejection_reason': 'depth_unavailable',
+                    'detection_method': detection_method,
+                },
+            }
+
+        depth_selection = dict(self.last_depth_selection)
+        measurement_trusted_3d = self._selected_depth_is_trusted(
+            depth_method)
+        if not measurement_trusted_3d:
+            # Geometry/predicted depth may still be drawn and recorded, but
+            # never reaches the temporal median, 3D KF, motion state, or
+            # velocity fit.  Because the camera is tilted, even a correct IR
+            # centre does not make any transformed XYZ component trustworthy
+            # when axial depth is wrong.
+            self._finalize_adaptive_depth_selection(False)
+            self._restore_ir_tracking_state(ir_tracking_snapshot)
+            self._handle_observation_loss(
+                'depth_untrusted', preserve_depth_guard=True)
+            return {
+                'detected': False,
+                'position': [0, 0, 0],
+                'velocity': [0, 0, 0],
+                'detection_method': detection_method,
+                'raw_measurement': {
+                    'cx': ir_detection['cx'],
+                    'cy': ir_detection['cy'],
+                    'cx_raw': ir_detection.get('cx_raw'),
+                    'cy_raw': ir_detection.get('cy_raw'),
+                    'radius': ir_detection['radius'],
+                    'geometry_radius_px': ir_detection.get(
+                        'geometry_radius_px'),
+                    'geometry_quality_valid': ir_detection.get(
+                        'geometry_quality_valid'),
+                    'depth_mm': float(depth_raw),
+                    'sensor_depth_mm': sensor_depth_mm,
+                    'geom_depth_mm': geom_depth_mm,
+                    'geom_depth_raw_mm': geom_depth_raw_mm,
+                    'geom_depth_corrected_mm': geom_depth_corrected_mm,
+                    'depth_correction_model_type': (
+                        None if self.depth_correction_model is None
+                        else self.depth_correction_model.get('type')),
+                    'depth_method': depth_method,
+                    'depth_mode': self.depth_mode,
+                    'sensor_surface_to_center_depth_enabled': bool(
+                        self.sensor_surface_to_center_depth_enabled),
+                    'sensor_surface_to_center_depth_applied': False,
+                    'depth_sensor_weight': depth_selection.get(
+                        'sensor_weight'),
+                    'depth_disagreement_mm': depth_selection.get(
+                        'disagreement_mm'),
+                    'depth_sensor_rejected': depth_selection.get(
+                        'sensor_rejected'),
+                    'depth_rejection_reason': depth_selection.get(
+                        'rejection_reason'),
+                    'depth_sensor_jump_mm': depth_selection.get(
+                        'sensor_jump_mm'),
+                    'depth_observed_radius_px': depth_selection.get(
+                        'observed_radius_px'),
+                    'depth_sensor_projected_radius_px': depth_selection.get(
+                        'sensor_projected_radius_px'),
+                    'depth_radius_mismatch_ratio': depth_selection.get(
+                        'radius_mismatch_ratio'),
+                    'depth_near_field_scale_stall': depth_selection.get(
+                        'near_field_scale_stall'),
+                    'depth_near_field_window_samples': depth_selection.get(
+                        'near_field_window_samples'),
+                    'depth_near_field_window_span_s': depth_selection.get(
+                        'near_field_window_span_s'),
+                    'depth_near_field_sensor_approach_mm': (
+                        depth_selection.get(
+                            'near_field_sensor_approach_mm')),
+                    'depth_near_field_geometry_approach_mm': (
+                        depth_selection.get(
+                            'near_field_geometry_approach_mm')),
+                    'depth_near_field_radius_growth_ratio': (
+                        depth_selection.get(
+                            'near_field_radius_growth_ratio')),
+                    'depth_near_field_upward_pixel_speed_px_s': (
+                        depth_selection.get(
+                            'near_field_upward_pixel_speed_px_s')),
+                    'depth_prediction_mm': depth_selection.get(
+                        'prediction_mm'),
+                    'depth_prediction_horizon_s': depth_selection.get(
+                        'prediction_horizon_s'),
+                    'depth_sensor_recovery_count': depth_selection.get(
+                        'sensor_recovery_count'),
+                    'measurement_trusted_3d': False,
+                    'velocity_ready': False,
+                    'observation_state': 'depth_fault',
+                    'observation_gap_active': True,
+                    'observation_buffer_clear_count': int(
+                        self.observation_buffer_clear_count),
+                    'detection_method': detection_method,
+                    'ir_roi_edge_rejected_count': int(
+                        self.ir_roi_edge_rejected_count),
+                },
+            }
 
         use_ir_depth_kalman = bool(
             getattr(self, 'ir_depth_kalman_enabled', False))
@@ -1687,11 +3744,14 @@ class HybridBallDetector:
             getattr(self, 'synchronized_depth_enabled', False))
         # The switch is deliberately independent from the joint KF. This makes
         # all four raw/median-depth and filtered/unfiltered combinations valid.
-        depth_mm = self._depth_for_reconstruction(depth_raw)
-        projected_radius_px = (
-            (self.ir_fx + self.ir_fy) * self.ball_diameter_mm
-            / (4.0 * depth_mm)
-            if depth_mm is not None and depth_mm > 1e-3 else None)
+        # Preview the exact median/Hampel result but defer the history write
+        # until the resulting transformed 3D point passes the motion gate.
+        sensor_surface_depth_mm = self._depth_for_reconstruction(
+            depth_raw, commit=False)
+        depth_mm, sensor_center_depth_diagnostics = (
+            self._sensor_surface_to_center_depth(
+                sensor_surface_depth_mm, depth_method))
+        projected_radius_px = self._projected_ball_radius_px(depth_mm)
 
         # 步骤4：IR坐标 + IR内参 → IR 3D点
         measurement_cx = (
@@ -1713,6 +3773,102 @@ class HybridBallDetector:
         else:
             measured_position = pos_rgb_camera
 
+        was_observation_gap = bool(self.observation_gap_active)
+        if not self._motion_measurement_consistent(now, measured_position):
+            self._finalize_adaptive_depth_selection(False)
+            self._restore_ir_tracking_state(ir_tracking_snapshot)
+            rejection_reason = self.motion_last_gate_reason
+            innovation = self.motion_last_innovation_mm
+            # Loss handling can clear adaptive state.  Preserve the depth
+            # verdict which caused this candidate so the controller can still
+            # route a radius-triggered sensor fault into trajectory prediction.
+            depth_selection = dict(self.last_depth_selection)
+            self._handle_observation_loss(
+                'motion_consistency_' + str(rejection_reason),
+                preserve_depth_guard=True)
+            return {
+                'detected': False,
+                'position': [0, 0, 0],
+                'velocity': [0, 0, 0],
+                'detection_method': detection_method,
+                'raw_measurement': {
+                    'cx': ir_detection['cx'],
+                    'cy': ir_detection['cy'],
+                    'cx_raw': ir_detection.get('cx_raw'),
+                    'cy_raw': ir_detection.get('cy_raw'),
+                    'radius': ir_detection['radius'],
+                    # Preserve the exact pre-gate 3D point for deterministic
+                    # offline state-machine replay.  The annotated JPEG and
+                    # the public rejected position=[0,0,0] cannot recover it.
+                    'transformed_measurement_x_mm': float(
+                        measured_position[0]),
+                    'transformed_measurement_y_mm': float(
+                        measured_position[1]),
+                    'transformed_measurement_z_mm': float(
+                        measured_position[2]),
+                    'projected_radius_px': projected_radius_px,
+                    'motion_consistency_gate_enabled': True,
+                    'motion_consistency_rejected': True,
+                    'motion_consistency_reason': rejection_reason,
+                    'motion_innovation_mm': (
+                        None if innovation is None
+                        else [float(value) for value in innovation]),
+                    'observation_gap_active': True,
+                    'observation_buffer_clear_count': int(
+                        self.observation_buffer_clear_count),
+                    'depth_mm': depth_mm,
+                    'sensor_depth_mm': sensor_depth_mm,
+                    **sensor_center_depth_diagnostics,
+                    'geom_depth_mm': geom_depth_mm,
+                    'depth_method': depth_method,
+                    'depth_mode': self.depth_mode,
+                    'depth_sensor_weight': depth_selection.get(
+                        'sensor_weight'),
+                    'depth_disagreement_mm': depth_selection.get(
+                        'disagreement_mm'),
+                    'depth_sensor_rejected': depth_selection.get(
+                        'sensor_rejected'),
+                    'depth_rejection_reason': depth_selection.get(
+                        'rejection_reason'),
+                    'depth_sensor_jump_mm': depth_selection.get(
+                        'sensor_jump_mm'),
+                    'depth_observed_radius_px': (
+                        depth_selection.get('observed_radius_px')),
+                    'depth_sensor_projected_radius_px': (
+                        depth_selection.get(
+                            'sensor_projected_radius_px')),
+                    'depth_radius_mismatch_ratio': (
+                        depth_selection.get('radius_mismatch_ratio')),
+                    'depth_near_field_scale_stall': (
+                        depth_selection.get('near_field_scale_stall')),
+                    'depth_near_field_window_samples': (
+                        depth_selection.get('near_field_window_samples')),
+                    'depth_near_field_window_span_s': (
+                        depth_selection.get('near_field_window_span_s')),
+                    'depth_near_field_sensor_approach_mm': (
+                        depth_selection.get(
+                            'near_field_sensor_approach_mm')),
+                    'depth_near_field_geometry_approach_mm': (
+                        depth_selection.get(
+                            'near_field_geometry_approach_mm')),
+                    'depth_near_field_radius_growth_ratio': (
+                        depth_selection.get(
+                            'near_field_radius_growth_ratio')),
+                    'depth_near_field_upward_pixel_speed_px_s': (
+                        depth_selection.get(
+                            'near_field_upward_pixel_speed_px_s')),
+                    'measurement_trusted_3d': False,
+                    'velocity_ready': False,
+                    'observation_state': 'motion_outlier',
+                },
+            }
+
+        motion_reacquisition_confirmed = bool(
+            self.motion_last_gate_reason == 'reacquisition_confirmed')
+        if not use_synchronized_depth:
+            self._depth_for_reconstruction(depth_raw, commit=True)
+        self._finalize_adaptive_depth_selection(True)
+
         if use_ir_depth_kalman:
             position, velocity = self.ir_depth_kf.update(
                 measured_position, now)
@@ -1720,12 +3876,27 @@ class HybridBallDetector:
             position = measured_position
             velocity = None
 
-        # 更新历史
-        self.position_history.append((now, position))
-
-        # 计算速度
+        # Estimate raw 3D velocity only from a continuous flight segment.
+        # The joint IR+depth Kalman filter owns its own velocity state when it
+        # is enabled, but the history is still maintained for diagnostics and
+        # for an immediate switch back to the raw estimator.
+        reacquisition_seed = self.motion_reacquisition_seed
+        if reacquisition_seed is not None and not self.position_history:
+            self.position_history.append((
+                float(reacquisition_seed[0]),
+                np.asarray(reacquisition_seed[1], dtype=np.float64).tolist(),
+            ))
+        history_velocity = self._append_velocity_sample(now, position)
         if velocity is None:
-            velocity = self._calculate_velocity()
+            if ((self.physics_constrained_velocity_enabled
+                    or self.trajectory_position_smoothing_enabled)
+                    and self.last_position_estimate is not None):
+                position = self.last_position_estimate.tolist()
+            velocity = history_velocity
+        self._remember_motion_state(
+            now, position, velocity,
+            velocity_ready=bool(
+                use_ir_depth_kalman or self.last_velocity_ready))
 
         # 统计
         self.detected_frames += 1
@@ -1765,6 +3936,12 @@ class HybridBallDetector:
                 'cy_coarse': ir_detection.get('cy_coarse'),
                 'center_refine_shift_px': ir_detection.get(
                     'center_refine_shift_px'),
+                'transformed_measurement_x_mm': float(
+                    measured_position[0]),
+                'transformed_measurement_y_mm': float(
+                    measured_position[1]),
+                'transformed_measurement_z_mm': float(
+                    measured_position[2]),
                 'cx_rgb': rgb_pixel[0] if rgb_pixel else None,  # IR在RGB图上的精确位置（卡尔曼后）
                 'cy_rgb': rgb_pixel[1] if rgb_pixel else None,
                 'radius': ir_detection['radius'],
@@ -1774,16 +3951,177 @@ class HybridBallDetector:
                 'smoothed_radius': smoothed_radius,
                 'depth_mm': depth_mm,
                 'sensor_depth_mm': sensor_depth_mm,
+                **sensor_center_depth_diagnostics,
                 'synchronized_depth_enabled': use_synchronized_depth,
                 'depth_temporal_window_frames': (
                     self.depth_temporal_window_frames),
+                'velocity_least_squares_enabled': (
+                    self.velocity_least_squares_enabled),
+                'velocity_window_frames': self.velocity_window_frames,
+                'velocity_history_size': len(self.position_history),
+                'velocity_min_frames': (
+                    1 if use_ir_depth_kalman else (
+                        self.PHYSICS_VELOCITY_MIN_FRAMES
+                        if self.physics_constrained_velocity_enabled else 2)),
+                'velocity_ready': bool(
+                    use_ir_depth_kalman or self.last_velocity_ready),
+                'trajectory_position_smoothing_enabled': bool(
+                    self.trajectory_position_smoothing_enabled),
+                'position_filter_residual_mm': (
+                    self.last_position_filter_residual_mm),
+                'measurement_trusted_3d': True,
+                'observation_state': (
+                    'impact_confirming'
+                    if self.velocity_motion_state == 'impact_confirming'
+                    else ('reacquiring'
+                          if was_observation_gap
+                          or not bool(
+                              use_ir_depth_kalman or self.last_velocity_ready)
+                          else 'tracking')),
+                'ir_edge_rejected_count': int(
+                    self.ir_edge_rejected_count),
+                'ir_roi_edge_rejected_count': int(
+                    self.ir_roi_edge_rejected_count),
+                'clear_buffers_on_detection_loss_enabled': bool(
+                    self.clear_buffers_on_detection_loss_enabled),
+                'observation_gap_active': bool(self.observation_gap_active),
+                'observation_buffer_clear_count': int(
+                    self.observation_buffer_clear_count),
+                'motion_consistency_gate_enabled': bool(
+                    self.motion_consistency_gate_enabled),
+                'motion_consistency_rejected': False,
+                'motion_consistency_reason': self.motion_last_gate_reason,
+                'motion_reacquisition_confirmed': (
+                    motion_reacquisition_confirmed),
+                'motion_innovation_mm': (
+                    None if self.motion_last_innovation_mm is None
+                    else [float(value)
+                          for value in self.motion_last_innovation_mm]),
+                'motion_gate_accepted_count': int(
+                    self.motion_gate_accepted_count),
+                'motion_gate_rejected_count': int(
+                    self.motion_gate_rejected_count),
+                'motion_impact_confirmation_bypass_count': int(
+                    self.motion_impact_confirmation_bypass_count),
+                'motion_impact_candidate_bypass_count': int(
+                    self.motion_impact_candidate_bypass_count),
+                'physics_constrained_velocity_enabled': bool(
+                    self.physics_constrained_velocity_enabled),
+                'velocity_model': (
+                    self.velocity_model
+                    if self.physics_constrained_velocity_enabled
+                    else ('least_squares'
+                          if self.velocity_least_squares_enabled
+                          else 'endpoint')),
+                'velocity_motion_state': self.velocity_motion_state,
+                'velocity_filter_correction_m_s': (
+                    None
+                    if self.last_velocity_filter_correction_mm_s is None
+                    else self.last_velocity_filter_correction_mm_s / 1000.0),
+                'velocity_restart_bridge_used': bool(
+                    self.last_velocity_restart_bridge_used),
+                'velocity_restart_bridge_count': int(
+                    self.velocity_restart_bridge_count),
+                'impact_velocity_reset_enabled': (
+                    self.impact_velocity_reset_enabled),
+                'velocity_impact_detected': (
+                    self.last_velocity_impact_detected),
+                'velocity_impact_candidate': bool(
+                    self.pending_impact is not None),
+                'velocity_impact_candidate_count': int(
+                    self.velocity_impact_candidate_count),
+                'velocity_impact_confirmed_count': int(
+                    self.velocity_impact_confirmed_count),
+                'velocity_impact_rejected_count': int(
+                    self.velocity_impact_rejected_count),
+                'impact_racket_gate_used': bool(
+                    self.last_impact_racket_gate_used),
+                'impact_racket_gate_required': bool(
+                    self.impact_racket_gate_required),
+                'impact_racket_distance_mm': (
+                    self.last_impact_racket_distance_mm),
+                'impact_racket_state_age_s': (
+                    self.last_impact_racket_state_age_s),
+                'impact_candidate_rejection_reason': (
+                    self.last_impact_candidate_rejection_reason),
+                'impact_pair_vertical_velocity_m_s': (
+                    None
+                    if self.last_impact_pair_vertical_velocity_mm_s is None
+                    else self.last_impact_pair_vertical_velocity_mm_s
+                    / 1000.0),
+                'impact_previous_vertical_velocity_m_s': (
+                    None
+                    if self.last_impact_previous_vertical_velocity_mm_s is None
+                    else self.last_impact_previous_vertical_velocity_mm_s
+                    / 1000.0),
+                'impact_evidence_source': (
+                    self.last_impact_evidence_source),
                 'ir_depth_kalman_enabled': use_ir_depth_kalman,
                 'ir_depth_innovation_mahalanobis': (
                     self.ir_depth_kf.last_innovation_mahalanobis
                     if use_ir_depth_kalman else None),
                 'geom_depth_mm': geom_depth_mm,
+                'geom_depth_raw_mm': geom_depth_raw_mm,
+                'geom_depth_corrected_mm': geom_depth_corrected_mm,
+                'depth_correction_model_type': (
+                    None if self.depth_correction_model is None
+                    else self.depth_correction_model.get('type')),
+                'geometry_radius_px': ir_detection.get(
+                    'geometry_radius_px'),
+                'geometry_quality_valid': ir_detection.get(
+                    'geometry_quality_valid'),
+                'ellipse_minor_px': ir_detection.get('ellipse_minor_px'),
+                'ellipse_major_px': ir_detection.get('ellipse_major_px'),
+                'area_circularity': ir_detection.get('area_circularity'),
                 'depth_method': depth_method,
                 'depth_mode': self.depth_mode,
+                'depth_sensor_weight': self.last_depth_selection.get(
+                    'sensor_weight'),
+                'depth_disagreement_mm': self.last_depth_selection.get(
+                    'disagreement_mm'),
+                'depth_sensor_rejected': self.last_depth_selection.get(
+                    'sensor_rejected'),
+                'depth_rejection_reason': self.last_depth_selection.get(
+                    'rejection_reason'),
+                'depth_sensor_jump_mm': self.last_depth_selection.get(
+                    'sensor_jump_mm'),
+                'depth_observed_radius_px': self.last_depth_selection.get(
+                    'observed_radius_px'),
+                'depth_sensor_projected_radius_px': (
+                    self.last_depth_selection.get(
+                        'sensor_projected_radius_px')),
+                'depth_radius_mismatch_ratio': self.last_depth_selection.get(
+                    'radius_mismatch_ratio'),
+                'depth_near_field_scale_stall': (
+                    self.last_depth_selection.get(
+                        'near_field_scale_stall')),
+                'depth_near_field_window_samples': (
+                    self.last_depth_selection.get(
+                        'near_field_window_samples')),
+                'depth_near_field_window_span_s': (
+                    self.last_depth_selection.get(
+                        'near_field_window_span_s')),
+                'depth_near_field_sensor_approach_mm': (
+                    self.last_depth_selection.get(
+                        'near_field_sensor_approach_mm')),
+                'depth_near_field_geometry_approach_mm': (
+                    self.last_depth_selection.get(
+                        'near_field_geometry_approach_mm')),
+                'depth_near_field_radius_growth_ratio': (
+                    self.last_depth_selection.get(
+                        'near_field_radius_growth_ratio')),
+                'depth_near_field_upward_pixel_speed_px_s': (
+                    self.last_depth_selection.get(
+                        'near_field_upward_pixel_speed_px_s')),
+                'depth_prediction_mm': self.last_depth_selection.get(
+                    'prediction_mm'),
+                'depth_prediction_residual_mm': (
+                    self.last_depth_selection.get(
+                        'prediction_residual_mm')),
+                'depth_prediction_horizon_s': self.last_depth_selection.get(
+                    'prediction_horizon_s'),
+                'depth_sensor_recovery_count': self.last_depth_selection.get(
+                    'sensor_recovery_count'),
                 'detection_method': detection_method,
                 'pixel_source': 'ir',  # 主要数据源
                 'yolo_bbox': self.last_yolo_bbox,
@@ -2063,6 +4401,34 @@ class HybridBallDetector:
                     if self.pixel_kalman_enabled else "Pixel KF: OFF (raw IR)"
                 ),
             ]
+            if raw.get('sensor_surface_to_center_depth_applied'):
+                info_lines.append(
+                    "Sensor surface->center: "
+                    f"{raw.get('sensor_surface_depth_mm'):.1f}->"
+                    f"{raw.get('sensor_center_depth_mm'):.1f}mm "
+                    f"(delta={raw.get('sensor_center_depth_correction_mm'):.1f}mm"
+                    f"{' clamped' if raw.get('sensor_center_depth_calibration_clamped') else ''})")
+            if raw.get('depth_mode') == 'adaptive':
+                sensor_weight = raw.get('depth_sensor_weight')
+                disagreement = raw.get('depth_disagreement_mm')
+                sensor_jump = raw.get('depth_sensor_jump_mm')
+                radius_mismatch = raw.get('depth_radius_mismatch_ratio')
+                prediction = raw.get('depth_prediction_mm')
+                rejection = raw.get('depth_rejection_reason')
+                info_lines.append(
+                    "Adaptive depth: "
+                    f"sensor={sensor_weight:.0f} "
+                    f"jump={sensor_jump:.0f}mm "
+                    f"pred={prediction:.0f}mm "
+                    f"s-g={disagreement:.0f}mm "
+                    f"r-gap={100.0 * radius_mismatch:.1f}% "
+                    f"reject={rejection or '-'}"
+                    if (sensor_weight is not None
+                        and disagreement is not None
+                        and sensor_jump is not None
+                        and radius_mismatch is not None
+                        and prediction is not None)
+                    else f"Adaptive depth: reject={rejection or '-'}")
 
             # 添加调试信息（可选显示IR和RGB坐标系位置）
             if 'raw_position_ir' in raw and 'raw_position_rgb' in raw:
@@ -2080,13 +4446,24 @@ class HybridBallDetector:
         # IR图像 - 伪彩色显示
         ir_colored = cv2.applyColorMap(ir_image, cv2.COLORMAP_JET)
 
-        if observation['detected']:
-            raw = observation['raw_measurement']
+        raw_candidate = observation.get('raw_measurement')
+        if (isinstance(raw_candidate, dict)
+                and raw_candidate.get('cx') is not None
+                and raw_candidate.get('cy') is not None
+                and raw_candidate.get('radius') is not None):
+            raw = raw_candidate
             cx, cy = int(raw['cx']), int(raw['cy'])
             morphology_radius = int(round(raw['radius']))
             radius = int(round(raw.get('projected_radius_px')
+                               or raw.get(
+                                   'depth_sensor_projected_radius_px')
                                or raw['radius']))
-            cv2.circle(ir_colored, (cx, cy), radius, (0, 255, 0), 2)
+            projected_color = (
+                (0, 255, 0)
+                if observation.get('detected', False)
+                else (0, 0, 255))
+            cv2.circle(
+                ir_colored, (cx, cy), radius, projected_color, 2)
             if abs(morphology_radius - radius) > 1:
                 cv2.circle(ir_colored, (cx, cy), morphology_radius,
                            (0, 165, 255), 1)

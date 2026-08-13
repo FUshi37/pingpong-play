@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Motion capture ball detector - receives ball state via UDP."""
 
+from collections import deque
 import json
 import socket
 import struct
@@ -10,6 +11,9 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+
+_BINARY_PACKET_FORMAT = '<d6f'
+_BINARY_PACKET_SIZE = struct.calcsize(_BINARY_PACKET_FORMAT)
 
 
 @dataclass
@@ -22,6 +26,9 @@ class MocapPacket:
     timestamp_s: Optional[float]
     source_format: str
     raw: Dict[str, Any]
+    orientation_wxyz: Optional[np.ndarray] = None
+    tracked: Optional[bool] = None
+    mean_error_m: Optional[float] = None
 
 
 def _to_float(value) -> Optional[float]:
@@ -58,6 +65,12 @@ def _scale_for_unit(values, unit: str) -> float:
 
 
 def _normalize_timestamp(value, unit: str) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parsed = _parse_optitrack_timestamp_string(value)
+        if parsed is not None:
+            return parsed
     t = _to_float(value)
     if t is None:
         return None
@@ -83,6 +96,140 @@ def _normalize_timestamp(value, unit: str) -> Optional[float]:
         f"Unsupported mocap timestamp unit '{unit}', expected auto/s/ms/us/ns")
 
 
+def _parse_optitrack_timestamp_string(value: str) -> Optional[float]:
+    """Parse OptiTrack timestamps such as ``HH:MM:SS.mmm`` or ``HH:MM:SS:ms``."""
+    text = str(value or '').strip()
+    if not text:
+        return None
+    parts = text.split(':')
+    if len(parts) == 3:
+        try:
+            hours = float(parts[0])
+            minutes = float(parts[1])
+            seconds = float(parts[2])
+            if hours < 0.0 or not 0.0 <= minutes < 60.0 or not 0.0 <= seconds < 60.0:
+                return None
+            return hours * 3600.0 + minutes * 60.0 + seconds
+        except (TypeError, ValueError):
+            return None
+    if len(parts) == 4:
+        try:
+            hours = float(parts[0])
+            minutes = float(parts[1])
+            seconds = float(parts[2])
+            tail = float(parts[3])
+            if hours < 0.0 or not 0.0 <= minutes < 60.0 or not 0.0 <= seconds < 60.0:
+                return None
+            # The last field is usually milliseconds when it looks like an integer.
+            frac_s = tail * 1e-3 if abs(tail) >= 1.0 else tail
+            return hours * 3600.0 + minutes * 60.0 + seconds + frac_s
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _extract_opti_rb_position(payload: Dict[str, Any],
+                              slot: int) -> Optional[np.ndarray]:
+    prefix = f'opti_rb_{int(slot)}_'
+    vals = [
+        _first_number(payload, [prefix + 'px']),
+        _first_number(payload, [prefix + 'py']),
+        _first_number(payload, [prefix + 'pz']),
+    ]
+    if all(v is not None for v in vals):
+        return np.array(vals, dtype=np.float64)
+    return None
+
+
+def _extract_opti_rb_orientation(payload: Dict[str, Any],
+                                   slot: int) -> Optional[np.ndarray]:
+    prefix = f'opti_rb_{int(slot)}_'
+    vals = [
+        _first_number(payload, [prefix + 'qw']),
+        _first_number(payload, [prefix + 'qx']),
+        _first_number(payload, [prefix + 'qy']),
+        _first_number(payload, [prefix + 'qz']),
+    ]
+    if all(v is not None for v in vals):
+        return np.array(vals, dtype=np.float64)
+    return None
+
+
+def _opti_rb_tracked(payload: Dict[str, Any], slot: int) -> Optional[bool]:
+    prefix = f'opti_rb_{int(slot)}_'
+    key = prefix + 'btracked'
+    if key not in payload:
+        return None
+    parsed = _to_int(payload.get(key))
+    if parsed is not None:
+        return bool(parsed)
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    return bool(value)
+
+
+def _opti_rb_id_matches(payload: Dict[str, Any],
+                        rigid_body_slot: int,
+                        rigid_body_id: Optional[int]) -> bool:
+    """Validate the id carried by the selected ``opti_rb_<slot>`` record.
+
+    Some versions of the existing bridge use the numeric prefix itself as the
+    rigid-body identifier and put an unrelated/legacy value in ``*_id``.  Keep
+    that same-slot convention for compatibility, while correctly validating
+    the field value when callers deliberately configure different slot/id
+    values.
+    """
+    if rigid_body_id is None:
+        return True
+    slot = int(rigid_body_slot)
+    target_id = int(rigid_body_id)
+    key = f'opti_rb_{slot}_id'
+    if key not in payload:
+        return False
+    field_id = _to_int(payload.get(key))
+    return field_id == target_id or slot == target_id
+
+
+def _parse_opti_rb_packet(payload: Dict[str, Any],
+                          *,
+                          rigid_body_slot: int,
+                          rigid_body_id: Optional[int],
+                          position_unit: str,
+                          timestamp_unit: str) -> Optional[MocapPacket]:
+    if not isinstance(payload, dict):
+        return None
+    if not _opti_rb_id_matches(payload, rigid_body_slot, rigid_body_id):
+        return None
+    tracked = _opti_rb_tracked(payload, rigid_body_slot)
+    if tracked is False:
+        return None
+    pos = _extract_opti_rb_position(payload, rigid_body_slot)
+    if pos is None:
+        return None
+    scale = _scale_for_unit(pos, position_unit)
+    orientation = _extract_opti_rb_orientation(payload, rigid_body_slot)
+    prefix = f'opti_rb_{int(rigid_body_slot)}_'
+    mean_error = _first_number(payload, [prefix + 'meanError'])
+    mean_error_m = (
+        float(mean_error) * scale if mean_error is not None else None)
+    frame_idx = _to_int(payload.get(f'opti_rb_{int(rigid_body_slot)}_trackid'))
+    timestamp_value = _first_present(
+        [payload],
+        ('marker_fTimestamp', 'timestamp', 'time', 't'))
+    return MocapPacket(
+        position_m=(pos * scale).astype(np.float32),
+        velocity_m_s=None,
+        frame_idx=frame_idx,
+        timestamp_s=_normalize_timestamp(timestamp_value, timestamp_unit),
+        source_format='optitrack_opti_rb',
+        raw=payload,
+        orientation_wxyz=orientation,
+        tracked=tracked,
+        mean_error_m=mean_error_m,
+    )
+
+
 def _first_number(payload: Dict[str, Any], keys) -> Optional[float]:
     for key in keys:
         if key in payload:
@@ -92,11 +239,15 @@ def _first_number(payload: Dict[str, Any], keys) -> Optional[float]:
     return None
 
 
-def _extract_xyz(payload: Dict[str, Any], marker_id: int, names) -> Optional[np.ndarray]:
-    prefix = f'marker_{int(marker_id)}_'
+def _extract_xyz(payload: Dict[str, Any],
+                 marker_id: int, names) -> Optional[np.ndarray]:
+    prefixes = [f'marker_{int(marker_id)}_', f'rigid_body_{int(marker_id)}_',
+                f'body_{int(marker_id)}_']
     candidates = []
-    for base in names:
-        candidates.append((prefix + base[0], prefix + base[1], prefix + base[2]))
+    for prefix in prefixes:
+        for base in names:
+            candidates.append((
+                prefix + base[0], prefix + base[1], prefix + base[2]))
     for base in names:
         candidates.append(base)
 
@@ -107,17 +258,203 @@ def _extract_xyz(payload: Dict[str, Any], marker_id: int, names) -> Optional[np.
     return None
 
 
+def _object_matches(payload: Dict[str, Any],
+                  object_id: Optional[int] = None,
+                  object_name: Optional[str] = None) -> bool:
+    """Return True when a nested marker/rigid-body dict matches id or name."""
+    if object_name:
+        target_name = str(object_name).strip().lower()
+        for key in ('name', 'body_name', 'rigid_body_name', 'object_name',
+                    'label', 'marker'):
+            if key not in payload:
+                continue
+            value = payload.get(key)
+            if value is None:
+                continue
+            if str(value).strip().lower() == target_name:
+                return True
+
+    if object_id is None:
+        return False
+
+    for key in ('id', 'marker_id', 'markerId', 'marker', 'body_id',
+                'rigid_body_id', 'object_id'):
+        if key not in payload:
+            continue
+        value = payload.get(key)
+        if str(value) == str(object_id):
+            return True
+        parsed = _to_int(value)
+        if parsed == int(object_id):
+            return True
+    return False
+
+
+def _marker_matches(payload: Dict[str, Any], marker_id: int) -> bool:
+    return _object_matches(payload, object_id=marker_id)
+
+
+def _iter_marker_payloads(payload: Any,
+                          marker_id: int,
+                          object_name: Optional[str] = None):
+    """Yield nested marker/rigid-body dictionaries, preferring matches."""
+    if isinstance(payload, list):
+        dicts = [item for item in payload if isinstance(item, dict)]
+        matches = [
+            item for item in dicts
+            if _object_matches(item, marker_id, object_name)]
+        for item in matches or dicts:
+            yield item
+        return
+
+    if not isinstance(payload, dict):
+        return
+
+    for key in ('markers', 'rigid_bodies', 'bodies', 'objects', 'data'):
+        value = payload.get(key)
+        if isinstance(value, list):
+            dicts = [item for item in value if isinstance(item, dict)]
+            matches = [
+                item for item in dicts
+                if _object_matches(item, marker_id, object_name)]
+            for item in matches or dicts:
+                yield item
+        elif isinstance(value, dict):
+            if (_object_matches(value, marker_id, object_name)
+                    or key == 'data'):
+                yield value
+
+
+def _coerce_vector(value: Any, component_names) -> Optional[np.ndarray]:
+    """Convert a list/tuple/dict vector to a finite xyz numpy array."""
+    if isinstance(value, (list, tuple)) and len(value) >= 3:
+        vals = [_to_float(value[0]), _to_float(value[1]), _to_float(value[2])]
+        if all(v is not None for v in vals):
+            return np.array(vals, dtype=np.float64)
+
+    if isinstance(value, dict):
+        for names in component_names:
+            vals = [_first_number(value, [key]) for key in names]
+            if all(v is not None for v in vals):
+                return np.array(vals, dtype=np.float64)
+    return None
+
+
+def _extract_named_vector(payload: Dict[str, Any], marker_id: int,
+                          keys, component_names) -> Optional[np.ndarray]:
+    """Extract vector fields such as position:[x,y,z] or marker_1_pos:{...}."""
+    prefix = f'marker_{int(marker_id)}_'
+    for key in keys:
+        for candidate in (prefix + key, key):
+            if candidate in payload:
+                vec = _coerce_vector(payload.get(candidate), component_names)
+                if vec is not None:
+                    return vec
+    return None
+
+
+def _extract_position(payload: Dict[str, Any],
+                      marker_id: int) -> Optional[np.ndarray]:
+    component_names = (
+        ('px', 'py', 'pz'),
+        ('x', 'y', 'z'),
+        ('pos_x', 'pos_y', 'pos_z'),
+    )
+    pos = _extract_xyz(payload, marker_id, component_names)
+    if pos is not None:
+        return pos
+    return _extract_named_vector(
+        payload, marker_id,
+        keys=('position', 'pos', 'translation', 'location', 'point', 'p'),
+        component_names=component_names)
+
+
+def _extract_velocity(payload: Dict[str, Any],
+                      marker_id: int) -> Optional[np.ndarray]:
+    flat_component_names = (
+        ('vx', 'vy', 'vz'),
+        ('vel_x', 'vel_y', 'vel_z'),
+        ('velocity_x', 'velocity_y', 'velocity_z'),
+    )
+    vel = _extract_xyz(payload, marker_id, flat_component_names)
+    if vel is not None:
+        return vel
+    named_component_names = flat_component_names + (('x', 'y', 'z'),)
+    return _extract_named_vector(
+        payload, marker_id,
+        keys=('velocity', 'vel', 'v'),
+        component_names=named_component_names)
+
+
+def _first_present(payloads, keys) -> Any:
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for key in keys:
+            if key in payload:
+                return payload.get(key)
+    return None
+
+
+def parse_mocap_objects(
+        data: bytes,
+        *,
+        ball_marker_id: Optional[int] = None,
+        rigid_body_slot: Optional[int] = None,
+        rigid_body_id: Optional[int] = None,
+        rigid_body_name: Optional[str] = None,
+        position_unit: str = 'auto',
+        timestamp_unit: str = 's') -> Dict[str, Optional['MocapPacket']]:
+    """Parse one UDP packet and extract configured ball / rigid-body objects."""
+    out: Dict[str, Optional[MocapPacket]] = {}
+    if ball_marker_id is not None:
+        out['ball'] = parse_mocap_packet(
+            data,
+            marker_id=int(ball_marker_id),
+            object_kind='marker',
+            position_unit=position_unit,
+            timestamp_unit=timestamp_unit,
+        )
+    if rigid_body_slot is not None:
+        out['rigid_body'] = parse_mocap_packet(
+            data,
+            object_kind='opti_rb',
+            rigid_body_slot=int(rigid_body_slot),
+            rigid_body_id=(
+                int(rigid_body_id)
+                if rigid_body_id is not None else int(rigid_body_slot)),
+            position_unit=position_unit,
+            timestamp_unit=timestamp_unit,
+        )
+    elif rigid_body_id is not None or rigid_body_name:
+        out['rigid_body'] = parse_mocap_packet(
+            data,
+            marker_id=int(rigid_body_id if rigid_body_id is not None else 0),
+            object_name=rigid_body_name,
+            object_kind='marker',
+            position_unit=position_unit,
+            timestamp_unit=timestamp_unit,
+        )
+    return out
+
+
 def parse_mocap_packet(data: bytes,
                        marker_id: int = 1,
+                       object_name: Optional[str] = None,
+                       object_kind: str = 'auto',
+                       rigid_body_slot: Optional[int] = None,
+                       rigid_body_id: Optional[int] = None,
                        position_unit: str = 'auto',
                        timestamp_unit: str = 's') -> Optional[MocapPacket]:
     """Parse one UDP packet from the mocap system.
 
     Supported formats:
-      - JSON:
-        {"marker_frmIdx": 1, "marker_fTimestamp": 0.01,
+      - OptiTrack marker:
+        {"marker_frmIdx": 1, "marker_fTimestamp": "0:0:1:200",
          "marker_1_px": 0.1, "marker_1_py": 0.2, "marker_1_pz": 0.3}
-      - Legacy binary little-endian: <d6f> timestamp, xyz, vxyz.
+      - OptiTrack rigid body:
+        {"opti_rb_0_px": ..., "opti_rb_0_qw": ..., "opti_rb_1_id": 1, ...}
+      - Generic JSON marker lists and legacy binary <d6f>.
     """
     if not data:
         return None
@@ -129,37 +466,79 @@ def parse_mocap_packet(data: bytes,
         except json.JSONDecodeError:
             return None
         if isinstance(payload, list):
-            if not payload or not isinstance(payload[0], dict):
+            marker_payloads = list(
+                _iter_marker_payloads(payload, marker_id, object_name))
+            if not marker_payloads:
                 return None
-            payload = payload[0]
-        if not isinstance(payload, dict):
+            root_payload = marker_payloads[0]
+        else:
+            root_payload = payload
+        if not isinstance(root_payload, dict):
             return None
 
-        pos = _extract_xyz(
-            payload, marker_id,
-            names=(('px', 'py', 'pz'), ('x', 'y', 'z'), ('pos_x', 'pos_y', 'pos_z')))
+        kind = str(object_kind or 'auto').strip().lower()
+        if kind in ('opti_rb', 'rigid_body'):
+            if rigid_body_slot is None:
+                return None
+            return _parse_opti_rb_packet(
+                root_payload,
+                rigid_body_slot=int(rigid_body_slot),
+                rigid_body_id=rigid_body_id,
+                position_unit=position_unit,
+                timestamp_unit=timestamp_unit,
+            )
+        if kind == 'auto' and rigid_body_slot is not None:
+            packet = _parse_opti_rb_packet(
+                root_payload,
+                rigid_body_slot=int(rigid_body_slot),
+                rigid_body_id=rigid_body_id,
+                position_unit=position_unit,
+                timestamp_unit=timestamp_unit,
+            )
+            if packet is not None:
+                return packet
+
+        marker_payloads = list(
+            _iter_marker_payloads(payload, marker_id, object_name))
+        candidate_payloads = [root_payload]
+        for marker_payload in marker_payloads:
+            if marker_payload is not root_payload:
+                candidate_payloads.append(marker_payload)
+
+        pos_payload = None
+        pos = None
+        for candidate in candidate_payloads:
+            pos = _extract_position(candidate, marker_id)
+            if pos is not None:
+                pos_payload = candidate
+                break
         if pos is None:
             return None
         scale = _scale_for_unit(pos, position_unit)
         pos_m = (pos * scale).astype(np.float32)
 
-        vel = _extract_xyz(
-            payload, marker_id,
-            names=(('vx', 'vy', 'vz'), ('vel_x', 'vel_y', 'vel_z')))
+        vel = None
+        velocity_payloads = []
+        if pos_payload is not None:
+            velocity_payloads.append(pos_payload)
+        velocity_payloads.extend(
+            p for p in candidate_payloads if p is not pos_payload)
+        for candidate in velocity_payloads:
+            vel = _extract_velocity(candidate, marker_id)
+            if vel is not None:
+                break
         vel_m_s = (vel * scale).astype(np.float32) if vel is not None else None
 
-        frame_idx = _to_int(payload.get('marker_frmIdx'))
-        if frame_idx is None:
-            frame_idx = _to_int(payload.get('frame_idx', payload.get('frame')))
-
-        timestamp_value = None
-        for key in (
+        frame_idx = _to_int(_first_present(
+            candidate_payloads,
+            ('marker_frmIdx', 'frame_idx', 'frame', 'frame_id')))
+        timestamp_value = _first_present(
+            candidate_payloads,
+            (
                 'marker_fTimestamp', 'timestamp', 'time', 't',
                 f'marker_{int(marker_id)}_timestamp',
-                f'marker_{int(marker_id)}_time'):
-            if key in payload:
-                timestamp_value = payload.get(key)
-                break
+                f'marker_{int(marker_id)}_time',
+            ))
 
         return MocapPacket(
             position_m=pos_m,
@@ -169,9 +548,10 @@ def parse_mocap_packet(data: bytes,
             source_format='json',
             raw=payload)
 
-    if len(data) >= 32:
+    if len(data) >= _BINARY_PACKET_SIZE:
         try:
-            values = struct.unpack('<d6f', data[:32])
+            values = struct.unpack(
+                _BINARY_PACKET_FORMAT, data[:_BINARY_PACKET_SIZE])
         except struct.error:
             return None
         pos = np.array([values[1], values[2], values[3]], dtype=np.float64)
@@ -192,7 +572,8 @@ class MocapBallDetector:
     """Receives ball state from motion capture system via UDP.
 
     JSON packets with position-only markers are accepted; velocity is estimated
-    from consecutive packets. The legacy binary <d6f> packet remains supported.
+    with a time-aware multi-frame difference. The legacy binary <d6f> packet
+    remains supported.
     """
 
     def __init__(self,
@@ -201,10 +582,15 @@ class MocapBallDetector:
                  calibration_path: Optional[str] = None,
                  timeout_s: float = 0.5,
                  marker_id: int = 1,
+                 object_kind: str = 'marker',
+                 rigid_body_slot: Optional[int] = None,
+                 rigid_body_id: Optional[int] = None,
                  position_unit: str = 'auto',
                  timestamp_unit: str = 's',
-                 velocity_alpha: float = 0.35,
-                 max_velocity_m_s: float = 20.0):
+                 velocity_alpha: float = 1.0,
+                 max_velocity_m_s: float = 20.0,
+                 velocity_window_frames: int = 3,
+                 velocity_window_max_span_s: float = 0.05):
         """Initialize mocap ball detector.
 
         Args:
@@ -212,23 +598,41 @@ class MocapBallDetector:
             udp_port: UDP port to listen on
             calibration_path: Path to calibration file (4x4 transform matrix).
                             If None, identity transform is used.
-            timeout_s: Time after which ball state is considered invalid (seconds)
+            timeout_s: Time after which ball state is invalid, in seconds.
             marker_id: Marker index used by marker_<id>_px/py/pz JSON fields.
+            object_kind: marker / opti_rb / auto.
+            rigid_body_slot: OptiTrack slot Y in opti_rb_Y_* fields.
+            rigid_body_id: OptiTrack id YY in opti_rb_YY_id.
             position_unit: auto/m/mm/cm for incoming positions.
             timestamp_unit: s/ms/us/ns/auto for incoming timestamps.
-            velocity_alpha: EMA smoothing factor for finite-difference velocity.
-            max_velocity_m_s: Reject finite-difference velocity above this speed.
+            velocity_alpha: EMA smoothing for finite-difference velocity.
+                The default 1.0 disables EMA, so there is no additional
+                low-pass delay after the multi-frame difference.
+            max_velocity_m_s: Reject finite-difference velocity above this.
+            velocity_window_frames: Number of mocap frame intervals used for
+                each velocity difference. 3 at 120 Hz uses about 25 ms of
+                position history; positions themselves are never averaged.
+            velocity_window_max_span_s: Reject a velocity window whose source
+                time span exceeds this value (for example after a long dropout).
         """
         self.udp_host = str(udp_host)
         self.udp_port = udp_port
         self.timeout_s = timeout_s
         self.marker_id = int(marker_id)
+        self.object_kind = str(object_kind or 'marker')
+        self.rigid_body_slot = (
+            None if rigid_body_slot is None else int(rigid_body_slot))
+        self.rigid_body_id = (
+            None if rigid_body_id is None else int(rigid_body_id))
         self.position_unit = str(position_unit or 'auto')
         self.timestamp_unit = str(timestamp_unit or 's')
         self.velocity_alpha = min(max(float(velocity_alpha), 0.0), 1.0)
         self.max_velocity_m_s = float(max_velocity_m_s)
+        self.velocity_window_frames = max(1, int(velocity_window_frames))
+        self.velocity_window_max_span_s = max(
+            float(velocity_window_max_span_s), 1e-4)
         self._min_velocity_dt_s = 1e-4
-        self._max_velocity_dt_s = 0.25
+        self._max_source_timestamp_step_s = 0.25
 
         # Calibration transform: T_robot_mocap (4x4 homogeneous matrix)
         # Transforms points from mocap frame to robot base_link frame
@@ -249,16 +653,20 @@ class MocapBallDetector:
         self._packet_count = 0
         self._parse_error_count = 0
         self._velocity_reject_count = 0
+        self._velocity_window_reject_count = 0
+        self._velocity_time_source = None
 
-        self._prev_pos_mocap_m = None
         self._prev_vel_mocap_m_s = None
         self._prev_sample_time_s = None
+        self._prev_sample_time_source = None
         self._prev_arrival_time_s = None
+        self._velocity_history = deque(maxlen=self.velocity_window_frames)
 
         # UDP receiver thread
         self._running = False
         self._thread = None
         self._socket = None
+        self._last_start_error = None
 
     def load_calibration(self, path: str) -> None:
         """Load calibration transform from file.
@@ -268,27 +676,30 @@ class MocapBallDetector:
         try:
             T = np.loadtxt(path, dtype=np.float64)
             if T.shape != (4, 4):
-                raise ValueError(f"Calibration matrix must be 4x4, got {T.shape}")
+                raise ValueError(
+                    f"Calibration matrix must be 4x4, got {T.shape}")
             self.T_robot_mocap = T
             print(f"[MocapBallDetector] Loaded calibration from {path}")
             print(f"  T_robot_mocap:\n{self.T_robot_mocap}")
         except Exception as e:
             print(f"[MocapBallDetector] Failed to load calibration: {e}")
-            print(f"  Using identity transform")
+            print("  Using identity transform")
 
     def save_calibration(self, path: str) -> None:
         """Save calibration transform to file."""
         np.savetxt(path, self.T_robot_mocap, fmt='%.6f')
         print(f"[MocapBallDetector] Saved calibration to {path}")
 
-    def start(self) -> None:
+    def start(self) -> bool:
         """Start UDP receiver thread."""
         if self._running:
-            return
+            return True
 
         # Open UDP socket
         try:
+            self._last_start_error = None
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._socket.bind((self.udp_host, self.udp_port))
             self._socket.settimeout(1.0)  # 1s timeout for blocking recv
             print(
@@ -296,13 +707,19 @@ class MocapBallDetector:
                 f"{self.udp_host}:{self.udp_port} "
                 f"(marker={self.marker_id}, unit={self.position_unit})")
         except Exception as e:
+            self._last_start_error = e
             print(f"[MocapBallDetector] Failed to open UDP socket: {e}")
-            return
+            if self._socket is not None:
+                self._socket.close()
+                self._socket = None
+            return False
 
         self._running = True
-        self._thread = threading.Thread(target=self._receiver_loop, daemon=True)
+        self._thread = threading.Thread(
+            target=self._receiver_loop, daemon=True)
         self._thread.start()
-        print(f"[MocapBallDetector] Receiver thread started")
+        print("[MocapBallDetector] Receiver thread started")
+        return True
 
     def stop(self) -> None:
         """Stop UDP receiver thread."""
@@ -313,7 +730,7 @@ class MocapBallDetector:
         if self._socket is not None:
             self._socket.close()
             self._socket = None
-        print(f"[MocapBallDetector] Stopped")
+        print("[MocapBallDetector] Stopped")
 
     def _receiver_loop(self) -> None:
         """Background thread: receive UDP packets and update ball state."""
@@ -326,6 +743,9 @@ class MocapBallDetector:
                 packet = parse_mocap_packet(
                     data,
                     marker_id=self.marker_id,
+                    object_kind=self.object_kind,
+                    rigid_body_slot=self.rigid_body_slot,
+                    rigid_body_id=self.rigid_body_id,
                     position_unit=self.position_unit,
                     timestamp_unit=self.timestamp_unit)
                 if packet is None:
@@ -368,61 +788,83 @@ class MocapBallDetector:
                     print(f"[MocapBallDetector] Receiver error: {e}")
                 continue
 
-    def _sample_time_locked(self, source_timestamp_s, arrival_time_s) -> float:
-        if source_timestamp_s is None:
-            return float(arrival_time_s)
-        t = float(source_timestamp_s)
-        if self._prev_sample_time_s is None:
-            return t
-        dt = t - self._prev_sample_time_s
-        if self._min_velocity_dt_s <= dt <= self._max_velocity_dt_s:
-            return t
-        # Fall back to arrival time when source timestamps are absent, duplicate,
-        # in another clock domain, or configured with the wrong unit.
-        if self._prev_arrival_time_s is not None:
-            return float(arrival_time_s)
-        return t
+    def _sample_time_locked(self, source_timestamp_s,
+                            arrival_time_s) -> Tuple[float, str]:
+        """Choose a monotonic timebase without mixing clock domains.
+
+        Prefer OptiTrack's source timestamp.  If it is missing, duplicated,
+        or discontinuous, temporarily use UDP-arrival time.  Switching clock
+        domains clears the velocity history, avoiding an invalid difference
+        between timestamps with unrelated origins.
+        """
+        source_time_s = _to_float(source_timestamp_s)
+        if source_time_s is not None:
+            if (self._prev_sample_time_s is None
+                    or self._prev_sample_time_source != 'source'):
+                return source_time_s, 'source'
+            dt = source_time_s - self._prev_sample_time_s
+            if self._min_velocity_dt_s <= dt <= self._max_source_timestamp_step_s:
+                return source_time_s, 'source'
+        return float(arrival_time_s), 'arrival'
+
+    def _append_velocity_history_locked(self, pos_mocap_m, sample_time_s,
+                                        time_source: str) -> None:
+        if (self._velocity_history
+                and self._velocity_history[-1][2] != time_source):
+            self._velocity_history.clear()
+        self._velocity_history.append((
+            np.asarray(pos_mocap_m, dtype=np.float32).reshape(3).copy(),
+            float(sample_time_s),
+            str(time_source),
+        ))
+
+    def _hold_previous_velocity_locked(self) -> np.ndarray:
+        if self._prev_vel_mocap_m_s is None:
+            return np.zeros(3, dtype=np.float32)
+        return self._prev_vel_mocap_m_s.copy()
 
     def _remember_velocity_sample_locked(self, pos_mocap_m, vel_mocap_m_s,
                                          source_timestamp_s,
                                          arrival_time_s) -> None:
-        sample_time_s = self._sample_time_locked(
+        sample_time_s, time_source = self._sample_time_locked(
             source_timestamp_s, arrival_time_s)
-        self._prev_pos_mocap_m = np.asarray(pos_mocap_m, dtype=np.float32).copy()
+        self._append_velocity_history_locked(
+            pos_mocap_m, sample_time_s, time_source)
         self._prev_vel_mocap_m_s = np.asarray(
             vel_mocap_m_s, dtype=np.float32).copy()
         self._prev_sample_time_s = sample_time_s
+        self._prev_sample_time_source = time_source
         self._prev_arrival_time_s = float(arrival_time_s)
+        self._velocity_time_source = time_source
 
     def _estimate_velocity_locked(self, pos_mocap_m, source_timestamp_s,
                                   arrival_time_s) -> np.ndarray:
-        sample_time_s = self._sample_time_locked(
+        sample_time_s, time_source = self._sample_time_locked(
             source_timestamp_s, arrival_time_s)
         pos = np.asarray(pos_mocap_m, dtype=np.float32).reshape(3)
 
-        if self._prev_pos_mocap_m is None or self._prev_sample_time_s is None:
-            vel = np.zeros(3, dtype=np.float32)
+        if (self._velocity_history
+                and self._velocity_history[-1][2] != time_source):
+            self._velocity_history.clear()
+
+        if len(self._velocity_history) < self.velocity_window_frames:
+            vel = self._hold_previous_velocity_locked()
         else:
-            dt = sample_time_s - self._prev_sample_time_s
-            if dt < self._min_velocity_dt_s or dt > self._max_velocity_dt_s:
-                dt = (
-                    float(arrival_time_s) - self._prev_arrival_time_s
-                    if self._prev_arrival_time_s is not None else 0.0)
-            if dt < self._min_velocity_dt_s or dt > self._max_velocity_dt_s:
-                vel = (
-                    self._prev_vel_mocap_m_s.copy()
-                    if self._prev_vel_mocap_m_s is not None
-                    else np.zeros(3, dtype=np.float32))
+            reference_pos, reference_time_s, _ = self._velocity_history[0]
+            dt = sample_time_s - reference_time_s
+            if (dt < self._min_velocity_dt_s
+                    or dt > self.velocity_window_max_span_s):
+                self._velocity_window_reject_count += 1
+                vel = self._hold_previous_velocity_locked()
+                # Do not bridge a long gap with stale pre-dropout samples.
+                self._velocity_history.clear()
             else:
-                raw_vel = (pos - self._prev_pos_mocap_m) / float(dt)
+                raw_vel = (pos - reference_pos) / float(dt)
                 speed = float(np.linalg.norm(raw_vel))
                 if (self.max_velocity_m_s > 0.0
                         and speed > self.max_velocity_m_s):
                     self._velocity_reject_count += 1
-                    vel = (
-                        self._prev_vel_mocap_m_s.copy()
-                        if self._prev_vel_mocap_m_s is not None
-                        else np.zeros(3, dtype=np.float32))
+                    vel = self._hold_previous_velocity_locked()
                 elif self._prev_vel_mocap_m_s is not None:
                     alpha = self.velocity_alpha
                     vel = (alpha * raw_vel
@@ -431,10 +873,12 @@ class MocapBallDetector:
                     vel = raw_vel
                 vel = np.asarray(vel, dtype=np.float32)
 
-        self._prev_pos_mocap_m = pos.copy()
+        self._append_velocity_history_locked(pos, sample_time_s, time_source)
         self._prev_vel_mocap_m_s = vel.copy()
         self._prev_sample_time_s = sample_time_s
+        self._prev_sample_time_source = time_source
         self._prev_arrival_time_s = float(arrival_time_s)
+        self._velocity_time_source = time_source
         return vel
 
     def transform_position(self, pos_mocap: np.ndarray) -> np.ndarray:
@@ -498,6 +942,13 @@ class MocapBallDetector:
                 'valid': (self._packet_count > 0) and (age < self.timeout_s),
                 'parse_error_count': self._parse_error_count,
                 'velocity_reject_count': self._velocity_reject_count,
+                'velocity_window_reject_count': (
+                    self._velocity_window_reject_count),
+                'velocity_window_frames': self.velocity_window_frames,
+                'velocity_window_max_span_s': (
+                    self.velocity_window_max_span_s),
+                'velocity_alpha': self.velocity_alpha,
+                'velocity_time_source': self._velocity_time_source,
                 'frame_idx': self._latest_frame_idx,
                 'source_timestamp_s': self._latest_source_timestamp_s,
                 'arrival_time_s': self._latest_timestamp,

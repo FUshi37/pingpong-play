@@ -38,6 +38,7 @@ from typing import Optional
 import numpy as np
 
 from pingpong_controller.rl_policy import (
+    ACTION_COMMAND_MODE_VELOCITY,
     DEFAULT_ACTION_ACC_SCALE,
     DEFAULT_ARM_ACC_LIMIT_DEG_S2,
     DEFAULT_ARM_VEL_LIMIT_DEG_S,
@@ -48,6 +49,7 @@ from pingpong_controller.rl_policy import (
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+    OBSERVATION_PROFILE_SIMCODE6_QVEL67,
     RLPolicyController,
     uses_corrected_67d_observation,
 )
@@ -203,6 +205,7 @@ class MjxRLPolicyController(RLPolicyController):
         self._checkpoint_env_cfg = dict(payload.get("env_cfg") or {})
         if self._align_with_checkpoint:
             self._apply_checkpoint_env_cfg(self._checkpoint_env_cfg)
+        self._validate_checkpoint_contract(payload)
 
         # `self.model` stays None: a lightweight shim provides the obs/act
         # shapes that `_validate_io_shapes` checks against.
@@ -231,9 +234,29 @@ class MjxRLPolicyController(RLPolicyController):
 
     def _apply_checkpoint_env_cfg(self, cfg: dict) -> None:
         """Align runtime integration knobs with the training env config."""
+        action_mode = cfg.get("action_command_mode")
+        if action_mode is not None:
+            self.action_command_mode = str(action_mode).strip().lower()
+
         acc_scale = cfg.get("action_acc_scale")
         if acc_scale is not None:
             self.action_acc_scale = float(acc_scale)
+
+        velocity_scale = cfg.get("action_velocity_scale")
+        if velocity_scale is not None:
+            self.action_velocity_scale = float(velocity_scale)
+
+        filter_tau_ms = cfg.get("action_filter_tau_ms")
+        if filter_tau_ms is not None:
+            self.action_filter_tau_ms = max(0.0, float(filter_tau_ms))
+
+        jerk_limit = cfg.get("action_jerk_limit")
+        if jerk_limit is not None:
+            self.action_jerk_limit = max(0.0, float(jerk_limit))
+
+        action_acc_limit = cfg.get("action_acc_limit")
+        if action_acc_limit is not None:
+            self.action_acc_limit = float(action_acc_limit)
 
         age_clip = cfg.get("ball_obs_age_clip")
         if age_clip is not None:
@@ -257,6 +280,10 @@ class MjxRLPolicyController(RLPolicyController):
         # Keep them off the legacy BUG-compatible path, whose reset pose,
         # buffer indexing and contact-time behaviour must remain unchanged.
         if uses_corrected_67d_observation(self.observation_profile):
+            pd_profile = cfg.get("right_arm_pd_profile")
+            if pd_profile is not None:
+                self.right_arm_pd_profile = str(pd_profile).strip().lower()
+
             reset_degrees = cfg.get("right_arm_reset_degrees")
             if reset_degrees is not None and len(reset_degrees) == self.n_arm:
                 self.initial_arm_q_rad = np.deg2rad(
@@ -287,11 +314,19 @@ class MjxRLPolicyController(RLPolicyController):
 
         self._logger.info(
             "MJX checkpoint env_cfg applied: "
+            f"action_command_mode={self.action_command_mode}, "
+            f"action_velocity_scale={self.action_velocity_scale}, "
+            f"action_filter_tau_ms={self.action_filter_tau_ms}, "
+            f"action_jerk_limit={self.action_jerk_limit}, "
             f"action_acc_scale={self.action_acc_scale}, "
             f"ball_obs_age_clip_s={self.ball_obs_age_clip_s}, "
             f"arm_action_limiter={self.arm_action_limiter}, "
             f"nominal_delay_s={self.delay_conditioning_tau_s}, "
             f"command_buffer_extra_steps={self.command_buffer_extra_steps}")
+
+    def _validate_checkpoint_contract(self, payload: dict) -> None:
+        """Hook for named adapters that enforce more than tensor dimensions."""
+        del payload
 
     def _policy_action(self, obs: np.ndarray) -> np.ndarray:
         """Deterministic forward pass of the actor MLP, in pure NumPy.
@@ -388,3 +423,132 @@ class Simcode5PureActuator67PolicyController(MjxRLPolicyController):
         kwargs["observation_profile"] = (
             OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
         super().__init__(model_path, **kwargs)
+
+
+class Simcode6Qvel67PolicyController(MjxRLPolicyController):
+    """Fail-closed adapter for simcode6's direct qvel actor and physical plant.
+
+    Matching only the 67-by-7 tensor shapes is insufficient here: the same
+    shapes were used by acceleration-command checkpoints.  This adapter also
+    verifies every field that changes actor input semantics or command
+    integration before allowing inference.
+    """
+
+    _REQUIRED_EXACT = {
+        "action_command_mode": ACTION_COMMAND_MODE_VELOCITY,
+        "arm_action_limiter": True,
+        "enable_anti_windup": False,
+        "enable_delay_conditioning": True,
+        "include_tau_act_norm": True,
+        "include_command_state": True,
+        "include_active_command_error": True,
+        "include_phase_features": True,
+        "frame_skip": 5,
+        "ball_obs_fractional_rate": True,
+        "ball_obs_age_tracks_stale": False,
+        "ball_obs_dropout_on_refresh_only": False,
+        "ball_obs_velocity_observer_mode": "raw",
+        "actor_mask_previous_action": False,
+        "high_latency_obs": False,
+        "use_delay_embedding": False,
+        "delay_embedding_dim": 0,
+        "actuator_cmd_model": "second_order",
+        "actuator_cmd_filter": True,
+        "actuator_delay_observation_only": False,
+        "actuator_compensation_mode": "none",
+        "arm_servo_target_tracking_planner": False,
+        "right_arm_pd_profile": "sport_taskspace_fit_v1",
+    }
+    _REQUIRED_FLOAT = {
+        "action_velocity_scale": 0.85,
+        "action_filter_tau_ms": 15.0,
+        "action_jerk_limit": 30.0,
+        "action_acc_limit": 1.0,
+        "actor_previous_action_scale": 1.0,
+        "actor_action_dc_rejection": 0.0,
+        "proprio_dq_obs_noise_std": 0.0,
+        "proprio_racket_vel_obs_noise_std": 0.0,
+        "proprio_obs_one_step_stale_probability": 0.0,
+        "ball_obs_rate_hz": 60.0,
+        "ball_obs_age_clip": 0.5,
+        "ball_obs_velocity_observer_tau_ms": 0.0,
+        "ball_obs_velocity_observer_max_innovation_m_s": 0.0,
+        "delay_min_ms": 45.0,
+        "delay_max_ms": 45.0,
+    }
+    _REQUIRED_VECTOR = {
+        "right_arm_reset_degrees": (
+            5.736, -44.399, 30.683, 97.142, 49.323, -12.269, 14.214),
+        "arm_vel_limit_deg_s": (
+            210.0, 210.0, 240.0, 240.0, 300.0, 300.0, 300.0),
+        "arm_acc_limit_deg_s2": (
+            1300.0, 1300.0, 1800.0, 3000.0, 3000.0, 3000.0, 3000.0),
+        "actuator_cmd_delay_ms_per_joint": (
+            45.0, 50.0, 45.0, 40.0, 35.0, 45.0, 55.0),
+        "actuator_cmd_natural_frequency_rad_s": (
+            20.36384925, 22.65597475, 22.6504705, 21.730533,
+            19.66336425, 22.81552625, 23.64581725),
+        "actuator_cmd_damping_ratio": (
+            0.391768, 0.366169, 0.345738, 0.346,
+            0.347896, 0.345814, 0.380713),
+        "actuator_cmd_gain_per_joint": (
+            0.99788351, 0.9966119, 0.99231151, 0.99094239,
+            0.982326685, 0.992694585, 0.983194325),
+    }
+
+    def __init__(self, model_path: str, **kwargs) -> None:
+        kwargs["enable_delay_conditioning"] = True
+        kwargs["use_valid_ball_obs_age"] = False
+        kwargs["observation_profile"] = OBSERVATION_PROFILE_SIMCODE6_QVEL67
+        super().__init__(model_path, **kwargs)
+        if not np.isclose(self.dt, 0.005, rtol=0.0, atol=1e-12):
+            raise RuntimeError(
+                "simcode6_qvel67 requires the frozen 200 Hz/0.005 s "
+                f"control step, got dt={self.dt!r}")
+
+    def _validate_checkpoint_contract(self, payload: dict) -> None:
+        cfg = dict(payload.get("env_cfg") or {})
+        mismatches = []
+        for key, expected in self._REQUIRED_EXACT.items():
+            got = cfg.get(key, "<missing>")
+            if got != expected:
+                mismatches.append(f"{key}={got!r} (expected {expected!r})")
+        for key, expected in self._REQUIRED_FLOAT.items():
+            got = cfg.get(key)
+            try:
+                matches = bool(np.isclose(
+                    float(got), expected, rtol=0.0, atol=1e-9))
+            except (TypeError, ValueError):
+                matches = False
+            if not matches:
+                mismatches.append(f"{key}={got!r} (expected {expected!r})")
+
+        for key, expected in self._REQUIRED_VECTOR.items():
+            try:
+                actual = np.asarray(cfg.get(key), dtype=np.float64)
+                valid = bool(
+                    actual.shape == (self.n_arm,)
+                    and np.all(np.isfinite(actual))
+                    and np.allclose(
+                        actual,
+                        np.asarray(expected, dtype=np.float64),
+                        rtol=0.0,
+                        atol=1e-8,
+                    )
+                )
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                mismatches.append(
+                    f"{key}={cfg.get(key)!r} (expected {expected!r})")
+
+        if int(cfg.get("command_buffer_extra_steps", -1)) != 4:
+            mismatches.append(
+                "command_buffer_extra_steps must be 4 for the 45 ms history")
+        if tuple(cfg.get("dr_action_latency_steps_range", ())) != (0, 0):
+            mismatches.append(
+                "dr_action_latency_steps_range must be (0, 0)")
+        if mismatches:
+            raise RuntimeError(
+                "simcode6 checkpoint deployment contract mismatch: "
+                + "; ".join(mismatches))

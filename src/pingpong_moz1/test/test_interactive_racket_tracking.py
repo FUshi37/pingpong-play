@@ -110,6 +110,217 @@ class InteractiveRacketTrackingIntegrationTest(unittest.TestCase):
         self.assertEqual(
             legacy["runtime"]["estimatorBackend"], "legacy_kf6")
 
+    def test_camera_and_contact_shield_web_parameters_are_runtime_tunable(self):
+        options = self.probe._runtime_options_from_payload({
+            "cameraVelocityLeastSquares": True,
+            "cameraVelocityWindowFrames": 4,
+            "cameraImpactVelocityReset": True,
+            "cameraImpactMinVelocityJumpMps": 1.1,
+            "enableContactActionShield": True,
+            "contactShieldMaxNormalLateral": 0.04,
+            "contactShieldMaxLateralSpeedMps": 0.20,
+            "enableVerticalContactEnergyShield": True,
+            "verticalContactTargetApexHeightM": 0.28,
+            "verticalContactRestitution": 0.64,
+            "sensorDepthAnomalyPrediction": True,
+            "highBallReacquisitionVelocityHandover": True,
+            "highBallReacquisitionVelocityFrames": 4,
+            "highBallReacquisitionVelocityBlendS": 0.055,
+            "cameraClearBuffersOnDetectionLoss": True,
+            "cameraMotionConsistencyGate": True,
+            "cameraPhysicsConstrainedVelocity": True,
+            "cameraControlTimeCompensation": True,
+            "cameraReacquisitionSmoothing": True,
+            "optimizedBallPredictionInitialState": True,
+        })
+
+        self.assertTrue(options.camera.velocity_least_squares_enabled)
+        self.assertEqual(options.camera.velocity_window_frames, 4)
+        self.assertTrue(options.camera.impact_velocity_reset_enabled)
+        self.assertAlmostEqual(
+            options.camera.impact_min_velocity_jump_m_s, 1.1)
+        self.assertTrue(options.contact_action_shield.enabled)
+        self.assertAlmostEqual(
+            options.contact_action_shield.max_normal_lateral, 0.04)
+        self.assertAlmostEqual(
+            options.contact_action_shield.max_lateral_speed_m_s, 0.20)
+        self.assertTrue(
+            options.contact_action_shield.vertical_energy_enabled)
+        self.assertAlmostEqual(
+            options.contact_action_shield.vertical_target_apex_height_m,
+            0.28,
+        )
+        self.assertAlmostEqual(
+            options.contact_action_shield.vertical_restitution, 0.64)
+        self.assertTrue(options.sensor_depth_anomaly_prediction)
+        self.assertTrue(
+            options.high_ball_reacquisition_velocity_handover)
+        self.assertEqual(options.high_ball_reacquisition_velocity_frames, 4)
+        self.assertAlmostEqual(
+            options.high_ball_reacquisition_velocity_blend_s, 0.055)
+        self.assertTrue(
+            options.camera.clear_buffers_on_detection_loss_enabled)
+        self.assertTrue(options.camera.motion_consistency_gate_enabled)
+        self.assertTrue(options.camera.physics_constrained_velocity_enabled)
+        self.assertTrue(options.camera_control_time_compensation)
+        self.assertTrue(options.camera_reacquisition_smoothing)
+        self.assertTrue(options.optimized_ball_prediction_initial_state)
+
+    def test_new_observation_experiments_start_off_in_web_defaults(self):
+        config = self.probe.browser_config()
+        camera_defaults = config["cameraBall"]["defaults"]
+        prediction_defaults = config["highBallOcclusionPrediction"]
+
+        self.assertEqual(camera_defaults["depthMode"], "adaptive")
+        self.assertFalse(camera_defaults["synchronizedDepth"])
+        self.assertFalse(camera_defaults["velocityLeastSquares"])
+        self.assertFalse(camera_defaults["impactVelocityReset"])
+        self.assertFalse(camera_defaults["clearBuffersOnDetectionLoss"])
+        self.assertFalse(camera_defaults["motionConsistencyGate"])
+        self.assertFalse(camera_defaults["physicsConstrainedVelocity"])
+        self.assertTrue(prediction_defaults["enabled"])
+        self.assertTrue(
+            prediction_defaults["sensorDepthAnomalyPrediction"])
+        self.assertFalse(prediction_defaults["reacquisitionVelocityHandover"])
+        self.assertFalse(prediction_defaults["controlTimeCompensation"])
+        self.assertFalse(prediction_defaults["reacquisitionSmoothing"])
+        self.assertFalse(prediction_defaults["optimizedInitialState"])
+
+    def test_contact_action_shield_projects_lateral_contact_command(self):
+        q0 = self.probe.controller.current_arm_cmd_q().astype(np.float64)
+        (
+            racket_pos,
+            _quat,
+            jacobian_position,
+            _jacobian_rotation,
+            fk_ok,
+        ) = self.probe.controller._compute_racket_pose_jacobians_base(q0)
+        self.assertTrue(fk_ok)
+        jacobian_position = np.asarray(jacobian_position, dtype=np.float64)
+        dt = float(self.probe.cfg.control_dt)
+        acceleration_limit = np.asarray(
+            self.probe.controller.arm_acc_limit_rad_s2,
+            dtype=np.float64,
+        )
+        raw_dq = np.sign(jacobian_position[0]) * acceleration_limit * dt
+        self.assertGreater(
+            abs(float(jacobian_position[0] @ raw_dq)), 0.001)
+        raw_q = np.clip(
+            q0 + raw_dq * dt,
+            self.probe.controller.arm_q_low,
+            self.probe.controller.arm_q_high,
+        )
+        self.probe.controller.arm_cmd_q = raw_q.astype(np.float32)
+        self.probe.controller.arm_cmd_qvel = raw_dq.astype(np.float32)
+        self.probe.controller.last_cmd_q = raw_q.astype(np.float32)
+        self.probe.controller.last_cmd_qvel = raw_dq.astype(np.float32)
+        self.probe.controller.last_cmd_qacc = (
+            raw_dq / dt).astype(np.float32)
+        history = getattr(self.probe.controller, "_cmd_history", None)
+        if isinstance(history, list) and history:
+            history[-1] = raw_q.astype(np.float32)
+        settings = PROBE.ContactActionShieldOptions(
+            enabled=True,
+            pre_contact_window_s=0.06,
+            post_contact_window_s=0.05,
+            contact_tolerance_m=0.04,
+            max_lateral_distance_m=0.12,
+            min_downward_velocity_m_s=0.25,
+            max_normal_lateral=1.0,
+            max_lateral_speed_m_s=0.001,
+            workspace_margin_m=0.0,
+            dls_damping=0.03,
+        )
+        ball = np.asarray(racket_pos, dtype=np.float64)
+        ball[2] += self.probe.cfg.juggle_ball_radius_m + 0.01
+
+        self.probe._apply_contact_action_shield(
+            ball,
+            np.asarray([0.0, 0.0, -1.0], dtype=np.float64),
+            valid=True,
+            age_s=0.0,
+            arm_q=q0,
+            arm_dq=np.zeros(7, dtype=np.float64),
+            options=settings,
+        )
+
+        info = self.probe.last_contact_action_shield_info
+        self.assertTrue(info["active"])
+        self.assertTrue(info["intervened"])
+        selected_lateral = np.asarray(
+            info["selectedLateralVelocityMps"], dtype=np.float64)
+        self.assertLessEqual(abs(float(selected_lateral[0])), 0.0011)
+
+    def test_vertical_energy_shield_independently_caps_upward_racket_speed(self):
+        q0 = self.probe.controller.current_arm_cmd_q().astype(np.float64)
+        (
+            racket_pos,
+            _quat,
+            jacobian_position,
+            _jacobian_rotation,
+            fk_ok,
+        ) = self.probe.controller._compute_racket_pose_jacobians_base(q0)
+        self.assertTrue(fk_ok)
+        jacobian_position = np.asarray(jacobian_position, dtype=np.float64)
+        dt = float(self.probe.cfg.control_dt)
+        acceleration_limit = np.asarray(
+            self.probe.controller.arm_acc_limit_rad_s2,
+            dtype=np.float64,
+        )
+        raw_dq = np.sign(jacobian_position[2]) * acceleration_limit * dt
+        self.assertGreater(float(jacobian_position[2] @ raw_dq), 0.001)
+        raw_q = np.clip(
+            q0 + raw_dq * dt,
+            self.probe.controller.arm_q_low,
+            self.probe.controller.arm_q_high,
+        )
+        self.probe.controller.arm_cmd_q = raw_q.astype(np.float32)
+        self.probe.controller.arm_cmd_qvel = raw_dq.astype(np.float32)
+        self.probe.controller.last_cmd_q = raw_q.astype(np.float32)
+        self.probe.controller.last_cmd_qvel = raw_dq.astype(np.float32)
+        self.probe.controller.last_cmd_qacc = (
+            raw_dq / dt).astype(np.float32)
+        settings = PROBE.ContactActionShieldOptions(
+            enabled=False,
+            pre_contact_window_s=0.06,
+            post_contact_window_s=0.05,
+            contact_tolerance_m=0.04,
+            max_lateral_distance_m=0.12,
+            min_downward_velocity_m_s=0.25,
+            max_normal_lateral=1.0,
+            max_lateral_speed_m_s=3.0,
+            workspace_margin_m=0.0,
+            dls_damping=0.03,
+            vertical_energy_enabled=True,
+            vertical_pre_contact_window_s=0.12,
+            vertical_target_apex_height_m=0.02,
+            vertical_restitution=1.0,
+            vertical_max_racket_upward_speed_m_s=0.90,
+        )
+        ball = np.asarray(racket_pos, dtype=np.float64)
+        ball[2] += self.probe.cfg.juggle_ball_radius_m + 0.01
+
+        self.probe._apply_contact_action_shield(
+            ball,
+            np.asarray([0.0, 0.0, -1.0], dtype=np.float64),
+            valid=True,
+            age_s=0.0,
+            arm_q=q0,
+            arm_dq=np.zeros(7, dtype=np.float64),
+            options=settings,
+        )
+
+        info = self.probe.last_contact_action_shield_info
+        self.assertTrue(info["active"])
+        self.assertTrue(info["verticalEnergyActive"])
+        self.assertFalse(info["lateralActive"])
+        self.assertTrue(info["intervened"])
+        self.assertIn("racket_vz_energy_high", info["activeConstraints"])
+        self.assertLessEqual(
+            info["selectedRacketVerticalVelocityMps"],
+            info["verticalComputedMaxRacketVelocityMps"] + 1e-5,
+        )
+
     def test_real_fk_tracking_reduces_error_over_multiple_ticks(self):
         payload = self.tracking_payload(use_mpc=False)
         first = self.probe.step(payload)

@@ -56,7 +56,7 @@ if [ "$LOAD_CONFIG_DONE_MONITORING" = "true" ]; then
 fi
 
 MODEL_PATH="${MODEL_PATH:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/outputs/rl_sim/inverse_compensation/18_stage4g_strong_contact_dr_inverse_mpc.pkl}"
-POLICY_PROFILE="${POLICY_PROFILE:-simcode5_pure_actuator67}"
+POLICY_PROFILE="${POLICY_PROFILE:-simcode6_qvel67}"
 SIMCODE2_MODEL_PATH="${SIMCODE2_MODEL_PATH:-$WORKSPACE_DIR/simcode2/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/goal_d455_autolaunch_idealpd67_viewdense_v1_seed976_gpu1_resume_launch14_best55_20260722/launch19_best2040_video_gpu1_seed20260722/policy_launch19_best_u2040_frozen.pkl}"
 SIMCODE2_POLICY_XML_PATH="${SIMCODE2_POLICY_XML_PATH:-$WORKSPACE_DIR/simcode2/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 SIMCODE3_MODEL_PATH="${SIMCODE3_MODEL_PATH:-$WORKSPACE_DIR/simcode3/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/goal_d455_gpu1_resume8_launch19_survival_lr1e4_20260727/mjx_curriculum_best.pkl}"
@@ -66,8 +66,29 @@ SIMCODE4_POLICY_XML_PATH="${SIMCODE4_POLICY_XML_PATH:-$WORKSPACE_DIR/simcode4/pi
 SIMCODE4_REAL_SERVO_PLANNER="${SIMCODE4_REAL_SERVO_PLANNER:-false}"
 SIMCODE5_MODEL_PATH="${SIMCODE5_MODEL_PATH:-$WORKSPACE_DIR/simcode5/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/goal_d455_gpu1_pure_stable_v5_recovery_20260802/mjx_curriculum_best.pkl}"
 SIMCODE5_POLICY_XML_PATH="${SIMCODE5_POLICY_XML_PATH:-$WORKSPACE_DIR/simcode5/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
+SIMCODE6_MODEL_PATH="${SIMCODE6_MODEL_PATH:-$WORKSPACE_DIR/simcode6/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/record_new3_plateau_rework_20260812/formal_gpu0_v14_heavy_ball_conservative_n1024_s128_e4_online/mjx_curriculum_last.pkl}"
+SIMCODE6_POLICY_XML_PATH="${SIMCODE6_POLICY_XML_PATH:-$WORKSPACE_DIR/simcode6/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 ROBOT_XML="${ROBOT_XML:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/models/moz1_pd.xml}"
 POLICY_OBS_DIM="${POLICY_OBS_DIM:-67}"
+# Policy-only real dq adapter fitted by replaying record_new3's published angle
+# commands through the checkpoint-authoritative simcode5 MJX plant. It is the
+# default real-policy observation path and can still be disabled in the UI.
+if [ -z "${ENABLE_POLICY_DQ_ADAPTER:-}" ]; then
+    case "${POLICY_PROFILE,,}" in
+        simcode5|simcode5_pure_actuator67|pure_actuator67|pure_actuator_67)
+            ENABLE_POLICY_DQ_ADAPTER="true"
+            ;;
+        *)
+            ENABLE_POLICY_DQ_ADAPTER="false"
+            ;;
+    esac
+fi
+POLICY_DQ_ADAPTER_GAIN="${POLICY_DQ_ADAPTER_GAIN:-0.8229080313,0.7241145962,0.8223335217,0.8333474552,0.7505777228,0.8204823652,0.7738224499}"
+POLICY_DQ_ADAPTER_TAU_S="${POLICY_DQ_ADAPTER_TAU_S:-0.020,0.0,0.0,0.010,0.0,0.010,0.020}"
+POLICY_DQ_ADAPTER_DELAY_STEPS="${POLICY_DQ_ADAPTER_DELAY_STEPS:-0,0,3,0,2,0,0}"
+# Policy Observation Scale applied to obs[7:14] in both real and sim mirror.
+# Use 0.5 for the requested dq/2 ablation; keep 1.0 with the fitted adapter.
+POLICY_DQ_OBSERVATION_SCALE="${POLICY_DQ_OBSERVATION_SCALE:-1.0}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8765}"
 
@@ -157,6 +178,21 @@ JUGGLE_CONTACT_GRACE_S="${JUGGLE_CONTACT_GRACE_S:-0.06}"
 ENABLE_SAFETY_LIMITER="${ENABLE_SAFETY_LIMITER:-false}"
 SAFETY_PARKING_VELOCITY_SCALE="${SAFETY_PARKING_VELOCITY_SCALE:-0.08}"
 SAFETY_PARKING_ACCELERATION_SCALE="${SAFETY_PARKING_ACCELERATION_SCALE:-0.06}"
+ENABLE_CONTACT_ACTION_SHIELD="${ENABLE_CONTACT_ACTION_SHIELD:-false}"
+CONTACT_SHIELD_PRE_CONTACT_WINDOW_S="${CONTACT_SHIELD_PRE_CONTACT_WINDOW_S:-0.06}"
+CONTACT_SHIELD_POST_CONTACT_WINDOW_S="${CONTACT_SHIELD_POST_CONTACT_WINDOW_S:-0.05}"
+CONTACT_SHIELD_CONTACT_TOLERANCE_M="${CONTACT_SHIELD_CONTACT_TOLERANCE_M:-0.04}"
+CONTACT_SHIELD_MAX_LATERAL_DISTANCE_M="${CONTACT_SHIELD_MAX_LATERAL_DISTANCE_M:-0.12}"
+CONTACT_SHIELD_MIN_DOWNWARD_VELOCITY_M_S="${CONTACT_SHIELD_MIN_DOWNWARD_VELOCITY_M_S:-0.25}"
+CONTACT_SHIELD_MAX_NORMAL_LATERAL="${CONTACT_SHIELD_MAX_NORMAL_LATERAL:-0.03}"
+CONTACT_SHIELD_MAX_LATERAL_SPEED_M_S="${CONTACT_SHIELD_MAX_LATERAL_SPEED_M_S:-0.25}"
+CONTACT_SHIELD_WORKSPACE_MARGIN_M="${CONTACT_SHIELD_WORKSPACE_MARGIN_M:-0.035}"
+CONTACT_SHIELD_DLS_DAMPING="${CONTACT_SHIELD_DLS_DAMPING:-0.03}"
+ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD="${ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD:-false}"
+VERTICAL_CONTACT_PRE_CONTACT_WINDOW_S="${VERTICAL_CONTACT_PRE_CONTACT_WINDOW_S:-0.12}"
+VERTICAL_CONTACT_TARGET_APEX_HEIGHT_M="${VERTICAL_CONTACT_TARGET_APEX_HEIGHT_M:-0.30}"
+VERTICAL_CONTACT_RESTITUTION="${VERTICAL_CONTACT_RESTITUTION:-0.66}"
+VERTICAL_CONTACT_MAX_RACKET_UPWARD_SPEED_M_S="${VERTICAL_CONTACT_MAX_RACKET_UPWARD_SPEED_M_S:-0.90}"
 ENABLE_COMPENSATION="${ENABLE_COMPENSATION:-true}"
 COMPENSATION_MODE="${COMPENSATION_MODE:-inverse_mpc}"
 COMP_DELAY_MS="${COMP_DELAY_MS:-72.0}"
@@ -185,6 +221,9 @@ if [ -z "${COMPENSATION_PRESET:-}" ]; then
             ;;
         simcode5|simcode5_pure_actuator67|pure_actuator67|pure_actuator_67)
             COMPENSATION_PRESET="simcode5_direct"
+            ;;
+        simcode6|simcode6_qvel67|qvel67|qvel_67)
+            COMPENSATION_PRESET="simcode6_direct"
             ;;
         *)
             COMPENSATION_PRESET="current"
@@ -292,7 +331,7 @@ case "$COMPENSATION_PRESET" in
         COMP_MPC_DELTA_WEIGHT="0.05"
         COMP_MPC_MAX_DELTA_RAD="0.5235987755982988"
         ;;
-    simcode5_direct)
+    simcode5_direct|simcode6_direct)
         # The physical joints are the actuator plant represented by the
         # checkpoint's per-joint delay + second-order simulation model.
         # Keep delayed history for observation only and send the latest angle.
@@ -304,7 +343,7 @@ case "$COMPENSATION_PRESET" in
         COMP_DELAY_CONDITIONING="true"
         ;;
     *)
-        echo "Unsupported COMPENSATION_PRESET=$COMPENSATION_PRESET (expected current, simcode2_live_v2, simcode2_offline_v1, simcode3_checkpoint, simcode4_checkpoint, or simcode5_direct)" >&2
+        echo "Unsupported COMPENSATION_PRESET=$COMPENSATION_PRESET (expected current, simcode2_live_v2, simcode2_offline_v1, simcode3_checkpoint, simcode4_checkpoint, simcode5_direct, or simcode6_direct)" >&2
         exit 2
         ;;
 esac
@@ -320,10 +359,16 @@ REAL_COMP_MPC_NOMINAL_WEIGHT="${REAL_COMP_MPC_NOMINAL_WEIGHT:-$COMP_MPC_NOMINAL_
 REAL_COMP_MPC_DELTA_WEIGHT="${REAL_COMP_MPC_DELTA_WEIGHT:-$COMP_MPC_DELTA_WEIGHT}"
 REAL_COMP_MPC_MAX_DELTA_RAD="${REAL_COMP_MPC_MAX_DELTA_RAD:-$COMP_MPC_MAX_DELTA_RAD}"
 if [ -z "${BALL_OBSERVATION_RATE_HZ:-}" ]; then
-    # One experiment-wide camera/simulation observation contract.  The
-    # controller still runs at 200 Hz and holds each 90 Hz ball sample between
-    # refreshes.
-    BALL_OBSERVATION_RATE_HZ="90.0"
+    case "${POLICY_PROFILE,,}" in
+        simcode6|simcode6_qvel67|qvel67|qvel_67)
+            # Frozen qvel-v14 camera contract: fractional 60 Hz samples held
+            # on the 200 Hz control clock.
+            BALL_OBSERVATION_RATE_HZ="60.0"
+            ;;
+        *)
+            BALL_OBSERVATION_RATE_HZ="90.0"
+            ;;
+    esac
 fi
 PROBE_BACKEND_CONTROL_LOOP="${PROBE_BACKEND_CONTROL_LOOP:-true}"
 PROBE_CONTROL_SUBPROCESS="${PROBE_CONTROL_SUBPROCESS:-$PROBE_BACKEND_CONTROL_LOOP}"
@@ -341,11 +386,9 @@ PROBE_RECORDING_QUEUE_SIZE="${PROBE_RECORDING_QUEUE_SIZE:-4096}"
 ENABLE_SIM_MIRROR="${ENABLE_SIM_MIRROR:-true}"
 SIM_MIRROR_DEFAULT_ENABLED="${SIM_MIRROR_DEFAULT_ENABLED:-$ENABLE_SIM_MIRROR}"
 SIM_SUBPROCESS="${SIM_SUBPROCESS:-true}"
-# The legacy/simcode3/simcode5 profiles use the lightweight MuJoCo mirror by
-# default.  The simcode5 CPU mirror retains its per-joint delay and second-order
-# actuator plant.  Its original MJX env remains available with SIM_BACKEND=mjx.
-# The simcode4 frozen contract is enforced below to use its original MJX env,
-# including the target-aware planner inside the simulated plant.
+# Simcode4 still requires the original MJX planner ordering.  The simcode5
+# CPU mirror restores checkpoint timing, per-joint delay/second-order dynamics,
+# and sport-taskspace PD, so it can use the fast MuJoCo backend by default.
 SIM_BACKEND="${SIM_BACKEND:-mujoco}"
 case "${POLICY_PROFILE,,}" in
     simcode4|simcode4_servo67|servo67|servo_67)
@@ -357,6 +400,7 @@ SIMCODE2_SIM_XML_PATH="${SIMCODE2_SIM_XML_PATH:-$WORKSPACE_DIR/simcode2/pingpong
 SIMCODE3_SIM_XML_PATH="${SIMCODE3_SIM_XML_PATH:-$WORKSPACE_DIR/simcode3/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 SIMCODE4_SIM_XML_PATH="${SIMCODE4_SIM_XML_PATH:-$WORKSPACE_DIR/simcode4/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 SIMCODE5_SIM_XML_PATH="${SIMCODE5_SIM_XML_PATH:-$WORKSPACE_DIR/simcode5/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
+SIMCODE6_SIM_XML_PATH="${SIMCODE6_SIM_XML_PATH:-$WORKSPACE_DIR/simcode6/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 SIM_ENABLE_VIDEO="${SIM_ENABLE_VIDEO:-false}"
 SIM_FRAME_RATE_HZ="${SIM_FRAME_RATE_HZ:-90.0}"
 SIM_RENDER_WIDTH="${SIM_RENDER_WIDTH:-640}"
@@ -398,6 +442,10 @@ simcode5|simcode5_pure_actuator67|pure_actuator67|pure_actuator_67)
     # The checkpoint never ages a held non-missing 60 Hz observation.
     RL_USE_VALID_BALL_OBS_AGE="false"
     ;;
+simcode6|simcode6_qvel67|qvel67|qvel_67)
+    # Held, non-missing fractional 60 Hz observations remain age zero.
+    RL_USE_VALID_BALL_OBS_AGE="false"
+    ;;
 esac
 BALL_RELEASE_USE_ESTIMATOR_STATE="${BALL_RELEASE_USE_ESTIMATOR_STATE:-false}"
 BALL_ESTIMATOR_TRUST_LOSS_S="${BALL_ESTIMATOR_TRUST_LOSS_S:-0.10}"
@@ -410,6 +458,30 @@ BALL_ESTIMATOR_Q_DEPTH_POS_MULT="${BALL_ESTIMATOR_Q_DEPTH_POS_MULT:-0.50}"
 BALL_ESTIMATOR_Q_DEPTH_VEL_MULT="${BALL_ESTIMATOR_Q_DEPTH_VEL_MULT:-0.20}"
 BALL_ESTIMATOR_R_LATERAL_MM="${BALL_ESTIMATOR_R_LATERAL_MM:-25.0}"
 BALL_ESTIMATOR_R_DEPTH_MM="${BALL_ESTIMATOR_R_DEPTH_MM:-90.0}"
+ENABLE_HIGH_BALL_OCCLUSION_PREDICTION="${ENABLE_HIGH_BALL_OCCLUSION_PREDICTION:-true}"
+ENABLE_SENSOR_DEPTH_ANOMALY_PREDICTION="${ENABLE_SENSOR_DEPTH_ANOMALY_PREDICTION:-true}"
+HIGH_BALL_PREDICTION_HISTORY_FRAMES="${HIGH_BALL_PREDICTION_HISTORY_FRAMES:-10}"
+HIGH_BALL_PREDICTION_ACTIVATION_Z_M="${HIGH_BALL_PREDICTION_ACTIVATION_Z_M:-1.42}"
+HIGH_BALL_PREDICTION_MIN_UPWARD_VELOCITY_M_S="${HIGH_BALL_PREDICTION_MIN_UPWARD_VELOCITY_M_S:-0.20}"
+HIGH_BALL_PREDICTION_MAX_PREDICTION_S="${HIGH_BALL_PREDICTION_MAX_PREDICTION_S:-0.45}"
+HIGH_BALL_PREDICTION_STOP_Z_M="${HIGH_BALL_PREDICTION_STOP_Z_M:-1.24}"
+HIGH_BALL_PREDICTION_DRAG_COEFFICIENT_PER_M="${HIGH_BALL_PREDICTION_DRAG_COEFFICIENT_PER_M:-0.13545}"
+HIGH_BALL_PREDICTION_INTEGRATION_STEP_S="${HIGH_BALL_PREDICTION_INTEGRATION_STEP_S:-0.005}"
+HIGH_BALL_PREDICTION_REACQUISITION_GATE_M="${HIGH_BALL_PREDICTION_REACQUISITION_GATE_M:-0.18}"
+ENABLE_HIGH_BALL_REACQUISITION_VELOCITY_HANDOVER="${ENABLE_HIGH_BALL_REACQUISITION_VELOCITY_HANDOVER:-false}"
+HIGH_BALL_REACQUISITION_VELOCITY_FRAMES="${HIGH_BALL_REACQUISITION_VELOCITY_FRAMES:-3}"
+HIGH_BALL_REACQUISITION_VELOCITY_BLEND_S="${HIGH_BALL_REACQUISITION_VELOCITY_BLEND_S:-0.04}"
+# Validated observation-quality chain.  The four user-controlled experimental
+# paths (sync depth, LS velocity, reacquisition velocity handover and control
+# time compensation) remain off.  These causal guards match the latest real
+# recordings and can still be overridden independently from the environment.
+ENABLE_CAMERA_CLEAR_BUFFERS_ON_LOSS="${ENABLE_CAMERA_CLEAR_BUFFERS_ON_LOSS:-true}"
+ENABLE_CAMERA_MOTION_CONSISTENCY_GATE="${ENABLE_CAMERA_MOTION_CONSISTENCY_GATE:-true}"
+ENABLE_CAMERA_PHYSICS_CONSTRAINED_VELOCITY="${ENABLE_CAMERA_PHYSICS_CONSTRAINED_VELOCITY:-true}"
+ENABLE_CAMERA_TRAJECTORY_POSITION_SMOOTHING="${ENABLE_CAMERA_TRAJECTORY_POSITION_SMOOTHING:-true}"
+ENABLE_CAMERA_CONTROL_TIME_COMPENSATION="${ENABLE_CAMERA_CONTROL_TIME_COMPENSATION:-false}"
+ENABLE_CAMERA_REACQUISITION_SMOOTHING="${ENABLE_CAMERA_REACQUISITION_SMOOTHING:-true}"
+ENABLE_OPTIMIZED_BALL_PREDICTION_INITIAL_STATE="${ENABLE_OPTIMIZED_BALL_PREDICTION_INITIAL_STATE:-true}"
 ENABLE_ROS_BRIDGE="${ENABLE_ROS_BRIDGE:-true}"
 ROS_PUBLISH_COMMANDS="${ROS_PUBLISH_COMMANDS:-true}"
 COMMAND_TOPIC="${COMMAND_TOPIC:-/mx_mix_command}"
@@ -428,14 +500,29 @@ MOCAP_RIGID_BODY_NAME="${MOCAP_RIGID_BODY_NAME:-}"
 MOCAP_POSITION_UNIT="${MOCAP_POSITION_UNIT:-auto}"
 MOCAP_TIMESTAMP_UNIT="${MOCAP_TIMESTAMP_UNIT:-s}"
 MOCAP_TIMEOUT_S="${MOCAP_TIMEOUT_S:-0.5}"
-MOCAP_VELOCITY_ALPHA="${MOCAP_VELOCITY_ALPHA:-0.35}"
+MOCAP_VELOCITY_ALPHA="${MOCAP_VELOCITY_ALPHA:-1.0}"
 MOCAP_MAX_VELOCITY_M_S="${MOCAP_MAX_VELOCITY_M_S:-20.0}"
+MOCAP_VELOCITY_WINDOW_FRAMES="${MOCAP_VELOCITY_WINDOW_FRAMES:-3}"
+MOCAP_VELOCITY_WINDOW_MAX_SPAN_S="${MOCAP_VELOCITY_WINDOW_MAX_SPAN_S:-0.05}"
 CAMERA_SOURCE_MODE="${CAMERA_SOURCE_MODE:-direct_realsense}"
 USE_HYBRID_DETECTOR="${USE_HYBRID_DETECTOR:-true}"
 USE_DEPTH_SENSOR="${USE_DEPTH_SENSOR:-true}"
 IMAGE_WIDTH="${IMAGE_WIDTH:-848}"
 IMAGE_HEIGHT="${IMAGE_HEIGHT:-480}"
-REALSENSE_FPS="${REALSENSE_FPS:-90}"
+if [ -z "${REALSENSE_FPS:-}" ]; then
+    case "${POLICY_PROFILE,,}" in
+        simcode6|simcode6_qvel67|qvel67|qvel_67)
+            # Match the checkpoint's physical camera cadence as well as the
+            # policy-side fractional refresh clock.  Capturing at 90 Hz and
+            # merely downsampling would change the raw velocity estimator's
+            # source intervals.
+            REALSENSE_FPS="60"
+            ;;
+        *)
+            REALSENSE_FPS="90"
+            ;;
+    esac
+fi
 CAMERA_IMAGE_TOPIC="${CAMERA_IMAGE_TOPIC:-/camera/camera/color/image_raw/compressed}"
 CAMERA_RAW_IMAGE_TOPIC="${CAMERA_RAW_IMAGE_TOPIC:-/camera/camera/color/image_raw}"
 CAMERA_IMAGE_TRANSPORT="${CAMERA_IMAGE_TRANSPORT:-auto}"
@@ -467,7 +554,19 @@ IR_BRIGHTNESS_PERCENTILE="${IR_BRIGHTNESS_PERCENTILE:-25}"
 HYBRID_ROI_MARGIN="${HYBRID_ROI_MARGIN:-100}"
 DEPTH_CORRECTION_MODEL_PATH="${DEPTH_CORRECTION_MODEL_PATH:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/depth_correction_model.pkl}"
 DEPTH_NEIGHBORHOOD_PX="${DEPTH_NEIGHBORHOOD_PX:-2}"
+CAMERA_DEPTH_MODE="${CAMERA_DEPTH_MODE:-adaptive}"
+# Independent calibrated RealSense surface-depth -> ball-centre-depth layer.
+# This launch profile enables it for the new fixed-ball calibration while the
+# web checkbox can still toggle it live without changing 2D/FK/extrinsics.
+ENABLE_SENSOR_SURFACE_TO_CENTER_DEPTH="${ENABLE_SENSOR_SURFACE_TO_CENTER_DEPTH:-true}"
 DEPTH_TEMPORAL_WINDOW_FRAMES="${DEPTH_TEMPORAL_WINDOW_FRAMES:-3}"
+CAMERA_VELOCITY_LEAST_SQUARES="${CAMERA_VELOCITY_LEAST_SQUARES:-false}"
+CAMERA_VELOCITY_WINDOW_FRAMES="${CAMERA_VELOCITY_WINDOW_FRAMES:-3}"
+CAMERA_IMPACT_VELOCITY_RESET="${CAMERA_IMPACT_VELOCITY_RESET:-true}"
+CAMERA_IMPACT_MIN_DOWNWARD_VELOCITY_M_S="${CAMERA_IMPACT_MIN_DOWNWARD_VELOCITY_M_S:-0.25}"
+CAMERA_IMPACT_MIN_UPWARD_VELOCITY_M_S="${CAMERA_IMPACT_MIN_UPWARD_VELOCITY_M_S:-0.25}"
+CAMERA_IMPACT_MIN_VELOCITY_JUMP_M_S="${CAMERA_IMPACT_MIN_VELOCITY_JUMP_M_S:-0.80}"
+CAMERA_IMPACT_REFRACTORY_S="${CAMERA_IMPACT_REFRACTORY_S:-0.08}"
 INFER_IMGSZ="${INFER_IMGSZ:-640}"
 DETECTOR_DEVICE="${DETECTOR_DEVICE:-0}"
 DETECTOR_HALF="${DETECTOR_HALF:-false}"
@@ -527,6 +626,10 @@ case "$WORKSPACE_SAFETY_MODE" in
 esac
 echo "[ProbeConfig] predictive=$DONE_ENABLE_PREDICTIVE_STOP horizon=${DONE_PREDICTION_HORIZON_S}s dt=${DONE_PREDICTION_DT_S}s margin=${DONE_PREDICTION_MARGIN_M}m ori_margin=${DONE_PREDICTION_ORIENTATION_MARGIN_RAD}rad done_monitoring=$ENABLE_DONE_MONITORING"
 echo "[ProbeConfig] ball estimator=$ENABLE_BALL_STATE_ESTIMATOR backend=$BALL_ESTIMATOR_BACKEND prediction=$BALL_ESTIMATOR_ENABLE_PREDICTION output=$BALL_ESTIMATOR_CONTROL_OUTPUT_MODE"
+echo "[ProbeConfig] high-FOV prediction=$ENABLE_HIGH_BALL_OCCLUSION_PREDICTION model=IROS2249 N=$HIGH_BALL_PREDICTION_HISTORY_FRAMES activation_z=${HIGH_BALL_PREDICTION_ACTIVATION_Z_M}m min_up_vz=${HIGH_BALL_PREDICTION_MIN_UPWARD_VELOCITY_M_S}m/s max=${HIGH_BALL_PREDICTION_MAX_PREDICTION_S}s stop_z=${HIGH_BALL_PREDICTION_STOP_Z_M}m drag=${HIGH_BALL_PREDICTION_DRAG_COEFFICIENT_PER_M}/m"
+echo "[ProbeConfig] adaptive depth-fault 3D prediction=$ENABLE_SENSOR_DEPTH_ANOMALY_PREDICTION"
+echo "[ProbeConfig] reacquisition velocity handover=$ENABLE_HIGH_BALL_REACQUISITION_VELOCITY_HANDOVER frames=$HIGH_BALL_REACQUISITION_VELOCITY_FRAMES blend=${HIGH_BALL_REACQUISITION_VELOCITY_BLEND_S}s"
+echo "[ProbeConfig] observation chain clear_loss=$ENABLE_CAMERA_CLEAR_BUFFERS_ON_LOSS motion_gate=$ENABLE_CAMERA_MOTION_CONSISTENCY_GATE physics_velocity=$ENABLE_CAMERA_PHYSICS_CONSTRAINED_VELOCITY position_smoothing=$ENABLE_CAMERA_TRAJECTORY_POSITION_SMOOTHING impact_reset=$CAMERA_IMPACT_VELOCITY_RESET time_comp=$ENABLE_CAMERA_CONTROL_TIME_COMPENSATION reacq_smooth=$ENABLE_CAMERA_REACQUISITION_SMOOTHING optimized_prediction_init=$ENABLE_OPTIMIZED_BALL_PREDICTION_INITIAL_STATE"
 if [ "$ENABLE_HYBRID_BALL_TRACKER" = "true" ]; then
     echo "[ProbeConfig] hybrid tracker config=$HYBRID_BALL_TRACKER_CONFIG_PATH"
 fi
@@ -537,10 +640,16 @@ echo "[ProbeConfig] simcode3 actuator67 model=$SIMCODE3_MODEL_PATH"
 echo "[ProbeConfig] simcode4 servo67 model=$SIMCODE4_MODEL_PATH frozen_sim_order=FOPDT->planner real_servo_planner=$SIMCODE4_REAL_SERVO_PLANNER (default off)"
 echo "[ProbeConfig] simcode4 real default order=compensated_angle->physical_joint; opt-in planner requires checkpoint env_cfg planner_before_actuator=true"
 echo "[ProbeConfig] simcode5 pure-actuator67 model=$SIMCODE5_MODEL_PATH real_order=latest_policy_angle->physical_joint mirror_plant=per_joint_delay->second_order->sport_PD"
+echo "[ProbeConfig] simcode6 qvel67 model=$SIMCODE6_MODEL_PATH action=normalized_qvel scale=0.85 filter=15ms slew=30/s real_order=latest_policy_angle->physical_joint"
+echo "[ProbeConfig] sim mirror=$ENABLE_SIM_MIRROR backend=$SIM_BACKEND (simcode4 forces MJX; simcode5/6 CPU restore checkpoint plant settings)"
 echo "[ProbeConfig] sim compensation_preset=$COMPENSATION_PRESET mode=$COMPENSATION_MODE delay=${COMP_DELAY_MS}ms tau=${COMP_ACTUATOR_TAU_S}s gain=$COMP_ACTUATOR_GAIN beta=$COMP_MPC_BETA tau_scale=$COMP_MPC_TAU_SCALE horizon=$COMP_MPC_HORIZON_STEPS weights=${COMP_MPC_TRACKING_WEIGHT}/${COMP_MPC_NOMINAL_WEIGHT}/${COMP_MPC_DELTA_WEIGHT} max_delta=${COMP_MPC_MAX_DELTA_RAD}rad"
 echo "[ProbeConfig] real-only compensation delay=${REAL_COMP_DELAY_MS}ms tau=${REAL_COMP_ACTUATOR_TAU_S}s gain=$REAL_COMP_ACTUATOR_GAIN beta=$REAL_COMP_MPC_BETA delay_scale=$REAL_COMP_MPC_DELAY_SCALE tau_scale=$REAL_COMP_MPC_TAU_SCALE horizon=$REAL_COMP_MPC_HORIZON_STEPS weights=${REAL_COMP_MPC_TRACKING_WEIGHT}/${REAL_COMP_MPC_NOMINAL_WEIGHT}/${REAL_COMP_MPC_DELTA_WEIGHT} max_delta=$REAL_COMP_MPC_MAX_DELTA_RAD parameter_target=real"
 echo "[ProbeConfig] policy observation=${POLICY_OBS_DIM}D ball_refresh=${BALL_OBSERVATION_RATE_HZ}Hz valid_frame_age=$RL_USE_VALID_BALL_OBS_AGE joint_feedback=measured_q_dq"
+echo "[ProbeConfig] policy dq_adapter=$ENABLE_POLICY_DQ_ADAPTER gain=$POLICY_DQ_ADAPTER_GAIN tau_s=$POLICY_DQ_ADAPTER_TAU_S delay_steps=$POLICY_DQ_ADAPTER_DELAY_STEPS dq_obs_scale=$POLICY_DQ_OBSERVATION_SCALE"
 echo "[ProbeConfig] camera=${CAMERA_SOURCE_MODE} ${IMAGE_WIDTH}x${IMAGE_HEIGHT}@${REALSENSE_FPS}Hz yolo=${ENABLE_YOLO} candidate_filter=${ENABLE_HYBRID_CANDIDATE_FILTER} visualization=${ENABLE_CAMERA_VISUALIZATION}@${CAMERA_VISUALIZATION_RATE_HZ}Hz"
+echo "[ProbeConfig] camera depth_mode=$CAMERA_DEPTH_MODE surface_to_center=$ENABLE_SENSOR_SURFACE_TO_CENTER_DEPTH depth_sync=$USE_SYNCHRONIZED_IR_DEPTH median_frames=$DEPTH_TEMPORAL_WINDOW_FRAMES velocity_ls=$CAMERA_VELOCITY_LEAST_SQUARES velocity_frames=$CAMERA_VELOCITY_WINDOW_FRAMES impact_reset=$CAMERA_IMPACT_VELOCITY_RESET"
+echo "[ProbeConfig] contact_action_shield=$ENABLE_CONTACT_ACTION_SHIELD window=${CONTACT_SHIELD_PRE_CONTACT_WINDOW_S}/${CONTACT_SHIELD_POST_CONTACT_WINDOW_S}s normal_xy=$CONTACT_SHIELD_MAX_NORMAL_LATERAL lateral_speed=${CONTACT_SHIELD_MAX_LATERAL_SPEED_M_S}m/s workspace_margin=${CONTACT_SHIELD_WORKSPACE_MARGIN_M}m"
+echo "[ProbeConfig] vertical_contact_energy_shield=$ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD pre=${VERTICAL_CONTACT_PRE_CONTACT_WINDOW_S}s target_apex_delta=${VERTICAL_CONTACT_TARGET_APEX_HEIGHT_M}m restitution=$VERTICAL_CONTACT_RESTITUTION hard_racket_vz=${VERTICAL_CONTACT_MAX_RACKET_UPWARD_SPEED_M_S}m/s"
 echo "[ProbeConfig] mocap=${ENABLE_MOCAP_BALL} udp=${MOCAP_UDP_HOST}:${MOCAP_UDP_PORT} ball_marker=${MOCAP_MARKER_ID} rb_slot=${MOCAP_RIGID_BODY_SLOT} rb_id=${MOCAP_RIGID_BODY_ID} calibration=${MOCAP_CALIBRATION_PATH}"
 echo "[ProbeConfig] controller=$DEFAULT_CONTROL_MODE tracking_gap=${RACKET_TRACKING_HEIGHT_OFFSET_M}m tracking_mpc=$RACKET_TRACKING_USE_MPC tracking_ball_age=${RACKET_TRACKING_MAX_BALL_AGE_S}s"
 echo "[ProbeConfig] shared_racket_mpc=N${RACKET_TRACKING_MPC_HORIZON_STEPS} vmax=${RACKET_TRACKING_MAX_CARTESIAN_SPEED_M_S}m/s amax=${RACKET_TRACKING_MAX_CARTESIAN_ACCELERATION_M_S2}m/s2 joint_scale=${RACKET_TRACKING_JOINT_VELOCITY_SCALE}/${RACKET_TRACKING_JOINT_ACCELERATION_SCALE}"
@@ -583,14 +692,13 @@ if [ "$ENABLE_SIM_MIRROR" = "prompt" ] && [ -t 0 ]; then
     SIM_MIRROR_DEFAULT_ENABLED="$ENABLE_SIM_MIRROR"
 fi
 
-# A handwritten CPU mirror is not authoritative for simcode4.  Force the
-# original MJX train/validate environment and do this before CUDA/JAX setup so
-# an interactive choice of "mujoco" cannot accidentally omit its runtime env.
+# Simcode4's planner order is still MJX-only.  Simcode5 may use the aligned
+# CPU MuJoCo mirror or the original MJX backend selected above/by the operator.
 if [ "$ENABLE_SIM_MIRROR" = "true" ]; then
     case "${POLICY_PROFILE,,}" in
         simcode4|simcode4_servo67|servo67|servo_67)
             if [ "$SIM_BACKEND" != "mjx" ]; then
-                echo "[ProbeConfig] simcode4 requires its frozen MJX mirror; overriding sim backend '$SIM_BACKEND' -> 'mjx'"
+                echo "[ProbeConfig] $POLICY_PROFILE requires its frozen MJX mirror; overriding sim backend '$SIM_BACKEND' -> 'mjx'"
             fi
             SIM_BACKEND="mjx"
             ;;
@@ -652,6 +760,15 @@ fi
 if [ "$ENABLE_SAFETY_LIMITER" = "true" ]; then
     FLOW_ARGS+=(--enable-safety-limiter)
 fi
+if [ "$ENABLE_POLICY_DQ_ADAPTER" = "true" ]; then
+    FLOW_ARGS+=(--enable-policy-dq-adapter)
+fi
+if [ "$ENABLE_CONTACT_ACTION_SHIELD" = "true" ]; then
+    FLOW_ARGS+=(--enable-contact-action-shield)
+fi
+if [ "$ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD" = "true" ]; then
+    FLOW_ARGS+=(--enable-vertical-contact-energy-shield)
+fi
 if [ "$ENABLE_COMPENSATION" != "true" ]; then
     FLOW_ARGS+=(--disable-compensation)
 fi
@@ -692,6 +809,28 @@ else
 fi
 if [ "$BALL_ESTIMATOR_ENABLE_AERO_DRAG" != "true" ]; then
     FLOW_ARGS+=(--disable-ball-estimator-aero-drag)
+fi
+if [ "$ENABLE_HIGH_BALL_OCCLUSION_PREDICTION" = "true" ]; then
+    FLOW_ARGS+=(--enable-high-ball-occlusion-prediction)
+else
+    FLOW_ARGS+=(--disable-high-ball-occlusion-prediction)
+fi
+if [ "$ENABLE_SENSOR_DEPTH_ANOMALY_PREDICTION" = "true" ]; then
+    FLOW_ARGS+=(--enable-sensor-depth-anomaly-prediction)
+else
+    FLOW_ARGS+=(--disable-sensor-depth-anomaly-prediction)
+fi
+if [ "$ENABLE_HIGH_BALL_REACQUISITION_VELOCITY_HANDOVER" = "true" ]; then
+    FLOW_ARGS+=(--enable-high-ball-reacquisition-velocity-handover)
+fi
+if [ "$ENABLE_CAMERA_CONTROL_TIME_COMPENSATION" = "true" ]; then
+    FLOW_ARGS+=(--enable-camera-control-time-compensation)
+fi
+if [ "$ENABLE_CAMERA_REACQUISITION_SMOOTHING" = "true" ]; then
+    FLOW_ARGS+=(--enable-camera-reacquisition-smoothing)
+fi
+if [ "$ENABLE_OPTIMIZED_BALL_PREDICTION_INITIAL_STATE" = "true" ]; then
+    FLOW_ARGS+=(--enable-optimized-ball-prediction-initial-state)
 fi
 if [ "$RL_USE_VALID_BALL_OBS_AGE" != "true" ]; then
     FLOW_ARGS+=(--disable-rl-valid-ball-obs-age)
@@ -754,6 +893,29 @@ if [ "$USE_IR_DEPTH_KALMAN" = "true" ]; then
 fi
 if [ "$USE_SYNCHRONIZED_IR_DEPTH" = "true" ]; then
     CAMERA_ARGS+=(--use-synchronized-ir-depth)
+else
+    CAMERA_ARGS+=(--disable-synchronized-ir-depth)
+fi
+if [ "$ENABLE_SENSOR_SURFACE_TO_CENTER_DEPTH" = "true" ]; then
+    CAMERA_ARGS+=(--enable-sensor-surface-to-center-depth)
+fi
+if [ "$CAMERA_VELOCITY_LEAST_SQUARES" = "true" ]; then
+    CAMERA_ARGS+=(--camera-velocity-least-squares)
+fi
+if [ "$CAMERA_IMPACT_VELOCITY_RESET" = "true" ]; then
+    CAMERA_ARGS+=(--camera-impact-velocity-reset)
+fi
+if [ "$ENABLE_CAMERA_CLEAR_BUFFERS_ON_LOSS" = "true" ]; then
+    CAMERA_ARGS+=(--enable-camera-clear-buffers-on-loss)
+fi
+if [ "$ENABLE_CAMERA_MOTION_CONSISTENCY_GATE" = "true" ]; then
+    CAMERA_ARGS+=(--enable-camera-motion-consistency-gate)
+fi
+if [ "$ENABLE_CAMERA_PHYSICS_CONSTRAINED_VELOCITY" = "true" ]; then
+    CAMERA_ARGS+=(--enable-camera-physics-constrained-velocity)
+fi
+if [ "$ENABLE_CAMERA_TRAJECTORY_POSITION_SMOOTHING" = "true" ]; then
+    CAMERA_ARGS+=(--enable-camera-trajectory-position-smoothing)
 fi
 if [ "$USE_UNDISTORT" != "true" ]; then
     CAMERA_ARGS+=(--disable-undistort)
@@ -864,6 +1026,8 @@ exec python3 "$PROBE_SCRIPT" \
     --simcode4-policy-xml-path "$SIMCODE4_POLICY_XML_PATH" \
     --simcode5-model-path "$SIMCODE5_MODEL_PATH" \
     --simcode5-policy-xml-path "$SIMCODE5_POLICY_XML_PATH" \
+    --simcode6-model-path "$SIMCODE6_MODEL_PATH" \
+    --simcode6-policy-xml-path "$SIMCODE6_POLICY_XML_PATH" \
     --robot-xml-path "$ROBOT_XML" \
     --policy-obs-dim "$POLICY_OBS_DIM" \
     --reset-initial-pose "$RESET_INITIAL_POSE" \
@@ -908,6 +1072,10 @@ exec python3 "$PROBE_SCRIPT" \
     --workspace-hold-trigger-margin-m "$WORKSPACE_HOLD_TRIGGER_MARGIN_M" \
     --ball-noise-std-m "$BALL_NOISE_STD_M" \
     --control-rate-hz "$CONTROL_RATE_HZ" \
+    --policy-dq-adapter-gain "$POLICY_DQ_ADAPTER_GAIN" \
+    --policy-dq-adapter-tau-s "$POLICY_DQ_ADAPTER_TAU_S" \
+    --policy-dq-adapter-delay-steps "$POLICY_DQ_ADAPTER_DELAY_STEPS" \
+    --policy-dq-observation-scale "$POLICY_DQ_OBSERVATION_SCALE" \
     --default-control-mode "$DEFAULT_CONTROL_MODE" \
     --racket-tracking-height-offset-m "$RACKET_TRACKING_HEIGHT_OFFSET_M" \
     --racket-tracking-position-gain-s "$RACKET_TRACKING_POSITION_GAIN_S" \
@@ -942,6 +1110,19 @@ exec python3 "$PROBE_SCRIPT" \
     --juggle-contact-grace-s "$JUGGLE_CONTACT_GRACE_S" \
     --safety-parking-velocity-scale "$SAFETY_PARKING_VELOCITY_SCALE" \
     --safety-parking-acceleration-scale "$SAFETY_PARKING_ACCELERATION_SCALE" \
+    --contact-shield-pre-contact-window-s "$CONTACT_SHIELD_PRE_CONTACT_WINDOW_S" \
+    --contact-shield-post-contact-window-s "$CONTACT_SHIELD_POST_CONTACT_WINDOW_S" \
+    --contact-shield-contact-tolerance-m "$CONTACT_SHIELD_CONTACT_TOLERANCE_M" \
+    --contact-shield-max-lateral-distance-m "$CONTACT_SHIELD_MAX_LATERAL_DISTANCE_M" \
+    --contact-shield-min-downward-velocity-m-s "$CONTACT_SHIELD_MIN_DOWNWARD_VELOCITY_M_S" \
+    --contact-shield-max-normal-lateral "$CONTACT_SHIELD_MAX_NORMAL_LATERAL" \
+    --contact-shield-max-lateral-speed-m-s "$CONTACT_SHIELD_MAX_LATERAL_SPEED_M_S" \
+    --contact-shield-workspace-margin-m "$CONTACT_SHIELD_WORKSPACE_MARGIN_M" \
+    --contact-shield-dls-damping "$CONTACT_SHIELD_DLS_DAMPING" \
+    --vertical-contact-pre-contact-window-s "$VERTICAL_CONTACT_PRE_CONTACT_WINDOW_S" \
+    --vertical-contact-target-apex-height-m "$VERTICAL_CONTACT_TARGET_APEX_HEIGHT_M" \
+    --vertical-contact-restitution "$VERTICAL_CONTACT_RESTITUTION" \
+    --vertical-contact-max-racket-upward-speed-m-s "$VERTICAL_CONTACT_MAX_RACKET_UPWARD_SPEED_M_S" \
     --compensation-mode "$COMPENSATION_MODE" \
     --comp-delay-ms "$COMP_DELAY_MS" \
     --real-comp-delay-ms "$REAL_COMP_DELAY_MS" \
@@ -982,6 +1163,7 @@ exec python3 "$PROBE_SCRIPT" \
     --simcode3-sim-xml-path "$SIMCODE3_SIM_XML_PATH" \
     --simcode4-sim-xml-path "$SIMCODE4_SIM_XML_PATH" \
     --simcode5-sim-xml-path "$SIMCODE5_SIM_XML_PATH" \
+    --simcode6-sim-xml-path "$SIMCODE6_SIM_XML_PATH" \
     --sim-frame-rate-hz "$SIM_FRAME_RATE_HZ" \
     --sim-render-width "$SIM_RENDER_WIDTH" \
     --sim-render-height "$SIM_RENDER_HEIGHT" \
@@ -1000,6 +1182,16 @@ exec python3 "$PROBE_SCRIPT" \
     --ball-estimator-q-depth-vel-mult "$BALL_ESTIMATOR_Q_DEPTH_VEL_MULT" \
     --ball-estimator-r-lateral-mm "$BALL_ESTIMATOR_R_LATERAL_MM" \
     --ball-estimator-r-depth-mm "$BALL_ESTIMATOR_R_DEPTH_MM" \
+    --high-ball-prediction-history-frames "$HIGH_BALL_PREDICTION_HISTORY_FRAMES" \
+    --high-ball-prediction-activation-z-m "$HIGH_BALL_PREDICTION_ACTIVATION_Z_M" \
+    --high-ball-prediction-min-upward-velocity-m-s "$HIGH_BALL_PREDICTION_MIN_UPWARD_VELOCITY_M_S" \
+    --high-ball-prediction-max-prediction-s "$HIGH_BALL_PREDICTION_MAX_PREDICTION_S" \
+    --high-ball-prediction-stop-z-m "$HIGH_BALL_PREDICTION_STOP_Z_M" \
+    --high-ball-prediction-drag-coefficient-per-m "$HIGH_BALL_PREDICTION_DRAG_COEFFICIENT_PER_M" \
+    --high-ball-prediction-integration-step-s "$HIGH_BALL_PREDICTION_INTEGRATION_STEP_S" \
+    --high-ball-prediction-reacquisition-gate-m "$HIGH_BALL_PREDICTION_REACQUISITION_GATE_M" \
+    --high-ball-reacquisition-velocity-frames "$HIGH_BALL_REACQUISITION_VELOCITY_FRAMES" \
+    --high-ball-reacquisition-velocity-blend-s "$HIGH_BALL_REACQUISITION_VELOCITY_BLEND_S" \
     --command-topic "$COMMAND_TOPIC" \
     --joint-state-topic "$JOINT_STATE_TOPIC" \
     --cart-state-topic "$CART_STATE_TOPIC" \
@@ -1032,7 +1224,13 @@ exec python3 "$PROBE_SCRIPT" \
     --hybrid-roi-margin "$HYBRID_ROI_MARGIN" \
     --depth-correction-model-path "$DEPTH_CORRECTION_MODEL_PATH" \
     --depth-neighborhood-px "$DEPTH_NEIGHBORHOOD_PX" \
+    --camera-depth-mode "$CAMERA_DEPTH_MODE" \
     --depth-temporal-window-frames "$DEPTH_TEMPORAL_WINDOW_FRAMES" \
+    --camera-velocity-window-frames "$CAMERA_VELOCITY_WINDOW_FRAMES" \
+    --camera-impact-min-downward-velocity-m-s "$CAMERA_IMPACT_MIN_DOWNWARD_VELOCITY_M_S" \
+    --camera-impact-min-upward-velocity-m-s "$CAMERA_IMPACT_MIN_UPWARD_VELOCITY_M_S" \
+    --camera-impact-min-velocity-jump-m-s "$CAMERA_IMPACT_MIN_VELOCITY_JUMP_M_S" \
+    --camera-impact-refractory-s "$CAMERA_IMPACT_REFRACTORY_S" \
     --infer-imgsz "$INFER_IMGSZ" \
     --detector-device "$DETECTOR_DEVICE" \
     --camera-tilt-deg "$CAMERA_TILT_DEG" \
@@ -1064,4 +1262,6 @@ exec python3 "$PROBE_SCRIPT" \
     --mocap-timeout-s "$MOCAP_TIMEOUT_S" \
     --mocap-velocity-alpha "$MOCAP_VELOCITY_ALPHA" \
     --mocap-max-velocity-m-s "$MOCAP_MAX_VELOCITY_M_S" \
+    --mocap-velocity-window-frames "$MOCAP_VELOCITY_WINDOW_FRAMES" \
+    --mocap-velocity-window-max-span-s "$MOCAP_VELOCITY_WINDOW_MAX_SPAN_S" \
     "$@"

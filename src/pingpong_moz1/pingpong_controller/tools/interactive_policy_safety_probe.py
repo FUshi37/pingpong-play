@@ -86,6 +86,10 @@ from pingpong_controller.ball_tracker import (
     BallStateEstimator as HybridBallStateEstimator,
     BallTrackerConfig as HybridBallTrackerConfig,
 )
+from pingpong_controller.high_ball_occlusion_predictor import (
+    HighBallOcclusionConfig,
+    HighBallOcclusionPredictor,
+)
 from pingpong_controller.done_condition_monitor import (
     DoneConditionMonitor,
     _angle_above_min_rad,
@@ -101,6 +105,14 @@ from pingpong_controller.mjx_rl_policy import (
     Simcode3Actuator67PolicyController,
     Simcode4Servo67PolicyController,
     Simcode5PureActuator67PolicyController,
+    Simcode6Qvel67PolicyController,
+)
+from pingpong_controller.policy_dq_observation_adapter import (
+    PolicyDqAdapterConfig,
+    PolicyDqObservationAdapter,
+    SIMCODE5_DQ_ADAPTER_DELAY_STEPS,
+    SIMCODE5_DQ_ADAPTER_GAIN,
+    SIMCODE5_DQ_ADAPTER_TAU_S,
 )
 from pingpong_controller.racket_ball_tracker import (
     RacketBallTracker,
@@ -120,6 +132,7 @@ from pingpong_controller.rl_policy import (
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+    OBSERVATION_PROFILE_SIMCODE6_QVEL67,
     OBSERVATION_PROFILES,
     RIGHT_ARM_JOINTS,
     normalize_observation_profile,
@@ -235,6 +248,16 @@ DEFAULT_SIMCODE5_POLICY_XML = (
     REPO_ROOT / "simcode5" / "pingpong_moz1-main" / "pingpong_controller"
     / "tools" / "rl_sim" / "moz1_pd.xml"
 )
+DEFAULT_SIMCODE6_MODEL_PATH = (
+    REPO_ROOT / "simcode6" / "pingpong_moz1-main" / "pingpong_controller"
+    / "outputs" / "rl_sim" / "record_new3_plateau_rework_20260812"
+    / "formal_gpu0_v14_heavy_ball_conservative_n1024_s128_e4_online"
+    / "mjx_curriculum_last.pkl"
+)
+DEFAULT_SIMCODE6_POLICY_XML = (
+    REPO_ROOT / "simcode6" / "pingpong_moz1-main" / "pingpong_controller"
+    / "tools" / "rl_sim" / "moz1_pd.xml"
+)
 DEFAULT_VISION_MODEL = (
     REPO_ROOT / "src" / "pingpong_moz1" / "pingpong_controller"
     / "models" / "best.pt"
@@ -264,7 +287,18 @@ SIMCODE2_RACKET_LAUNCH_VXY_MAX_M_S = 0.003
 SIMCODE2_RACKET_LAUNCH_VNORMAL_MAX_M_S = 0.003
 SIMCODE2_RACKET_LAUNCH_EDGE_MARGIN_M = 0.005
 SIMCODE2_BALL_RADIUS_M = 0.020
-ANALYSIS_SCHEMA_VERSION = 6
+ANALYSIS_SCHEMA_VERSION = 7
+# High-FOV activation must be expressed in image geometry as well as world Z:
+# a tilted camera's top border maps to a different base-frame height at every
+# depth.  These conservative fractions use the raw IR centre (the orange/red
+# circle).  A centre that disappears uses prior upward image motion; a rejected
+# centre already at the border is still required to have a rising 3D trajectory
+# fit before prediction activates.  Neither cue depends on synchronized depth.
+CAMERA_TOP_EXIT_EDGE_FRACTION = 0.30
+CAMERA_TOP_EXIT_ARM_FRACTION = 0.42
+CAMERA_TOP_EXIT_MIN_UPWARD_PX_S = 120.0
+CAMERA_TOP_EXIT_TRACK_MAX_GAP_S = 0.12
+CAMERA_TOP_EXIT_LATCH_S = 0.12
 SOURCE_MODULE_DIR = (
     REPO_ROOT / "src" / "pingpong_moz1" / "pingpong_controller"
 )
@@ -275,6 +309,35 @@ def finite_float(value: str) -> float:
     if not math.isfinite(out):
         raise argparse.ArgumentTypeError(f"expected finite float, got {value!r}")
     return out
+
+
+def parse_joint_float_vector(text: str) -> tuple[float, ...]:
+    cleaned = str(text).strip().strip("[]")
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+    if len(parts) != len(RIGHT_ARM_JOINTS):
+        raise argparse.ArgumentTypeError(
+            "expected seven comma-separated joint values, "
+            f"got {text!r}")
+    values = tuple(float(part) for part in parts)
+    if not all(math.isfinite(value) for value in values):
+        raise argparse.ArgumentTypeError(
+            f"expected seven finite joint values, got {text!r}")
+    return values
+
+
+def parse_joint_int_vector(text: str) -> tuple[int, ...]:
+    cleaned = str(text).strip().strip("[]")
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+    if len(parts) != len(RIGHT_ARM_JOINTS):
+        raise argparse.ArgumentTypeError(
+            "expected seven comma-separated joint integers, "
+            f"got {text!r}")
+    try:
+        values = tuple(int(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected seven joint integers, got {text!r}") from exc
+    return values
 
 
 def parse_limits(text: str | None) -> tuple[float, float] | None:
@@ -491,6 +554,8 @@ class ProbeConfig:
     simcode4_policy_xml_path: Path
     simcode5_model_path: Path
     simcode5_policy_xml_path: Path
+    simcode6_model_path: Path
+    simcode6_policy_xml_path: Path
     robot_xml_path: Path
     policy_obs_dim: int
     reset_initial_pose_id: str
@@ -543,10 +608,30 @@ class ProbeConfig:
     juggle_mpc_terminal_position_tolerance_m: float
     juggle_mpc_terminal_velocity_tolerance_m_s: float
     control_rate_hz: float
+    enable_policy_dq_adapter: bool
+    policy_dq_adapter_gain: tuple[float, ...]
+    policy_dq_adapter_tau_s: tuple[float, ...]
+    policy_dq_adapter_delay_steps: tuple[int, ...]
+    policy_dq_observation_scale: float
     ball_lost_timeout_s: float
     enable_safety_limiter: bool
     safety_parking_velocity_scale: float
     safety_parking_acceleration_scale: float
+    enable_contact_action_shield: bool
+    contact_shield_pre_contact_window_s: float
+    contact_shield_post_contact_window_s: float
+    contact_shield_contact_tolerance_m: float
+    contact_shield_max_lateral_distance_m: float
+    contact_shield_min_downward_velocity_m_s: float
+    contact_shield_max_normal_lateral: float
+    contact_shield_max_lateral_speed_m_s: float
+    contact_shield_workspace_margin_m: float
+    contact_shield_dls_damping: float
+    enable_vertical_contact_energy_shield: bool
+    vertical_contact_pre_contact_window_s: float
+    vertical_contact_target_apex_height_m: float
+    vertical_contact_restitution: float
+    vertical_contact_max_racket_upward_speed_m_s: float
     enable_compensation: bool
     compensation_mode: str
     comp_delay_ms: float
@@ -624,6 +709,22 @@ class ProbeConfig:
     ball_estimator_q_depth_vel_mult: float
     ball_estimator_r_lateral_mm: float
     ball_estimator_r_depth_mm: float
+    enable_high_ball_occlusion_prediction: bool
+    enable_sensor_depth_anomaly_prediction: bool
+    high_ball_prediction_history_frames: int
+    high_ball_prediction_activation_z_m: float
+    high_ball_prediction_min_upward_velocity_m_s: float
+    high_ball_prediction_max_prediction_s: float
+    high_ball_prediction_stop_z_m: float
+    high_ball_prediction_drag_coefficient_per_m: float
+    high_ball_prediction_integration_step_s: float
+    high_ball_prediction_reacquisition_gate_m: float
+    enable_high_ball_reacquisition_velocity_handover: bool
+    high_ball_reacquisition_velocity_frames: int
+    high_ball_reacquisition_velocity_blend_s: float
+    enable_camera_control_time_compensation: bool
+    enable_camera_reacquisition_smoothing: bool
+    enable_optimized_ball_prediction_initial_state: bool
     ros_bridge: bool
     ros_publish_commands: bool
     command_topic: str
@@ -644,6 +745,8 @@ class ProbeConfig:
     mocap_timeout_s: float
     mocap_velocity_alpha: float
     mocap_max_velocity_m_s: float
+    mocap_velocity_window_frames: int
+    mocap_velocity_window_max_span_s: float
     camera_source_mode: str
     use_hybrid_detector: bool
     use_depth_sensor: bool
@@ -673,7 +776,20 @@ class ProbeConfig:
     hybrid_roi_margin: int
     depth_correction_model_path: str
     depth_neighborhood_px: int
+    camera_depth_mode: str
+    enable_sensor_surface_to_center_depth: bool
     depth_temporal_window_frames: int
+    camera_velocity_least_squares: bool
+    camera_velocity_window_frames: int
+    enable_camera_clear_buffers_on_loss: bool
+    enable_camera_motion_consistency_gate: bool
+    enable_camera_physics_constrained_velocity: bool
+    enable_camera_trajectory_position_smoothing: bool
+    camera_impact_velocity_reset: bool
+    camera_impact_min_downward_velocity_m_s: float
+    camera_impact_min_upward_velocity_m_s: float
+    camera_impact_min_velocity_jump_m_s: float
+    camera_impact_refractory_s: float
     infer_imgsz: int
     detector_device: str
     detector_half: bool
@@ -724,6 +840,7 @@ class ProbeConfig:
     simcode3_sim_xml_path: Path
     simcode4_sim_xml_path: Path
     simcode5_sim_xml_path: Path
+    simcode6_sim_xml_path: Path
     sim_enable_video_frames: bool
     sim_frame_rate_hz: float
     sim_render_width: int
@@ -766,6 +883,30 @@ def _rounded_vector(values: Any, digits: int = 6) -> list[float]:
     return [round(float(v), digits) for v in arr]
 
 
+def _vertical_contact_energy_speed_cap(
+    incoming_ball_vz_m_s: float,
+    target_apex_height_m: float,
+    restitution: float,
+    hard_max_racket_upward_speed_m_s: float,
+    *,
+    gravity_m_s2: float = 9.81,
+) -> tuple[float, float]:
+    """Return racket-vz cap and target outgoing ball vz for vertical impact."""
+    incoming_vz = float(incoming_ball_vz_m_s)
+    height = max(0.0, float(target_apex_height_m))
+    e = max(1.0e-6, float(restitution))
+    hard_cap = max(0.0, float(hard_max_racket_upward_speed_m_s))
+    gravity = max(1.0e-6, float(gravity_m_s2))
+    if not all(math.isfinite(value) for value in (
+            incoming_vz, height, e, hard_cap, gravity)):
+        raise ValueError("vertical contact energy parameters must be finite")
+    target_outgoing_vz = math.sqrt(2.0 * gravity * height)
+    # v_out = (1 + e) * v_racket - e * v_in.
+    model_cap = (
+        target_outgoing_vz + e * incoming_vz) / (1.0 + e)
+    return min(hard_cap, max(0.0, model_cap)), target_outgoing_vz
+
+
 def _float32_vector(values: Any) -> list[float]:
     """Serialize a policy input without decimal rounding.
 
@@ -776,13 +917,67 @@ def _float32_vector(values: Any) -> list[float]:
     return np.asarray(values, dtype=np.float32).reshape(-1).tolist()
 
 
+_CAMERA_FRAME_TIMESTAMP_DUPLICATE_TOLERANCE_S = 1.0e-6
+
+
 _CAMERA_MEASUREMENT_SCALAR_KEYS = (
     "cx", "cy", "cx_raw", "cy_raw", "cx_coarse", "cy_coarse",
     "center_refine_shift_px", "radius", "projected_radius_px",
+    "transformed_measurement_x_mm", "transformed_measurement_y_mm",
+    "transformed_measurement_z_mm",
+    "geometry_radius_px", "geometry_quality_valid",
+    "ellipse_minor_px", "ellipse_major_px", "area_circularity",
     "smoothed_cx", "smoothed_cy", "smoothed_radius", "depth_mm",
-    "sensor_depth_mm", "geom_depth_mm", "depth_method",
+    "sensor_depth_mm", "sensor_surface_depth_mm", "sensor_center_depth_mm",
+    "sensor_center_depth_correction_mm",
+    "sensor_surface_to_center_depth_enabled",
+    "sensor_surface_to_center_depth_applied",
+    "sensor_center_depth_calibration_clamped",
+    "geom_depth_mm", "geom_depth_raw_mm",
+    "geom_depth_corrected_mm", "depth_correction_model_type",
+    "depth_method",
+    "depth_sensor_weight", "depth_disagreement_mm",
+    "depth_sensor_rejected", "depth_rejection_reason",
+    "depth_sensor_jump_mm", "depth_prediction_mm",
+    "depth_observed_radius_px", "depth_sensor_projected_radius_px",
+    "depth_radius_mismatch_ratio",
+    "depth_near_field_scale_stall", "depth_near_field_window_samples",
+    "depth_near_field_window_span_s",
+    "depth_near_field_sensor_approach_mm",
+    "depth_near_field_geometry_approach_mm",
+    "depth_near_field_radius_growth_ratio",
+    "depth_near_field_upward_pixel_speed_px_s",
+    "depth_prediction_residual_mm", "depth_prediction_horizon_s",
+    "depth_sensor_recovery_count",
     "depth_temporal_window_frames",
     "synchronized_depth_enabled",
+    "velocity_least_squares_enabled", "velocity_window_frames",
+    "velocity_history_size", "velocity_min_frames", "velocity_ready",
+    "clear_buffers_on_detection_loss_enabled",
+    "observation_gap_active", "observation_buffer_clear_count",
+    "physics_constrained_velocity_enabled",
+    "trajectory_position_smoothing_enabled",
+    "position_filter_residual_mm",
+    "measurement_trusted_3d", "observation_state", "observation_reason",
+    "motion_reacquisition_confirmed",
+    "motion_consistency_gate_enabled", "motion_consistency_rejected",
+    "motion_consistency_reason", "motion_gate_accepted_count",
+    "motion_gate_rejected_count",
+    "motion_impact_candidate_bypass_count",
+    "motion_impact_confirmation_bypass_count",
+    "ir_edge_rejected_count", "ir_roi_edge_rejected_count",
+    "impact_velocity_reset_enabled",
+    "velocity_impact_detected",
+    "velocity_motion_state", "velocity_model",
+    "velocity_filter_correction_m_s",
+    "velocity_restart_bridge_used", "velocity_restart_bridge_count",
+    "velocity_impact_candidate", "velocity_impact_candidate_count",
+    "velocity_impact_confirmed_count", "velocity_impact_rejected_count",
+    "impact_racket_gate_used", "impact_racket_gate_required",
+    "impact_racket_distance_mm", "impact_racket_state_age_s",
+    "impact_candidate_rejection_reason",
+    "impact_pair_vertical_velocity_m_s",
+    "impact_previous_vertical_velocity_m_s", "impact_evidence_source",
     "ir_depth_kalman_enabled", "ir_depth_innovation_mahalanobis",
     "detection_method", "depth_mode", "threshold_used", "aspect_ratio",
     "brightness", "candidate_selection_score",
@@ -823,11 +1018,35 @@ def _overlay_policy_trace_joint_feedback(
     if obs.shape[0] < 14:
         ros_payload["jointTimingMatchesPolicyObs"] = False
         return False
-    # A JointState callback may run after inference but before recording. The
-    # trace observation, unlike a second bridge read, is exactly what the actor
-    # consumed on this control tick.
-    ros_payload["jointPosition"] = _rounded_vector(obs[0:7])
-    ros_payload["jointVelocity"] = _rounded_vector(obs[7:14])
+    # A JointState callback may run after inference but before recording. Keep
+    # the atomic raw sample in the ROS fields even when policy-only dq
+    # adaptation or observation scaling changes the vector consumed by the
+    # actor. This prevents calibrated/scaled dq from being mislabeled as
+    # hardware JointState velocity in later sim2real analysis.
+    obs_unscaled = np.asarray(
+        trace.get("obsUnscaled", obs), dtype=np.float32).reshape(-1)
+    raw_q = trace.get("rawJointPosition")
+    raw_dq = trace.get("rawJointVelocity")
+    if raw_q is None:
+        raw_q = obs_unscaled[0:7]
+    if raw_dq is None:
+        raw_dq = obs_unscaled[7:14]
+    raw_q = np.asarray(raw_q, dtype=np.float32).reshape(-1)
+    raw_dq = np.asarray(raw_dq, dtype=np.float32).reshape(-1)
+    if raw_q.shape != (7,) or raw_dq.shape != (7,):
+        ros_payload["jointTimingMatchesPolicyObs"] = False
+        return False
+    policy_dq_unscaled = obs_unscaled[7:14]
+    policy_dq_scaled = obs[7:14]
+    ros_payload["jointPosition"] = _rounded_vector(raw_q)
+    ros_payload["jointVelocity"] = _rounded_vector(raw_dq)
+    ros_payload["jointVelocityRaw"] = _rounded_vector(raw_dq)
+    ros_payload["policyJointVelocityUnscaled"] = _rounded_vector(
+        policy_dq_unscaled)
+    ros_payload["policyJointVelocityScaled"] = _rounded_vector(
+        policy_dq_scaled)
+    ros_payload["jointVelocityMatchesPolicyObsUnscaled"] = bool(
+        np.array_equal(raw_dq, policy_dq_unscaled))
     ros_payload["jointTimingMatchesPolicyObs"] = True
     return True
 
@@ -1632,12 +1851,19 @@ def _realtime_alignment_report(
 def _write_policy_trace_csv(samples: list[dict[str, Any]], analysis_dir: Path) -> Path:
     obs_width = max((len(r.get("policyObs", [])) for r in samples), default=0)
     action_width = max((len(r.get("policyAction", [])) for r in samples), default=0)
+    executed_action_width = max((
+        len(r.get("policyExecutedAction", [])) for r in samples
+    ), default=0)
     sim_obs_width = max((
         len(r.get("sim", {}).get("policyObs", []))
         for r in samples if isinstance(r.get("sim"), dict)
     ), default=0)
     sim_action_width = max((
         len(r.get("sim", {}).get("policyAction", []))
+        for r in samples if isinstance(r.get("sim"), dict)
+    ), default=0)
+    sim_executed_action_width = max((
+        len(r.get("sim", {}).get("policyExecutedAction", []))
         for r in samples if isinstance(r.get("sim"), dict)
     ), default=0)
     out = analysis_dir / "policy_trace.csv"
@@ -1686,8 +1912,13 @@ def _write_policy_trace_csv(samples: list[dict[str, Any]], analysis_dir: Path) -
         + vector_fields
         + [f"obs_{i:03d}" for i in range(obs_width)]
         + [f"action_{i}" for i in range(action_width)]
+        + [f"executed_action_{i}" for i in range(executed_action_width)]
         + [f"sim_obs_{i:03d}" for i in range(sim_obs_width)]
         + [f"sim_action_{i}" for i in range(sim_action_width)]
+        + [
+            f"sim_executed_action_{i}"
+            for i in range(sim_executed_action_width)
+        ]
     )
 
     def put_point(out_row: dict[str, Any], prefix: str, raw: Any) -> None:
@@ -1709,9 +1940,11 @@ def _write_policy_trace_csv(samples: list[dict[str, Any]], analysis_dir: Path) -
         for row in samples:
             obs = row.get("policyObs", [])
             action = row.get("policyAction", [])
+            executed_action = row.get("policyExecutedAction", [])
             sim = row.get("sim") if isinstance(row.get("sim"), dict) else {}
             sim_obs = sim.get("policyObs", [])
             sim_action = sim.get("policyAction", [])
+            sim_executed_action = sim.get("policyExecutedAction", [])
             estimator = (
                 row.get("estimator")
                 if isinstance(row.get("estimator"), dict) else {}
@@ -1812,12 +2045,20 @@ def _write_policy_trace_csv(samples: list[dict[str, Any]], analysis_dir: Path) -
             if isinstance(action, list):
                 for i, value in enumerate(action[:action_width]):
                     out_row[f"action_{i}"] = value
+            if isinstance(executed_action, list):
+                for i, value in enumerate(
+                        executed_action[:executed_action_width]):
+                    out_row[f"executed_action_{i}"] = value
             if isinstance(sim_obs, list):
                 for i, value in enumerate(sim_obs[:sim_obs_width]):
                     out_row[f"sim_obs_{i:03d}"] = value
             if isinstance(sim_action, list):
                 for i, value in enumerate(sim_action[:sim_action_width]):
                     out_row[f"sim_action_{i}"] = value
+            if isinstance(sim_executed_action, list):
+                for i, value in enumerate(
+                        sim_executed_action[:sim_executed_action_width]):
+                    out_row[f"sim_executed_action_{i}"] = value
             writer.writerow(out_row)
     return out
 
@@ -1833,6 +2074,7 @@ def _plot_policy_curves(samples: list[dict[str, Any]], analysis_dir: Path) -> li
                     for i, r in enumerate(samples)], dtype=np.float64)
     obs = _numeric_array(samples, "policyObs")
     action = _numeric_array(samples, "policyAction")
+    executed_action = _numeric_array(samples, "policyExecutedAction")
     outputs: list[Path] = []
     if obs.size:
         groups = [
@@ -1866,9 +2108,18 @@ def _plot_policy_curves(samples: list[dict[str, Any]], analysis_dir: Path) -> li
         outputs.append(out)
     if action.size:
         fig, ax = plt.subplots(1, 1, figsize=(14, 5))
+        show_executed = bool(
+            executed_action.shape == action.shape
+            and not np.allclose(executed_action, action, atol=1e-8))
         for idx in range(action.shape[1]):
-            ax.plot(t, action[:, idx], linewidth=1.0, label=f"action[{idx}]")
-        ax.set_title("Policy Action Output")
+            ax.plot(
+                t, action[:, idx], linewidth=0.9,
+                label=f"raw action[{idx}]")
+            if show_executed:
+                ax.plot(
+                    t, executed_action[:, idx], linewidth=1.1,
+                    linestyle="--", label=f"executed action[{idx}]")
+        ax.set_title("Policy Action Output (raw and conditioned)")
         ax.set_xlabel("time (s)")
         ax.grid(True, alpha=0.25)
         ax.legend(loc="upper right", ncol=4)
@@ -1930,10 +2181,19 @@ def _plot_ball_state_curves(
     if not samples:
         return []
     states = np.full((len(samples), 6), np.nan, dtype=np.float64)
+    predicted = np.zeros(len(samples), dtype=bool)
     for index, sample in enumerate(samples):
         state = _sample_ball_state_6d(sample)
         if state is not None:
             states[index] = state
+        high_prediction = sample.get("highBallOcclusionPrediction")
+        estimator = sample.get("estimator")
+        predicted[index] = bool(
+            sample.get("predictedBallIsPredicted", False)
+            or (isinstance(high_prediction, dict)
+                and high_prediction.get("predicted", False))
+            or (isinstance(estimator, dict)
+                and estimator.get("predicted", False)))
     if not np.any(np.isfinite(states)):
         return []
 
@@ -1972,7 +2232,18 @@ def _plot_ball_state_curves(
         if not np.any(np.isfinite(values)):
             continue
         fig, ax = plt.subplots(1, 1, figsize=(14, 5))
-        ax.plot(t, values, linewidth=1.0, label=label)
+        # Keep both sources on the same axes.  NaN-masking preserves the
+        # original samples and makes every predicted interval immediately
+        # visible without inventing interpolation across a state transition.
+        measured_values = np.where(~predicted, values, np.nan)
+        predicted_values = np.where(predicted, values, np.nan)
+        ax.plot(
+            t, measured_values, color="#1f77b4", linewidth=1.0,
+            label=f"measured {label}")
+        if np.any(np.isfinite(predicted_values)):
+            ax.plot(
+                t, predicted_values, color="#d62728", linewidth=1.25,
+                label=f"predicted {label}")
         ax.set_title(title)
         ax.set_xlabel("time (s)")
         ax.set_ylabel(ylabel)
@@ -2321,7 +2592,11 @@ def _analyze_sim_real_gap(
                 "tick-start state used by both policies; q/dq are obs[0:14] "
                 "and racket xyz is obs[26:29]"
             ),
-            "policyAction": "same-tick policy output",
+            "policyAction": "same-tick raw clipped actor output",
+            "policyExecutedAction": (
+                "same-tick normalized action after checkpoint LPF/slew; "
+                "this is obs[35:42] on the next tick"
+            ),
             "commandPosition": "same-tick nominal policy command",
             "simSnapshotState": (
                 "jointPosition/jointVelocity/jointAcceleration/racket are "
@@ -2374,6 +2649,12 @@ def _analyze_sim_real_gap(
         ("joint_velocity", _matrix_slice(sim_rows, "policyObs", 7, 14),
          _matrix_slice(sim_rows, "sim.policyObs", 7, 14),
          list(RIGHT_ARM_JOINTS), "rad/s"),
+        ("base_pose", _matrix_slice(sim_rows, "policyObs", 14, 17),
+         _matrix_slice(sim_rows, "sim.policyObs", 14, 17),
+         ["base_x", "base_y", "base_yaw"], "m,m,rad"),
+        ("base_velocity", _matrix_slice(sim_rows, "policyObs", 17, 20),
+         _matrix_slice(sim_rows, "sim.policyObs", 17, 20),
+         ["base_vx", "base_vy", "base_yaw_rate"], "m/s,m/s,rad/s"),
         ("joint_acceleration", real_ddq, sim_ddq,
          list(RIGHT_ARM_JOINTS), "rad/s^2"),
         ("ball_observation", _matrix_slice(sim_rows, "policyObs", 20, 26),
@@ -2389,9 +2670,21 @@ def _analyze_sim_real_gap(
         ("relative_ball_racket", _matrix_slice(sim_rows, "policyObs", 32, 35),
          _matrix_slice(sim_rows, "sim.policyObs", 32, 35),
          ["rel_x", "rel_y", "rel_z"], "m"),
+        ("previous_executed_action", _matrix_slice(
+            sim_rows, "policyObs", 35, 42),
+         _matrix_slice(sim_rows, "sim.policyObs", 35, 42),
+         [f"prev_action[{i}]" for i in range(7)], "normalized"),
         ("tracking_error", _matrix_slice(sim_rows, "policyObs", 42, 49),
          _matrix_slice(sim_rows, "sim.policyObs", 42, 49),
          list(RIGHT_ARM_JOINTS), "rad"),
+        ("ball_age_normalized", _matrix_slice(
+            sim_rows, "policyObs", 49, 50),
+         _matrix_slice(sim_rows, "sim.policyObs", 49, 50),
+         ["ball_age_norm"], "normalized"),
+        ("actuator_delay_normalized", _matrix_slice(
+            sim_rows, "policyObs", 50, 51),
+         _matrix_slice(sim_rows, "sim.policyObs", 50, 51),
+         ["tau_act_norm"], "normalized"),
         ("nominal_command_velocity", _matrix_slice(
             sim_rows, "policyObs", 51, 58),
          _matrix_slice(sim_rows, "sim.policyObs", 51, 58),
@@ -2406,6 +2699,10 @@ def _analyze_sim_real_gap(
         ("policy_action", _numeric_array(sim_rows, "policyAction"),
          _numeric_array(sim_rows, "sim.policyAction"),
          [f"action[{i}]" for i in range(7)], "normalized"),
+        ("executed_action", _numeric_array(
+            sim_rows, "policyExecutedAction"),
+         _numeric_array(sim_rows, "sim.policyExecutedAction"),
+         [f"executed_action[{i}]" for i in range(7)], "normalized"),
         ("command_position", _numeric_array(
             sim_rows, "policyCommand.position"),
          _numeric_array(sim_rows, "sim.policyCommand"),
@@ -3269,6 +3566,21 @@ def _policy_observation_scales(value: object, width: int) -> tuple[float, ...]:
     return tuple(float(item) for item in scales)
 
 
+def _default_policy_observation_scales(
+    width: int,
+    dq_scale: float,
+) -> tuple[float, ...]:
+    """Build launch defaults, with arm dq occupying obs indices 7..13."""
+    scales = np.ones(max(0, int(width)), dtype=np.float32)
+    scale = float(dq_scale)
+    if not math.isfinite(scale):
+        scale = 1.0
+    if scales.size > 7:
+        scales[7:min(14, scales.size)] = np.float32(
+            np.clip(scale, -100.0, 100.0))
+    return tuple(float(item) for item in scales)
+
+
 def _decimate_rows(rows: list[dict[str, Any]], max_rows: int) -> list[dict[str, Any]]:
     if len(rows) <= max_rows:
         return rows
@@ -3392,6 +3704,9 @@ def _make_analysis_data(
             "estimatorOutputMode": estimator.get("outputMode"),
             "policyObs": policy_obs,
             "policyAction": row.get("policyAction", []) if isinstance(row.get("policyAction"), list) else [],
+            "policyExecutedAction": row.get(
+                "policyExecutedAction", []) if isinstance(
+                    row.get("policyExecutedAction"), list) else [],
             "rosJointPosition": ros.get("jointPosition", []) if isinstance(ros.get("jointPosition"), list) else [],
             "rosJointVelocity": ros.get("jointVelocity", []) if isinstance(ros.get("jointVelocity"), list) else [],
             "rosJointAcceleration": ros.get("jointAcceleration", []) if isinstance(ros.get("jointAcceleration"), list) else [],
@@ -3410,6 +3725,9 @@ def _make_analysis_data(
             "commandRacket": _point_or_none(row.get("commandRacket")),
             "simPolicyObs": sim_policy_obs,
             "simPolicyAction": sim.get("policyAction", []) if isinstance(sim.get("policyAction"), list) else [],
+            "simPolicyExecutedAction": sim.get(
+                "policyExecutedAction", []) if isinstance(
+                    sim.get("policyExecutedAction"), list) else [],
             "simPolicyCommand": sim.get("policyCommand", []) if isinstance(sim.get("policyCommand"), list) else [],
             "simJointPosition": sim.get("jointPosition", []) if isinstance(sim.get("jointPosition"), list) else [],
             "simJointVelocity": sim.get("jointVelocity", []) if isinstance(sim.get("jointVelocity"), list) else [],
@@ -4147,11 +4465,23 @@ class CameraRuntimeOptions:
     yolo_enabled: bool
     use_depth_sensor: bool
     depth_mode: str
+    sensor_surface_to_center_depth_enabled: bool
     use_undistort: bool
     use_kalman: bool
     ir_depth_kalman_enabled: bool
     synchronized_depth_enabled: bool
     depth_temporal_window_frames: int
+    velocity_least_squares_enabled: bool
+    velocity_window_frames: int
+    clear_buffers_on_detection_loss_enabled: bool
+    motion_consistency_gate_enabled: bool
+    physics_constrained_velocity_enabled: bool
+    trajectory_position_smoothing_enabled: bool
+    impact_velocity_reset_enabled: bool
+    impact_min_downward_velocity_m_s: float
+    impact_min_upward_velocity_m_s: float
+    impact_min_velocity_jump_m_s: float
+    impact_refractory_s: float
     pixel_kalman_enabled: bool
     pixel_kalman_process_noise_pos: float
     pixel_kalman_process_noise_vel: float
@@ -4194,6 +4524,28 @@ class CameraRuntimeOptions:
             int(self.depth_temporal_window_frames),
         )
 
+    def sensor_depth_correction_key(self) -> tuple[bool]:
+        return (bool(self.sensor_surface_to_center_depth_enabled),)
+
+    def velocity_estimation_key(self) -> tuple[Any, ...]:
+        return (
+            bool(self.velocity_least_squares_enabled),
+            int(self.velocity_window_frames),
+            bool(self.impact_velocity_reset_enabled),
+            round(float(self.impact_min_downward_velocity_m_s), 6),
+            round(float(self.impact_min_upward_velocity_m_s), 6),
+            round(float(self.impact_min_velocity_jump_m_s), 6),
+            round(float(self.impact_refractory_s), 6),
+        )
+
+    def observation_quality_key(self) -> tuple[bool, bool, bool, bool]:
+        return (
+            bool(self.clear_buffers_on_detection_loss_enabled),
+            bool(self.motion_consistency_gate_enabled),
+            bool(self.physics_constrained_velocity_enabled),
+            bool(self.trajectory_position_smoothing_enabled),
+        )
+
     def candidate_filter_key(self) -> tuple[Any, ...]:
         return (
             bool(self.candidate_filter_enabled),
@@ -4213,12 +4565,35 @@ class CameraRuntimeOptions:
             "yolo": bool(self.yolo_enabled),
             "sensorDepth": bool(self.use_depth_sensor),
             "depthMode": str(self.depth_mode),
+            "sensorSurfaceToCenterDepth": bool(
+                self.sensor_surface_to_center_depth_enabled),
             "undistort": bool(self.use_undistort),
             "kalman": bool(self.use_kalman),
             "irDepthKalman": bool(self.ir_depth_kalman_enabled),
             "synchronizedDepth": bool(self.synchronized_depth_enabled),
             "depthTemporalWindowFrames": int(
                 self.depth_temporal_window_frames),
+            "velocityLeastSquares": bool(
+                self.velocity_least_squares_enabled),
+            "velocityWindowFrames": int(self.velocity_window_frames),
+            "clearBuffersOnDetectionLoss": bool(
+                self.clear_buffers_on_detection_loss_enabled),
+            "motionConsistencyGate": bool(
+                self.motion_consistency_gate_enabled),
+            "physicsConstrainedVelocity": bool(
+                self.physics_constrained_velocity_enabled),
+            "trajectoryPositionSmoothing": bool(
+                self.trajectory_position_smoothing_enabled),
+            "impactVelocityReset": bool(
+                self.impact_velocity_reset_enabled),
+            "impactMinDownwardVelocityMps": round(
+                float(self.impact_min_downward_velocity_m_s), 6),
+            "impactMinUpwardVelocityMps": round(
+                float(self.impact_min_upward_velocity_m_s), 6),
+            "impactMinVelocityJumpMps": round(
+                float(self.impact_min_velocity_jump_m_s), 6),
+            "impactRefractoryS": round(
+                float(self.impact_refractory_s), 6),
             "pixelKalman": bool(self.pixel_kalman_enabled),
             "pixelKalmanProcessNoisePos": round(
                 float(self.pixel_kalman_process_noise_pos), 6),
@@ -4244,9 +4619,60 @@ class CameraRuntimeOptions:
 
 
 @dataclass(frozen=True)
+class ContactActionShieldOptions:
+    enabled: bool
+    pre_contact_window_s: float
+    post_contact_window_s: float
+    contact_tolerance_m: float
+    max_lateral_distance_m: float
+    min_downward_velocity_m_s: float
+    max_normal_lateral: float
+    max_lateral_speed_m_s: float
+    workspace_margin_m: float
+    dls_damping: float
+    vertical_energy_enabled: bool = False
+    vertical_pre_contact_window_s: float = 0.12
+    vertical_target_apex_height_m: float = 0.30
+    vertical_restitution: float = 0.66
+    vertical_max_racket_upward_speed_m_s: float = 0.90
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.enabled),
+            "preContactWindowS": round(
+                float(self.pre_contact_window_s), 6),
+            "postContactWindowS": round(
+                float(self.post_contact_window_s), 6),
+            "contactToleranceM": round(
+                float(self.contact_tolerance_m), 6),
+            "maxLateralDistanceM": round(
+                float(self.max_lateral_distance_m), 6),
+            "minDownwardVelocityMps": round(
+                float(self.min_downward_velocity_m_s), 6),
+            "maxNormalLateral": round(
+                float(self.max_normal_lateral), 6),
+            "maxLateralSpeedMps": round(
+                float(self.max_lateral_speed_m_s), 6),
+            "workspaceMarginM": round(
+                float(self.workspace_margin_m), 6),
+            "dlsDamping": round(float(self.dls_damping), 6),
+            "verticalEnergyEnabled": bool(self.vertical_energy_enabled),
+            "verticalPreContactWindowS": round(
+                float(self.vertical_pre_contact_window_s), 6),
+            "verticalTargetApexHeightM": round(
+                float(self.vertical_target_apex_height_m), 6),
+            "verticalRestitution": round(
+                float(self.vertical_restitution), 6),
+            "verticalMaxRacketUpwardSpeedMps": round(
+                float(self.vertical_max_racket_upward_speed_m_s), 6),
+        }
+
+
+@dataclass(frozen=True)
 class RuntimeOptions:
     control_mode: str
     policy_profile: str
+    enable_policy_dq_adapter: bool
     policy_observation_scales: tuple[float, ...]
     racket_tracking_height_offset_m: float
     racket_tracking_use_mpc: bool
@@ -4275,6 +4701,7 @@ class RuntimeOptions:
     enable_ball_release_gate: bool
     enable_ball_lost_failsafe: bool
     enable_done_monitoring: bool
+    contact_action_shield: ContactActionShieldOptions
     workspace_safety_mode: str
     done_prediction_horizon_s: float
     done_prediction_dt_s: float
@@ -4306,6 +4733,22 @@ class RuntimeOptions:
     estimator_q_depth_vel_mult: float
     estimator_r_lateral_mm: float
     estimator_r_depth_mm: float
+    high_ball_occlusion_prediction: bool
+    sensor_depth_anomaly_prediction: bool
+    high_ball_prediction_history_frames: int
+    high_ball_prediction_activation_z_m: float
+    high_ball_prediction_min_upward_velocity_m_s: float
+    high_ball_prediction_max_prediction_s: float
+    high_ball_prediction_stop_z_m: float
+    high_ball_prediction_drag_coefficient_per_m: float
+    high_ball_prediction_integration_step_s: float
+    high_ball_prediction_reacquisition_gate_m: float
+    high_ball_reacquisition_velocity_handover: bool
+    high_ball_reacquisition_velocity_frames: int
+    high_ball_reacquisition_velocity_blend_s: float
+    camera_control_time_compensation: bool
+    camera_reacquisition_smoothing: bool
+    optimized_ball_prediction_initial_state: bool
     ball_observation_rate_hz: float
     ball_source: str
     camera: CameraRuntimeOptions
@@ -5451,11 +5894,92 @@ def _policy_uses_valid_ball_obs_age(
     profile = normalize_observation_profile(policy_profile)
     if profile in {
             OBSERVATION_PROFILE_SIMCODE4_SERVO67,
-            OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67}:
+            OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+            OBSERVATION_PROFILE_SIMCODE6_QVEL67}:
         return False
     if uses_corrected_67d_observation(profile):
         return True
     return bool(requested)
+
+
+def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
+    """Expose the actor I/O and command semantics validated at load time."""
+    expected_obs_dim = int(getattr(controller, "_expected_obs_dim", 0))
+    action_dim = int(getattr(controller, "n_arm", 0))
+    model = getattr(controller, "model", None)
+    model_obs_shape = tuple(getattr(
+        getattr(model, "observation_space", None), "shape", ()) or ())
+    model_action_shape = tuple(getattr(
+        getattr(model, "action_space", None), "shape", ()) or ())
+    action_mode = str(getattr(
+        controller, "action_command_mode", "acceleration"))
+    observation_segments = [
+        {"name": "joint_position", "start": 0, "stop": 7, "unit": "rad"},
+        {"name": "joint_velocity", "start": 7, "stop": 14, "unit": "rad/s"},
+        {"name": "base_pose", "start": 14, "stop": 17, "unit": "m,m,rad"},
+        {"name": "base_velocity", "start": 17, "stop": 20,
+         "unit": "m/s,m/s,rad/s"},
+        {"name": "ball_position_base", "start": 20, "stop": 23,
+         "unit": "m"},
+        {"name": "ball_velocity_base", "start": 23, "stop": 26,
+         "unit": "m/s"},
+        {"name": "racket_position_base", "start": 26, "stop": 29,
+         "unit": "m"},
+        {"name": "racket_velocity_base", "start": 29, "stop": 32,
+         "unit": "m/s"},
+        {"name": "ball_minus_racket", "start": 32, "stop": 35,
+         "unit": "m"},
+        {"name": "previous_executed_action", "start": 35, "stop": 42,
+         "unit": "normalized"},
+        {"name": "command_tracking_error", "start": 42, "stop": 49,
+         "unit": "rad"},
+        {"name": "ball_observation_age", "start": 49, "stop": 50,
+         "unit": "normalized"},
+    ]
+    if expected_obs_dim == 67:
+        observation_segments.extend([
+            {"name": "actuator_delay", "start": 50, "stop": 51,
+             "unit": "normalized"},
+            {"name": "command_velocity", "start": 51, "stop": 58,
+             "unit": "rad/s"},
+            {"name": "active_delayed_command_error", "start": 58,
+             "stop": 65, "unit": "rad"},
+            {"name": "estimated_contact_time", "start": 65, "stop": 66,
+             "unit": "s"},
+            {"name": "contact_time_margin", "start": 66, "stop": 67,
+             "unit": "s"},
+        ])
+    return {
+        "observationDim": expected_obs_dim,
+        "actionDim": action_dim,
+        "modelObservationShape": list(model_obs_shape),
+        "modelActionShape": list(model_action_shape),
+        "ioShapeValid": bool(
+            model_obs_shape == (expected_obs_dim,)
+            and model_action_shape == (action_dim,)),
+        "observationProfile": str(getattr(
+            controller, "observation_profile", "")),
+        "actionCommandMode": action_mode,
+        "actionVelocityScale": float(getattr(
+            controller, "action_velocity_scale", 1.0)),
+        "actionFilterTauMs": float(getattr(
+            controller, "action_filter_tau_ms", 0.0)),
+        "actionSlewLimitPerS": float(getattr(
+            controller, "action_jerk_limit", 0.0)),
+        "actionClipAbs": float(getattr(
+            controller, "action_acc_limit", 1.0)),
+        "armActionLimiter": bool(getattr(
+            controller, "arm_action_limiter", False)),
+        "controlDtS": float(getattr(controller, "dt", 0.0)),
+        "delayConditioning": bool(getattr(
+            controller, "enable_delay_conditioning", False)),
+        "delayFeatureS": float(getattr(
+            controller, "delay_conditioning_tau_s", 0.0)),
+        "heldValidBallAgeEnabled": bool(getattr(
+            controller, "use_valid_ball_obs_age", True)),
+        "positionIntegrationCount": 1 if action_mode == "velocity" else 2,
+        "observationSegments": observation_segments,
+    }
 
 
 def _workspace_safety_mode(value: Any, default: str = "position_soft") -> str:
@@ -5869,7 +6393,9 @@ class RosBridgeNode(Node):
             visualize=bool(cfg.enable_camera_visualization),
             yolo_enabled=bool(cfg.enable_yolo),
             use_depth_sensor=bool(cfg.use_depth_sensor),
-            depth_mode="sensor",
+            depth_mode=str(cfg.camera_depth_mode),
+            sensor_surface_to_center_depth_enabled=bool(
+                cfg.enable_sensor_surface_to_center_depth),
             use_undistort=bool(cfg.use_undistort),
             use_kalman=bool(cfg.use_kalman),
             ir_depth_kalman_enabled=bool(cfg.use_ir_depth_kalman),
@@ -5877,6 +6403,28 @@ class RosBridgeNode(Node):
                 cfg.use_synchronized_ir_depth),
             depth_temporal_window_frames=int(
                 cfg.depth_temporal_window_frames),
+            velocity_least_squares_enabled=bool(
+                cfg.camera_velocity_least_squares),
+            velocity_window_frames=int(
+                cfg.camera_velocity_window_frames),
+            clear_buffers_on_detection_loss_enabled=bool(
+                cfg.enable_camera_clear_buffers_on_loss),
+            motion_consistency_gate_enabled=bool(
+                cfg.enable_camera_motion_consistency_gate),
+            physics_constrained_velocity_enabled=bool(
+                cfg.enable_camera_physics_constrained_velocity),
+            trajectory_position_smoothing_enabled=bool(
+                cfg.enable_camera_trajectory_position_smoothing),
+            impact_velocity_reset_enabled=bool(
+                cfg.camera_impact_velocity_reset),
+            impact_min_downward_velocity_m_s=float(
+                cfg.camera_impact_min_downward_velocity_m_s),
+            impact_min_upward_velocity_m_s=float(
+                cfg.camera_impact_min_upward_velocity_m_s),
+            impact_min_velocity_jump_m_s=float(
+                cfg.camera_impact_min_velocity_jump_m_s),
+            impact_refractory_s=float(
+                cfg.camera_impact_refractory_s),
             pixel_kalman_enabled=bool(cfg.use_pixel_kalman),
             pixel_kalman_process_noise_pos=float(
                 cfg.pixel_kalman_process_noise_pos),
@@ -5984,6 +6532,9 @@ class RosBridgeNode(Node):
             timestamp_unit=str(self.cfg.mocap_timestamp_unit),
             velocity_alpha=float(self.cfg.mocap_velocity_alpha),
             max_velocity_m_s=float(self.cfg.mocap_max_velocity_m_s),
+            velocity_window_frames=int(self.cfg.mocap_velocity_window_frames),
+            velocity_window_max_span_s=float(
+                self.cfg.mocap_velocity_window_max_span_s),
             timeout_s=float(self.cfg.mocap_timeout_s),
             sim_cartesian_x_offset_m=float(self.cfg.sim_cartesian_x_offset_m),
             sim_cartesian_y_offset_m=float(self.cfg.sim_cartesian_y_offset_m),
@@ -6311,6 +6862,8 @@ class RosBridgeNode(Node):
             color_circularity_min=0.0,
             use_depth_sensor=bool(self.cfg.use_depth_sensor),
             depth_mode=self.camera_options.depth_mode,
+            sensor_surface_to_center_depth_enabled=bool(
+                self.camera_options.sensor_surface_to_center_depth_enabled),
             use_kalman=bool(self.camera_options.pixel_kalman_enabled),
             use_ir_depth_kalman=bool(
                 self.camera_options.ir_depth_kalman_enabled),
@@ -6318,6 +6871,28 @@ class RosBridgeNode(Node):
                 self.camera_options.synchronized_depth_enabled),
             depth_temporal_window_frames=int(
                 self.camera_options.depth_temporal_window_frames),
+            velocity_least_squares_enabled=bool(
+                self.camera_options.velocity_least_squares_enabled),
+            velocity_window_frames=int(
+                self.camera_options.velocity_window_frames),
+            clear_buffers_on_detection_loss_enabled=bool(
+                self.camera_options.clear_buffers_on_detection_loss_enabled),
+            motion_consistency_gate_enabled=bool(
+                self.camera_options.motion_consistency_gate_enabled),
+            physics_constrained_velocity_enabled=bool(
+                self.camera_options.physics_constrained_velocity_enabled),
+            trajectory_position_smoothing_enabled=bool(
+                self.camera_options.trajectory_position_smoothing_enabled),
+            impact_velocity_reset_enabled=bool(
+                self.camera_options.impact_velocity_reset_enabled),
+            impact_min_downward_velocity_m_s=float(
+                self.camera_options.impact_min_downward_velocity_m_s),
+            impact_min_upward_velocity_m_s=float(
+                self.camera_options.impact_min_upward_velocity_m_s),
+            impact_min_velocity_jump_m_s=float(
+                self.camera_options.impact_min_velocity_jump_m_s),
+            impact_refractory_s=float(
+                self.camera_options.impact_refractory_s),
             pixel_kalman_process_noise_pos=float(
                 self.camera_options.pixel_kalman_process_noise_pos),
             pixel_kalman_process_noise_vel=float(
@@ -6338,6 +6913,12 @@ class RosBridgeNode(Node):
                 self.camera_options.candidate_motion_scale_px),
         )
         detector.detector.configure_yolo(self.camera_options.yolo_enabled)
+        # A physical base-frame reset must be corroborated by fresh robot FK.
+        # If FK is unavailable, failing closed is safer than interpreting a
+        # depth/pixel reversal as a racket collision.  Camera-frame offline
+        # tools retain trajectory-only confirmation because FK is incomparable.
+        detector.detector.impact_racket_gate_required = bool(
+            output_frame == "base_link")
         with self.camera_lock:
             self.camera_detector = detector
             self.camera_detector_key = (
@@ -6477,12 +7058,22 @@ class RosBridgeNode(Node):
             old_yolo_enabled = self.camera_options.yolo_enabled
             old_ir_depth_processing_key = (
                 self.camera_options.ir_depth_processing_key())
+            old_sensor_depth_correction_key = (
+                self.camera_options.sensor_depth_correction_key())
+            old_velocity_estimation_key = (
+                self.camera_options.velocity_estimation_key())
+            old_observation_quality_key = (
+                self.camera_options.observation_quality_key())
             old_pixel_kalman_key = self.camera_options.pixel_kalman_key()
             old_candidate_filter_key = (
                 self.camera_options.candidate_filter_key())
             self.camera_options = options
             new_detector_key = options.detector_key()
             new_ir_depth_processing_key = options.ir_depth_processing_key()
+            new_sensor_depth_correction_key = (
+                options.sensor_depth_correction_key())
+            new_velocity_estimation_key = options.velocity_estimation_key()
+            new_observation_quality_key = options.observation_quality_key()
             new_pixel_kalman_key = options.pixel_kalman_key()
             new_candidate_filter_key = options.candidate_filter_key()
         if str(self.cfg.camera_source_mode).strip().lower() == "direct_realsense":
@@ -6491,6 +7082,15 @@ class RosBridgeNode(Node):
             core = getattr(detector, "detector", None)
             if core is not None and hasattr(core, "set_depth_mode"):
                 core.set_depth_mode(options.depth_mode)
+            if (old_sensor_depth_correction_key
+                    != new_sensor_depth_correction_key
+                    and core is not None
+                    and hasattr(
+                        core,
+                        "configure_sensor_surface_to_center_depth")):
+                core.configure_sensor_surface_to_center_depth(
+                    enabled=(
+                        options.sensor_surface_to_center_depth_enabled))
             if (old_yolo_enabled != options.yolo_enabled
                     and core is not None
                     and hasattr(core, "configure_yolo")):
@@ -6504,6 +7104,36 @@ class RosBridgeNode(Node):
                         options.synchronized_depth_enabled),
                     depth_temporal_window_frames=(
                         options.depth_temporal_window_frames),
+                )
+            if (old_velocity_estimation_key != new_velocity_estimation_key
+                    and core is not None
+                    and hasattr(core, "configure_velocity_estimation")):
+                core.configure_velocity_estimation(
+                    least_squares_enabled=(
+                        options.velocity_least_squares_enabled),
+                    window_frames=options.velocity_window_frames,
+                    impact_reset_enabled=(
+                        options.impact_velocity_reset_enabled),
+                    impact_min_downward_velocity_m_s=(
+                        options.impact_min_downward_velocity_m_s),
+                    impact_min_upward_velocity_m_s=(
+                        options.impact_min_upward_velocity_m_s),
+                    impact_min_velocity_jump_m_s=(
+                        options.impact_min_velocity_jump_m_s),
+                    impact_refractory_s=options.impact_refractory_s,
+                )
+            if (old_observation_quality_key != new_observation_quality_key
+                    and core is not None
+                    and hasattr(core, "configure_observation_quality")):
+                core.configure_observation_quality(
+                    clear_buffers_on_detection_loss_enabled=(
+                        options.clear_buffers_on_detection_loss_enabled),
+                    motion_consistency_gate_enabled=(
+                        options.motion_consistency_gate_enabled),
+                    physics_constrained_velocity_enabled=(
+                        options.physics_constrained_velocity_enabled),
+                    trajectory_position_smoothing_enabled=(
+                        options.trajectory_position_smoothing_enabled),
                 )
             if (old_pixel_kalman_key != new_pixel_kalman_key
                     and core is not None
@@ -6542,16 +7172,62 @@ class RosBridgeNode(Node):
         valid: bool,
         racket_anchor_m: np.ndarray,
         racket_pos_m: np.ndarray,
+        racket_state_valid: bool = True,
     ) -> None:
+        stamp_wall = time.time()
+        racket_position = np.asarray(
+            racket_pos_m, dtype=np.float32).reshape(3).copy()
         with self.camera_lock:
             self.latest_policy_viz_state = {
                 "ball_pos_m": np.asarray(ball_pos_m, dtype=np.float32).reshape(3).copy(),
                 "ball_vel_m_s": np.asarray(ball_vel_m_s, dtype=np.float32).reshape(3).copy(),
                 "valid": bool(valid),
                 "racket_anchor_m": np.asarray(racket_anchor_m, dtype=np.float32).reshape(3).copy(),
-                "racket_pos_m": np.asarray(racket_pos_m, dtype=np.float32).reshape(3).copy(),
-                "stamp_wall": time.time(),
+                "racket_pos_m": racket_position,
+                "stamp_wall": stamp_wall,
             }
+            detector = self.camera_detector
+            core = getattr(detector, "detector", detector)
+            if core is not None:
+                detector_racket_position = (
+                    self._sim_position_to_camera_detector_frame(
+                        racket_position))
+                if (racket_state_valid
+                        and detector_racket_position is not None
+                        and hasattr(core, "set_racket_state")):
+                    core.set_racket_state(
+                        detector_racket_position, stamp_wall)
+                elif hasattr(core, "clear_racket_state"):
+                    core.clear_racket_state()
+
+    def _sim_position_to_camera_detector_frame(
+        self,
+        position_m: np.ndarray,
+    ) -> np.ndarray | None:
+        """Convert one policy/sim-frame point to the detector output frame.
+
+        Camera ball positions are translated into the policy frame by
+        :meth:`_transform_ball_pos_to_sim_frame`.  Impact validation runs
+        inside the detector, before that translation, so its racket context
+        must receive the inverse transform.  Passing the policy-frame racket
+        position directly made a real 32 mm ball/racket separation appear as
+        roughly 1.27 m and caused every impact candidate to fail closed.
+
+        A camera-frame detector has no comparable robot FK without applying
+        the camera extrinsic, so return ``None`` and let the caller clear the
+        racket context instead of silently mixing coordinate systems.
+        """
+        transformed = np.asarray(
+            position_m, dtype=np.float32).reshape(3).copy()
+        output_frame = str(self.camera_output_frame or "camera")
+        if output_frame == "sim_frame":
+            return transformed
+        if output_frame != "base_link":
+            return None
+        transformed[0] -= float(self.cfg.sim_cartesian_x_offset_m)
+        transformed[1] -= float(self.cfg.sim_cartesian_y_offset_m)
+        transformed[2] -= float(self.cfg.sim_base_height_m)
+        return transformed
 
     def _camera_info_callback(self, msg) -> None:
         if PingPongBallDetector is None:
@@ -7352,7 +8028,11 @@ class RosBridgeNode(Node):
                 "detected": bool(self.latest_camera_valid),
                 "stampS": (
                     None if self.latest_camera_stamp_sec is None
-                    else round(float(self.latest_camera_stamp_sec), 6)
+                    # Preserve the source timestamp exactly.  Rounding here
+                    # made the same camera frame look a few tenths of a
+                    # microsecond newer than the raw measurement path, so the
+                    # trajectory predictor counted it twice.
+                    else float(self.latest_camera_stamp_sec)
                 ),
                 "ageS": None if age is None else round(float(age), 6),
                 "frame": self.camera_output_frame,
@@ -7953,9 +8633,11 @@ class RosBridge:
         valid: bool,
         racket_anchor_m: np.ndarray,
         racket_pos_m: np.ndarray,
+        racket_state_valid: bool = True,
     ) -> None:
         self.node.set_policy_viz_state(
-            ball_pos_m, ball_vel_m_s, valid, racket_anchor_m, racket_pos_m)
+            ball_pos_m, ball_vel_m_s, valid, racket_anchor_m, racket_pos_m,
+            racket_state_valid)
 
     def latest_camera_visualization(self) -> tuple[bytes | None, dict[str, Any]]:
         return self.node.latest_camera_visualization()
@@ -7990,6 +8672,20 @@ class PolicySafetyProbe:
         self.ros_bridge: RosBridge | None = None
         self.ball_estimator: Any | None = None
         self.ball_estimator_key: tuple[Any, ...] | None = None
+        self.high_ball_occlusion_predictor: HighBallOcclusionPredictor | None = None
+        self.high_ball_occlusion_predictor_key: tuple[Any, ...] | None = None
+        self.camera_ir_top_history: deque[tuple[float, float, float]] = deque(
+            maxlen=5)
+        self.camera_high_fov_exit_latch_until_s: float | None = None
+        self.last_predictor_impact_reset_stamp_s: float | None = None
+        self.last_high_ball_occlusion_info: dict[str, Any] = {
+            "enabled": False,
+            "active": False,
+            "predicted": False,
+            "valid": False,
+            "state": "off",
+            "reason": "disabled",
+        }
         self.last_ball_observation_stamp_s: float | None = None
         self.ball_observation_clock_domain: str | None = None
         self.policy_ball_sample_step = 0
@@ -7999,6 +8695,7 @@ class PolicySafetyProbe:
         self.policy_ball_sample_vel = np.zeros(3, dtype=np.float32)
         self.policy_ball_sample_age_s = 0.0
         self.policy_ball_sample_has_valid = False
+        self.policy_ball_sample_source_stamp_s: float | None = None
         self.compensator = None
         self.compensation_error: str | None = None
         self.compensation_was_enabled = False
@@ -8017,6 +8714,19 @@ class PolicySafetyProbe:
         self.policy_needs_reentry_reset = True
         self.policy_reentry_reset_q: np.ndarray | None = None
         self.last_policy_execution_trace: dict[str, Any] | None = None
+        self.policy_dq_adapter = PolicyDqObservationAdapter(
+            PolicyDqAdapterConfig(
+                enabled=bool(cfg.enable_policy_dq_adapter),
+                gain=tuple(cfg.policy_dq_adapter_gain),
+                tau_s=tuple(cfg.policy_dq_adapter_tau_s),
+                delay_steps=tuple(cfg.policy_dq_adapter_delay_steps),
+                dt_s=float(cfg.control_dt),
+            )
+        )
+        self.policy_dq_adapter_runtime_enabled = bool(
+            cfg.enable_policy_dq_adapter)
+        self.last_policy_dq_adapter_info = (
+            self.policy_dq_adapter.status())
         self.safe_q = target_right_arm_q_rad().astype(np.float32)
         reset_pose_id, reset_pose_q = _reset_initial_pose_q_rad(
             cfg.reset_initial_pose_id)
@@ -8103,6 +8813,11 @@ class PolicySafetyProbe:
             dt=cfg.control_dt,
             robot_xml_path=str(cfg.simcode5_policy_xml_path),
         )
+        qvel67_controller = Simcode6Qvel67PolicyController(
+            str(cfg.simcode6_model_path),
+            dt=cfg.control_dt,
+            robot_xml_path=str(cfg.simcode6_policy_xml_path),
+        )
         self.policy_controllers = {
             OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: legacy_controller,
             OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: idealpd67_controller,
@@ -8110,6 +8825,7 @@ class PolicySafetyProbe:
             OBSERVATION_PROFILE_SIMCODE4_SERVO67: servo67_controller,
             OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: (
                 pure_actuator67_controller),
+            OBSERVATION_PROFILE_SIMCODE6_QVEL67: qvel67_controller,
         }
         self.active_policy_profile = normalize_observation_profile(
             cfg.policy_profile)
@@ -8173,6 +8889,16 @@ class PolicySafetyProbe:
         self.last_tracking_info = dict(self.racket_tracker.last_diagnostics)
         self.last_juggle_info = dict(
             self.juggle_controller.last_diagnostics)
+        self.contact_shield_post_until_s = -float("inf")
+        self.contact_shield_last_descending_s = -float("inf")
+        self.last_contact_action_shield_info: dict[str, Any] = {
+            "enabled": bool(cfg.enable_contact_action_shield),
+            "verticalEnergyEnabled": bool(
+                cfg.enable_vertical_contact_energy_shield),
+            "active": False,
+            "intervened": False,
+            "reason": "not_evaluated",
+        }
         self._init_compensator()
         self._init_sim_mirror()
         self.done_monitor = DoneConditionMonitor(
@@ -8319,6 +9045,16 @@ class PolicySafetyProbe:
                 "predictive": False,
                 "alpha": 1.0,
             }
+            self.contact_shield_post_until_s = -float("inf")
+            self.contact_shield_last_descending_s = -float("inf")
+            self.last_contact_action_shield_info = {
+                "enabled": bool(self.cfg.enable_contact_action_shield),
+                "verticalEnergyEnabled": bool(
+                    self.cfg.enable_vertical_contact_energy_shield),
+                "active": False,
+                "intervened": False,
+                "reason": "reset",
+            }
             self.workspace_soft_entry_q: np.ndarray | None = None
             self.workspace_hold_active = False
             self.workspace_hold_q = np.asarray(
@@ -8347,6 +9083,8 @@ class PolicySafetyProbe:
             self.last_done_ball_valid = False
             self.ball_estimator = None
             self.ball_estimator_key = None
+            self.high_ball_occlusion_predictor = None
+            self.high_ball_occlusion_predictor_key = None
             self.last_ball_observation_stamp_s = None
             self.ball_observation_clock_domain = None
             self.next_ball_observation_s = 0.0
@@ -8357,7 +9095,10 @@ class PolicySafetyProbe:
             self.policy_ball_sample_vel = reset_ball_vel.astype(np.float32).copy()
             self.policy_ball_sample_age_s = 0.0
             self.policy_ball_sample_has_valid = False
+            self.policy_ball_sample_source_stamp_s = None
             self.last_estimator_info = self._estimator_off_payload()
+            self.last_high_ball_occlusion_info = (
+                self._high_ball_occlusion_off_payload())
             self.last_release_gate_info = self._release_gate_payload(
                 valid=False,
                 age_s=None,
@@ -8707,10 +9448,18 @@ class PolicySafetyProbe:
                 else _rounded_vector(self.reset_workspace_bypass_target_q)),
         }
 
+    def _reset_policy_dq_adapter(self, reason: str) -> None:
+        adapter = getattr(self, "policy_dq_adapter", None)
+        if adapter is None:
+            return
+        adapter.reset(reason)
+        self.last_policy_dq_adapter_info = adapter.status()
+
     def _mark_policy_paused(self) -> None:
         """Fence both policy histories at a non-policy control interval."""
         self.policy_needs_reentry_reset = True
         self.sim_needs_policy_reset = True
+        self._reset_policy_dq_adapter("policy_paused")
 
     def _select_policy_profile(self, requested_profile: object) -> bool:
         """Atomically select the real actor/observation contract pair.
@@ -8740,6 +9489,7 @@ class PolicySafetyProbe:
         self.policy_needs_reentry_reset = True
         self.sim_needs_policy_reset = True
         self.last_policy_execution_trace = None
+        self._reset_policy_dq_adapter("policy_profile_changed")
         self.last_control_mode = None
         return True
 
@@ -8763,6 +9513,7 @@ class PolicySafetyProbe:
         self.compensation_was_enabled = False
         self.policy_reentry_reset_q = reset_q.copy()
         self.policy_needs_reentry_reset = False
+        self._reset_policy_dq_adapter("policy_reentry")
         return reset_q
 
     def _right_arm_joint_vector_or_none(self, value: Any) -> np.ndarray | None:
@@ -8848,6 +9599,13 @@ class PolicySafetyProbe:
                 DEFAULT_SIMCODE5_POLICY_XML),
             simcode5_sim_xml_path=getattr(
                 self.cfg, "simcode5_sim_xml_path", DEFAULT_SIMCODE5_POLICY_XML),
+            simcode6_model_path=getattr(
+                self.cfg, "simcode6_model_path", DEFAULT_SIMCODE6_MODEL_PATH),
+            simcode6_policy_xml_path=getattr(
+                self.cfg, "simcode6_policy_xml_path",
+                DEFAULT_SIMCODE6_POLICY_XML),
+            simcode6_sim_xml_path=getattr(
+                self.cfg, "simcode6_sim_xml_path", DEFAULT_SIMCODE6_POLICY_XML),
             backend=backend,
             frame_rate_hz=self.cfg.sim_frame_rate_hz,
             render_width=self.cfg.sim_render_width,
@@ -12685,6 +13443,491 @@ class PolicySafetyProbe:
             "lastEvent": None,
         }
 
+    def _high_ball_occlusion_off_payload(
+        self,
+        *,
+        enabled: bool = False,
+        reason: str = "disabled",
+    ) -> dict[str, Any]:
+        return {
+            "enabled": bool(enabled),
+            "highFovEnabled": False,
+            "sensorDepthAnomalyPredictionEnabled": False,
+            "sensorDepthAnomalyDetected": False,
+            "model": "iros2249_ls_gravity_quadratic_drag",
+            "active": False,
+            "activeTrigger": None,
+            "predicted": False,
+            "valid": False,
+            "state": "suppressed" if enabled else "off",
+            "reason": str(reason),
+            "elapsedS": None,
+            "positionM": None,
+            "velocityMps": None,
+            "historySamples": 0,
+            "historySpanS": None,
+            "activationCount": 0,
+            "reacquisitionCount": 0,
+            "reacquisitionRejectedCount": 0,
+            "expirationCount": 0,
+            "lastReacquisitionErrorMm": None,
+            "lastReacquisitionErrorNormMm": None,
+            "reacquisitionVelocityHandoverEnabled": False,
+            "reacquisitionVelocityHandoverActive": False,
+            "reacquisitionVelocitySamples": 0,
+            "reacquisitionVelocityHandoverAlpha": 0.0,
+            "controlTimeCompensationEnabled": False,
+            "controlTimeCompensationAppliedS": 0.0,
+            "reacquisitionSmoothingEnabled": False,
+            "optimizedInitialStateEnabled": False,
+        }
+
+    @staticmethod
+    def _adaptive_sensor_depth_anomaly(
+        camera_measurement: dict[str, Any] | None,
+    ) -> bool:
+        """Return the adaptive guard verdict without reimplementing its gates."""
+        if not isinstance(camera_measurement, dict):
+            return False
+        return bool(
+            str(camera_measurement.get("depth_mode", "")).lower()
+            == "adaptive"
+            and camera_measurement.get("depth_sensor_rejected", False))
+
+    @staticmethod
+    def _camera_estimator_mode(
+        *,
+        measured_valid: bool,
+        depth_anomaly: bool,
+        camera_velocity_ready: bool,
+        camera_measurement: dict[str, Any] | None,
+        prediction_diagnostics: dict[str, Any] | None = None,
+    ) -> str:
+        """Normalize independent detector failures into one transition mode."""
+        raw_state = (
+            str(camera_measurement.get("observation_state", ""))
+            if isinstance(camera_measurement, dict) else "")
+        prediction = prediction_diagnostics or {}
+        predicted = bool(prediction.get("predicted", False))
+        active_trigger = str(prediction.get("activeTrigger") or "")
+        predictor_state = str(prediction.get("state") or "")
+        if depth_anomaly:
+            return (
+                "depth_fault_prediction" if predicted
+                else "depth_fault_invalid")
+        if predictor_state in {
+                "reacquisition_handover", "reacquisition_smoothing"}:
+            return "reacquiring"
+        # A motion-consistency rejection at the image top is the observation
+        # that explicitly activated high-FOV prediction.  Report the selected
+        # estimator state, rather than leaving the state machine labelled as a
+        # generic rejected measurement.
+        if predicted and active_trigger == "high_fov_edge_exit":
+            return "high_fov_prediction"
+        if raw_state == "motion_outlier":
+            return (
+                "motion_outlier_prediction" if predicted
+                else "motion_outlier_invalid")
+        if not measured_valid:
+            if predicted and active_trigger in {
+                    "high_fov_occlusion", "high_fov_edge_exit"}:
+                return "high_fov_prediction"
+            if predicted:
+                return "detection_loss_prediction"
+            return "detection_loss_invalid"
+        if not camera_velocity_ready or raw_state == "reacquiring":
+            return "velocity_warmup"
+        return "tracking"
+
+    def _camera_top_fov_exit_cue(
+        self,
+        *,
+        measured_valid: bool,
+        measurement_stamp_s: float | None,
+        query_time_s: float,
+        camera_measurement: dict[str, Any] | None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """Detect a rising 2D track leaving the IR top border.
+
+        A rejected 3D point may still have a trustworthy raw IR centre.  This
+        deliberately consumes only that 2D centre and prior trusted centres;
+        rejected depth/XYZ never enters the trajectory estimator.
+        """
+        history = getattr(self, "camera_ir_top_history", None)
+        if history is None:
+            history = deque(maxlen=5)
+            self.camera_ir_top_history = history
+        measurement = (
+            camera_measurement
+            if isinstance(camera_measurement, dict) else {})
+        raw_state = str(measurement.get("observation_state") or "")
+        trusted_3d = bool(
+            measurement.get("measurement_trusted_3d") is not False)
+        try:
+            cx = float(measurement.get("cx"))
+            cy = float(measurement.get("cy"))
+            centre_valid = bool(math.isfinite(cx) and math.isfinite(cy))
+        except (TypeError, ValueError):
+            cx = float("nan")
+            cy = float("nan")
+            centre_valid = False
+        image_height = max(1.0, float(getattr(self.cfg, "image_height", 480)))
+        edge_y_px = CAMERA_TOP_EXIT_EDGE_FRACTION * image_height
+        arm_y_px = CAMERA_TOP_EXIT_ARM_FRACTION * image_height
+        try:
+            finite_measurement_stamp = bool(
+                measurement_stamp_s is not None
+                and math.isfinite(float(measurement_stamp_s)))
+        except (TypeError, ValueError):
+            finite_measurement_stamp = False
+        stamp = (
+            float(measurement_stamp_s)
+            if finite_measurement_stamp else float(query_time_s))
+
+        trusted_visible = bool(measured_valid and trusted_3d and centre_valid)
+        if trusted_visible:
+            if (not history
+                    or stamp > float(history[-1][0]) + 1.0e-6):
+                if (history
+                        and stamp - float(history[-1][0])
+                        > CAMERA_TOP_EXIT_TRACK_MAX_GAP_S):
+                    history.clear()
+                history.append((stamp, cx, cy))
+            self.camera_high_fov_exit_latch_until_s = None
+            return False, {
+                "topFovExitReason": "trusted_measurement",
+                "topFovCurrentCyPx": round(cy, 3),
+                "topFovEdgeYPx": round(edge_y_px, 3),
+                "topFovArmYPx": round(arm_y_px, 3),
+                "topFovUpwardPixelVelocityPxS": None,
+            }
+
+        upward_px_s = None
+        last_cy = None
+        rising_to_top = False
+        if history:
+            last_cy = float(history[-1][2])
+        if len(history) >= 2:
+            previous_time, _previous_cx, previous_cy = history[-2]
+            last_time, _last_cx, last_history_cy = history[-1]
+            dt = float(last_time - previous_time)
+            if 1.0e-4 < dt <= CAMERA_TOP_EXIT_TRACK_MAX_GAP_S:
+                upward_px_s = float(
+                    (last_history_cy - previous_cy) / dt)
+                rising_to_top = bool(
+                    upward_px_s <= -CAMERA_TOP_EXIT_MIN_UPWARD_PX_S)
+
+        rejected_edge_centre = bool(
+            centre_valid
+            and cy <= edge_y_px
+            and raw_state in {
+                "motion_outlier", "depth_fault", "detection_loss"})
+        trusted_track_left_top = bool(
+            not centre_valid
+            and last_cy is not None
+            and last_cy <= arm_y_px
+            and rising_to_top
+            and raw_state in {"detection_loss", "motion_outlier"})
+        detected = bool(rejected_edge_centre or trusted_track_left_top)
+        if detected:
+            self.camera_high_fov_exit_latch_until_s = (
+                float(query_time_s) + CAMERA_TOP_EXIT_LATCH_S)
+        latch_until = getattr(
+            self, "camera_high_fov_exit_latch_until_s", None)
+        latched = bool(
+            latch_until is not None
+            and float(query_time_s) <= float(latch_until) + 1.0e-9)
+        reason = (
+            "rejected_2d_centre_at_top"
+            if rejected_edge_centre else (
+                "rising_trusted_track_lost_at_top"
+                if trusted_track_left_top else (
+                    "latched_top_exit" if latched else "no_top_exit_cue")))
+        return bool(detected or latched), {
+            "topFovExitReason": reason,
+            "topFovCurrentCyPx": (
+                round(cy, 3) if centre_valid else None),
+            "topFovLastTrustedCyPx": (
+                None if last_cy is None else round(last_cy, 3)),
+            "topFovEdgeYPx": round(edge_y_px, 3),
+            "topFovArmYPx": round(arm_y_px, 3),
+            "topFovUpwardPixelVelocityPxS": (
+                None if upward_px_s is None
+                else round(upward_px_s, 3)),
+        }
+
+    def _ensure_high_ball_occlusion_predictor(
+        self,
+        options: RuntimeOptions,
+    ) -> HighBallOcclusionPredictor:
+        key = (
+            int(options.high_ball_prediction_history_frames),
+            float(options.high_ball_prediction_activation_z_m),
+            float(options.high_ball_prediction_min_upward_velocity_m_s),
+            float(options.high_ball_prediction_max_prediction_s),
+            float(options.high_ball_prediction_stop_z_m),
+            float(options.high_ball_prediction_drag_coefficient_per_m),
+            float(options.high_ball_prediction_integration_step_s),
+            float(options.high_ball_prediction_reacquisition_gate_m),
+            bool(options.high_ball_reacquisition_velocity_handover),
+            int(options.high_ball_reacquisition_velocity_frames),
+            float(options.high_ball_reacquisition_velocity_blend_s),
+            bool(getattr(options, "camera_control_time_compensation", False)),
+            bool(getattr(options, "camera_reacquisition_smoothing", False)),
+            bool(getattr(
+                options, "optimized_ball_prediction_initial_state", False)),
+        )
+        if (self.high_ball_occlusion_predictor is None
+                or self.high_ball_occlusion_predictor_key != key):
+            config = HighBallOcclusionConfig(
+                history_frames=int(
+                    options.high_ball_prediction_history_frames),
+                activation_z_m=float(
+                    options.high_ball_prediction_activation_z_m),
+                min_upward_velocity_m_s=float(
+                    options.high_ball_prediction_min_upward_velocity_m_s),
+                max_prediction_s=float(
+                    options.high_ball_prediction_max_prediction_s),
+                stop_prediction_z_m=float(
+                    options.high_ball_prediction_stop_z_m),
+                drag_coefficient_per_m=float(
+                    options.high_ball_prediction_drag_coefficient_per_m),
+                integration_step_s=float(
+                    options.high_ball_prediction_integration_step_s),
+                reacquisition_gate_m=float(
+                    options.high_ball_prediction_reacquisition_gate_m),
+                enable_reacquisition_velocity_handover=bool(
+                    options.high_ball_reacquisition_velocity_handover),
+                reacquisition_velocity_frames=int(
+                    options.high_ball_reacquisition_velocity_frames),
+                reacquisition_velocity_blend_s=float(
+                    options.high_ball_reacquisition_velocity_blend_s),
+                enable_control_time_compensation=bool(
+                    getattr(options, "camera_control_time_compensation", False)),
+                enable_reacquisition_smoothing=bool(
+                    getattr(options, "camera_reacquisition_smoothing", False)),
+                enable_optimized_initial_state=bool(
+                    getattr(
+                        options,
+                        "optimized_ball_prediction_initial_state",
+                        False)),
+            )
+            self.high_ball_occlusion_predictor = (
+                HighBallOcclusionPredictor(config))
+            self.high_ball_occlusion_predictor_key = key
+            self.camera_ir_top_history = deque(maxlen=5)
+            self.camera_high_fov_exit_latch_until_s = None
+            self.last_predictor_impact_reset_stamp_s = None
+        return self.high_ball_occlusion_predictor
+
+    def _resolve_high_ball_occlusion_state(
+        self,
+        measured_pos: np.ndarray,
+        measured_vel: np.ndarray,
+        measured_valid: bool,
+        measurement_stamp_s: float | None,
+        options: RuntimeOptions,
+        camera_measurement: dict[str, Any] | None = None,
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        bool,
+        float | None,
+        dict[str, Any],
+    ]:
+        """Apply the paper model to high-FOV loss or guarded depth failure."""
+        high_fov_enabled = bool(getattr(
+            options, "high_ball_occlusion_prediction", False))
+        depth_anomaly_enabled = bool(getattr(
+            options, "sensor_depth_anomaly_prediction", False))
+        observation_bridge_enabled = bool(getattr(
+            options, "camera_control_time_compensation", False))
+        reacquisition_smoothing_enabled = bool(getattr(
+            options, "camera_reacquisition_smoothing", False))
+        optimized_initial_state_enabled = bool(getattr(
+            options, "optimized_ball_prediction_initial_state", False))
+        enabled = bool(
+            high_fov_enabled or depth_anomaly_enabled
+            or observation_bridge_enabled
+            or reacquisition_smoothing_enabled
+            or optimized_initial_state_enabled)
+        depth_anomaly_detected = self._adaptive_sensor_depth_anomaly(
+            camera_measurement)
+        detector_measurement_trusted = bool(
+            not isinstance(camera_measurement, dict)
+            or camera_measurement.get("measurement_trusted_3d") is None
+            or camera_measurement.get("measurement_trusted_3d"))
+        trusted_measured_valid = bool(
+            measured_valid
+            and detector_measurement_trusted
+            and not depth_anomaly_detected)
+        suppression_reason = None
+        if not enabled:
+            suppression_reason = "disabled"
+        elif options.ball_source != "camera":
+            suppression_reason = "camera_source_required"
+        elif options.use_ball_estimator:
+            # Keep the experiment interpretable and avoid feeding predicted
+            # pseudo-measurements into a second estimator.
+            suppression_reason = "ball_state_estimator_enabled"
+        if suppression_reason is not None:
+            self.high_ball_occlusion_predictor = None
+            self.high_ball_occlusion_predictor_key = None
+            info = self._high_ball_occlusion_off_payload(
+                enabled=enabled, reason=suppression_reason)
+            info.update({
+                "highFovEnabled": high_fov_enabled,
+                "sensorDepthAnomalyPredictionEnabled": depth_anomaly_enabled,
+                "sensorDepthAnomalyDetected": depth_anomaly_detected,
+                "controlTimeCompensationEnabled": observation_bridge_enabled,
+                "reacquisitionSmoothingEnabled": (
+                    reacquisition_smoothing_enabled),
+                "optimizedInitialStateEnabled": optimized_initial_state_enabled,
+            })
+            camera_velocity_ready = bool(
+                not isinstance(camera_measurement, dict)
+                or camera_measurement.get("velocity_ready") is None
+                or camera_measurement.get("velocity_ready"))
+            estimator_mode = self._camera_estimator_mode(
+                measured_valid=trusted_measured_valid,
+                depth_anomaly=depth_anomaly_detected,
+                camera_velocity_ready=camera_velocity_ready,
+                camera_measurement=camera_measurement)
+            previous_mode = str(getattr(
+                self, "camera_ball_estimator_mode", "uninitialized"))
+            info.update({
+                "cameraVelocityReady": camera_velocity_ready,
+                "estimatorInputMode": estimator_mode,
+                "estimatorMode": estimator_mode,
+                "previousEstimatorMode": previous_mode,
+                "estimatorModeTransitioned": bool(
+                    estimator_mode != previous_mode),
+            })
+            self.camera_ball_estimator_mode = estimator_mode
+            return (
+                measured_pos.copy(), measured_vel.copy(),
+                trusted_measured_valid,
+                measurement_stamp_s, info)
+
+        predictor = self._ensure_high_ball_occlusion_predictor(options)
+        query_time_s = self.now_s + self.cfg.control_dt
+        if self.ros_bridge is not None:
+            try:
+                query_time_s = float(self.ros_bridge.now_sec())
+            except Exception:
+                pass
+        if (measurement_stamp_s is not None
+                and math.isfinite(float(measurement_stamp_s))):
+            query_time_s = max(query_time_s, float(measurement_stamp_s))
+        impact_reported = bool(
+            isinstance(camera_measurement, dict)
+            and camera_measurement.get("velocity_impact_detected", False))
+        impact_stamp = (
+            float(measurement_stamp_s)
+            if measurement_stamp_s is not None
+            and math.isfinite(float(measurement_stamp_s))
+            else float(query_time_s))
+        previous_impact_stamp = getattr(
+            self, "last_predictor_impact_reset_stamp_s", None)
+        history_reset_on_impact = bool(
+            impact_reported
+            and (previous_impact_stamp is None
+                 or abs(impact_stamp - float(previous_impact_stamp))
+                 > 1.0e-6))
+        if history_reset_on_impact:
+            # Predictor measurements are another consumer of detector state.
+            # Clearing only the detector's velocity window is insufficient:
+            # an otherwise valid position-fit would still span the collision.
+            predictor.reset(clear_counters=False)
+            self.camera_ir_top_history = deque(maxlen=5)
+            self.camera_high_fov_exit_latch_until_s = None
+            self.last_predictor_impact_reset_stamp_s = impact_stamp
+        top_fov_exit_detected, top_fov_diagnostics = (
+            self._camera_top_fov_exit_cue(
+                measured_valid=trusted_measured_valid,
+                measurement_stamp_s=measurement_stamp_s,
+                query_time_s=query_time_s,
+                camera_measurement=camera_measurement,
+            ))
+        camera_velocity_ready = True
+        if (isinstance(camera_measurement, dict)
+                and camera_measurement.get("velocity_ready") is not None):
+            camera_velocity_ready = bool(
+                camera_measurement.get("velocity_ready"))
+        # Loss-buffer clearing deliberately restarts the detector velocity
+        # fit.  Its under-filled placeholder must not terminate prediction or
+        # be exposed as a valid zero-velocity state.
+        detector_reacquisition_confirmed = bool(
+            isinstance(camera_measurement, dict)
+            and camera_measurement.get("measurement_trusted_3d", False)
+            and camera_measurement.get(
+                "motion_reacquisition_confirmed", False))
+        estimator_input_mode = self._camera_estimator_mode(
+            measured_valid=trusted_measured_valid,
+            depth_anomaly=depth_anomaly_detected,
+            camera_velocity_ready=camera_velocity_ready,
+            camera_measurement=camera_measurement)
+        result = predictor.step(
+            measured_pos,
+            measured_vel,
+            trusted_measured_valid,
+            measurement_stamp_s,
+            query_time_s,
+            force_prediction_reason=(
+                "sensor_depth_anomaly"
+                if depth_anomaly_enabled and depth_anomaly_detected
+                else (
+                    "high_fov_edge_exit"
+                    if high_fov_enabled and top_fov_exit_detected
+                    else None)),
+            allow_high_fov_prediction=high_fov_enabled,
+            measurement_velocity_valid=camera_velocity_ready,
+            measurement_reacquisition_confirmed=(
+                detector_reacquisition_confirmed),
+        )
+        reacquisition_velocity_warmup = bool(
+            trusted_measured_valid
+            and not camera_velocity_ready
+            and (predictor.active or str(
+                result.diagnostics.get("state") or "") in {
+                    "reacquisition_handover", "reacquisition_smoothing"}))
+        info = dict(result.diagnostics)
+        info["enabled"] = True
+        info["highFovEnabled"] = high_fov_enabled
+        info["sensorDepthAnomalyPredictionEnabled"] = depth_anomaly_enabled
+        info["sensorDepthAnomalyDetected"] = depth_anomaly_detected
+        info["topFovExitDetected"] = bool(top_fov_exit_detected)
+        info.update(top_fov_diagnostics)
+        info["historyResetOnImpact"] = bool(history_reset_on_impact)
+        info["cameraVelocityReady"] = camera_velocity_ready
+        info["reacquisitionVelocityWarmup"] = (
+            reacquisition_velocity_warmup)
+        info["detectorReacquisitionConfirmed"] = (
+            detector_reacquisition_confirmed)
+        info["controlApplied"] = bool(result.predicted)
+        estimator_mode = self._camera_estimator_mode(
+            measured_valid=trusted_measured_valid,
+            depth_anomaly=depth_anomaly_detected,
+            camera_velocity_ready=camera_velocity_ready,
+            camera_measurement=camera_measurement,
+            prediction_diagnostics=info)
+        previous_mode = str(getattr(
+            self, "camera_ball_estimator_mode", "uninitialized"))
+        info["estimatorInputMode"] = estimator_input_mode
+        info["estimatorMode"] = estimator_mode
+        info["previousEstimatorMode"] = previous_mode
+        info["estimatorModeTransitioned"] = bool(
+            estimator_mode != previous_mode)
+        self.camera_ball_estimator_mode = estimator_mode
+        return (
+            result.position_m.copy(),
+            result.velocity_m_s.copy(),
+            bool(result.valid),
+            (float(result.timestamp_s) if result.valid
+             else measurement_stamp_s),
+            info,
+        )
+
     def _make_ball_estimator(
         self,
         options: RuntimeOptions,
@@ -13048,6 +14291,10 @@ class PolicySafetyProbe:
         valid: bool,
         age_s: float | None,
         options: RuntimeOptions,
+        *,
+        force_invalidate: bool = False,
+        source_timestamp_s: float | None = None,
+        force_fresh_source: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, bool, float | None]:
         """Apply the actuator/servo policies' configured fractional hold."""
         profile = normalize_observation_profile(getattr(
@@ -13056,11 +14303,23 @@ class PolicySafetyProbe:
             OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
             OBSERVATION_PROFILE_SIMCODE4_SERVO67,
             OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+            OBSERVATION_PROFILE_SIMCODE6_QVEL67,
         }
+        if (bool(getattr(
+                    options, "camera_control_time_compensation", False))
+                and getattr(options, "ball_source", "") == "camera"
+                and not bool(getattr(options, "use_ball_estimator", False))):
+            # This experiment explicitly replaces the profile-specific
+            # zero-order hold: the same trusted camera frame is propagated to
+            # each 200 Hz policy tick by the bounded camera trajectory model.
+            self.policy_ball_sample_profile = None
+            self.policy_ball_sample_source_stamp_s = None
+            return pos, vel, bool(valid), age_s
         if (profile not in sampled_profiles
                 or getattr(options, "control_mode", "policy") != "policy"
                 or bool(getattr(options, "use_ball_estimator", False))):
             self.policy_ball_sample_profile = None
+            self.policy_ball_sample_source_stamp_s = None
             return pos, vel, bool(valid), age_s
 
         if getattr(self, "policy_ball_sample_profile", None) != profile:
@@ -13068,6 +14327,24 @@ class PolicySafetyProbe:
             self.policy_ball_sample_profile = profile
             self.policy_ball_sample_has_valid = False
             self.policy_ball_sample_age_s = 0.0
+            self.policy_ball_sample_source_stamp_s = None
+
+        if force_invalidate:
+            self.policy_ball_sample_has_valid = False
+            self.policy_ball_sample_pos = np.zeros(3, dtype=np.float32)
+            self.policy_ball_sample_vel = np.zeros(3, dtype=np.float32)
+            forced_age = (
+                self.cfg.ball_lost_timeout_s
+                if age_s is None else max(
+                    self.cfg.ball_lost_timeout_s, float(age_s)))
+            self.policy_ball_sample_age_s = float(forced_age)
+            self.policy_ball_sample_source_stamp_s = None
+            return (
+                self.policy_ball_sample_pos.copy(),
+                self.policy_ball_sample_vel.copy(),
+                False,
+                self.policy_ball_sample_age_s,
+            )
 
         step = int(self.policy_ball_sample_step)
         if step == 0:
@@ -13079,6 +14356,26 @@ class PolicySafetyProbe:
                 options, "ball_observation_rate_hz", 60.0))
             period = sample_rate_hz * float(self.cfg.control_dt)
             refresh = math.floor(step * period) > math.floor((step - 1) * period)
+        source_stamp = None
+        if source_timestamp_s is not None:
+            try:
+                candidate_stamp = float(source_timestamp_s)
+            except (TypeError, ValueError):
+                candidate_stamp = float("nan")
+            if math.isfinite(candidate_stamp):
+                source_stamp = candidate_stamp
+        previous_source_stamp = getattr(
+            self, "policy_ball_sample_source_stamp_s", None)
+        fresh_source = bool(
+            source_stamp is not None
+            and (previous_source_stamp is None
+                 or abs(source_stamp - float(previous_source_stamp))
+                 > _CAMERA_FRAME_TIMESTAMP_DUPLICATE_TOLERANCE_S))
+        if bool(force_fresh_source) and fresh_source:
+            # During predictor->camera handover, every *new camera frame* must
+            # be visible to the policy.  This does not enable 90->200
+            # propagation: repeated 200 Hz ticks still hold the same sample.
+            refresh = True
         sample_available = bool(refresh and valid)
         if sample_available:
             self.policy_ball_sample_pos = np.asarray(
@@ -13089,13 +14386,15 @@ class PolicySafetyProbe:
             self.policy_ball_sample_age_s = max(
                 0.0, source_age if math.isfinite(source_age) else 0.0)
             self.policy_ball_sample_has_valid = True
+            if source_stamp is not None:
+                self.policy_ball_sample_source_stamp_s = source_stamp
             self.policy_ball_sample_sequence = int(getattr(
                 self, "policy_ball_sample_sequence", 0)) + 1
         elif self.policy_ball_sample_has_valid:
             if profile == OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67:
                 self.policy_ball_sample_age_s += float(self.cfg.control_dt)
             else:
-                # simcode4/simcode5 have no missing/dropout branch and use
+                # simcode4/5/6 have no missing/dropout branch and use
                 # ball_obs_age_tracks_stale=False, so held samples keep
                 # obs[49] and the contact-time age advancement at exactly zero.
                 self.policy_ball_sample_age_s = 0.0
@@ -13114,6 +14413,7 @@ class PolicySafetyProbe:
         self.policy_ball_sample_profile = None
         self.policy_ball_sample_age_s = 0.0
         self.policy_ball_sample_has_valid = False
+        self.policy_ball_sample_source_stamp_s = None
 
     def _raw_measurement_age_s(
         self,
@@ -13362,6 +14662,479 @@ class PolicySafetyProbe:
             "jointVelocitySource": source,
         }
 
+    def _joint_velocity_observation_for_policy(
+        self,
+        raw_dq: np.ndarray | None,
+        source_stamp_s: float | None,
+        enabled: bool | None = None,
+    ) -> tuple[np.ndarray | None, dict[str, Any]]:
+        """Adapt only the actor's dq slice; never mutate raw control feedback."""
+        adapter = getattr(self, "policy_dq_adapter", None)
+        if adapter is None:
+            return raw_dq, {
+                "configuredEnabled": False,
+                "active": False,
+                "reason": "adapter_unavailable",
+            }
+        runtime_enabled = (
+            bool(adapter.config.enabled) if enabled is None else bool(enabled))
+        previous_enabled = getattr(
+            self, "policy_dq_adapter_runtime_enabled", runtime_enabled)
+        if bool(previous_enabled) != runtime_enabled:
+            adapter.reset(
+                "runtime_enabled" if runtime_enabled else "runtime_disabled")
+        self.policy_dq_adapter_runtime_enabled = runtime_enabled
+        if raw_dq is None:
+            info = adapter.bypass_payload("joint_velocity_unavailable")
+            info["runtimeEnabled"] = runtime_enabled
+            self.last_policy_dq_adapter_info = info
+            return None, info
+        profile = normalize_observation_profile(getattr(
+            self,
+            "active_policy_profile",
+            self.cfg.policy_profile,
+        ))
+        if profile != OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67:
+            info = adapter.bypass_payload(
+                "only_enabled_for_simcode5_pure_actuator67", raw_dq)
+            info["runtimeEnabled"] = runtime_enabled
+            self.last_policy_dq_adapter_info = info
+            return np.asarray(raw_dq, dtype=np.float32).copy(), info
+        policy_dq, info = adapter.update(
+            raw_dq,
+            source_stamp_s=source_stamp_s,
+            enabled=runtime_enabled,
+        )
+        info["policyProfile"] = profile
+        self.last_policy_dq_adapter_info = info
+        return policy_dq, info
+
+    @staticmethod
+    def _contact_time_from_vertical_state(
+        surface_gap_m: float,
+        relative_vertical_velocity_m_s: float,
+        max_time_s: float,
+    ) -> float | None:
+        """Return the first ballistic time at which the ball reaches racket."""
+        gap = float(surface_gap_m)
+        vz = float(relative_vertical_velocity_m_s)
+        max_time = max(0.0, float(max_time_s))
+        if not math.isfinite(gap) or not math.isfinite(vz) or gap < 0.0:
+            return None
+        discriminant = vz * vz + 2.0 * 9.81 * gap
+        if discriminant < 0.0 or not math.isfinite(discriminant):
+            return None
+        t = (vz + math.sqrt(discriminant)) / 9.81
+        if not math.isfinite(t) or t < 0.0 or t > max_time:
+            return None
+        return float(t)
+
+    def _write_contact_shielded_policy_command(
+        self,
+        position_q: np.ndarray,
+        velocity_q: np.ndarray,
+        previous_velocity_q: np.ndarray,
+    ) -> None:
+        """Back-calculate a shield intervention into command/history state."""
+        q = np.asarray(position_q, dtype=np.float32).reshape(
+            len(RIGHT_ARM_JOINTS))
+        dq = np.asarray(velocity_q, dtype=np.float32).reshape(
+            len(RIGHT_ARM_JOINTS))
+        previous_dq = np.asarray(
+            previous_velocity_q, dtype=np.float32).reshape(
+                len(RIGHT_ARM_JOINTS))
+        ddq = (dq - previous_dq) / max(float(self.cfg.control_dt), 1e-6)
+        self.controller.arm_cmd_q = q.copy()
+        self.controller.arm_cmd_qvel = dq.copy()
+        self.controller.last_cmd_q = q.copy()
+        self.controller.last_cmd_qvel = dq.copy()
+        self.controller.last_cmd_qacc = ddq.astype(np.float32)
+        history = getattr(self.controller, "_cmd_history", None)
+        if isinstance(history, list) and history:
+            history[-1] = q.copy()
+
+    def _apply_contact_action_shield(
+        self,
+        ball_pos: np.ndarray,
+        ball_vel: np.ndarray,
+        *,
+        valid: bool,
+        age_s: float,
+        arm_q: np.ndarray | None,
+        arm_dq: np.ndarray | None,
+        options: ContactActionShieldOptions,
+    ) -> None:
+        """Project the current RL command inside contact-phase task limits.
+
+        The projection preserves the actor action for telemetry but replaces
+        the integrated command position/velocity and newest delayed-command
+        history entry.  This anti-windup step is essential: otherwise a
+        rejected lateral command would reappear immediately after contact.
+        """
+        info: dict[str, Any] = {
+            **options.payload(),
+            "active": False,
+            "intervened": False,
+            "reason": (
+                "disabled"
+                if not (options.enabled or options.vertical_energy_enabled)
+                else "inactive"),
+            "ageS": round(float(max(0.0, age_s)), 6),
+        }
+        self.last_contact_action_shield_info = info
+        if not (options.enabled or options.vertical_energy_enabled) or not valid:
+            if not valid:
+                info["reason"] = "invalid_ball"
+            return
+        ball = np.asarray(ball_pos, dtype=np.float64).reshape(-1)
+        velocity = np.asarray(ball_vel, dtype=np.float64).reshape(-1)
+        if (ball.shape[0] != 3 or velocity.shape[0] != 3
+                or not np.all(np.isfinite(ball))
+                or not np.all(np.isfinite(velocity))):
+            info["reason"] = "nonfinite_ball"
+            return
+
+        raw_q = self._right_arm_joint_vector_or_none(
+            getattr(self.controller, "arm_cmd_q", None))
+        raw_dq = self._right_arm_joint_vector_or_none(
+            getattr(self.controller, "arm_cmd_qvel", None))
+        raw_ddq = self._right_arm_joint_vector_or_none(
+            getattr(self.controller, "last_cmd_qacc", None))
+        if raw_q is None or raw_dq is None:
+            info["reason"] = "command_unavailable"
+            return
+        if raw_ddq is None:
+            raw_ddq = np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float64)
+        dt = max(float(self.cfg.control_dt), 1e-6)
+        previous_dq = raw_dq - raw_ddq * dt
+        previous_q = np.clip(
+            raw_q - raw_dq * dt,
+            self.controller.arm_q_low,
+            self.controller.arm_q_high,
+        )
+        feedback_q = self._right_arm_joint_vector_or_none(arm_q)
+        feedback_dq = self._right_arm_joint_vector_or_none(arm_dq)
+        linearization_q = raw_q if feedback_q is None else feedback_q
+        try:
+            (
+                racket_pos,
+                racket_quat,
+                jacobian_position,
+                jacobian_rotation,
+                fk_ok,
+            ) = self.controller._compute_racket_pose_jacobians_base(
+                linearization_q)
+        except Exception as exc:
+            info.update(reason="kinematics_error", error=str(exc))
+            return
+        racket_pos = np.asarray(racket_pos, dtype=np.float64).reshape(-1)
+        jacobian_position = np.asarray(
+            jacobian_position, dtype=np.float64)
+        jacobian_rotation = np.asarray(
+            jacobian_rotation, dtype=np.float64)
+        if (not fk_ok or racket_pos.shape[0] != 3
+                or jacobian_position.shape != (3, len(RIGHT_ARM_JOINTS))
+                or jacobian_rotation.shape != (3, len(RIGHT_ARM_JOINTS))
+                or not np.all(np.isfinite(racket_pos))
+                or not np.all(np.isfinite(jacobian_position))
+                or not np.all(np.isfinite(jacobian_rotation))):
+            info["reason"] = "kinematics_unavailable"
+            return
+        racket_normal = np.asarray(
+            racket_normal_from_quaternion_xyzw(racket_quat),
+            dtype=np.float64,
+        ).reshape(-1)
+        if racket_normal.shape[0] != 3 or not np.all(np.isfinite(racket_normal)):
+            info["reason"] = "normal_unavailable"
+            return
+
+        estimated_racket_dq = raw_dq if feedback_dq is None else feedback_dq
+        racket_velocity = jacobian_position @ estimated_racket_dq
+        ball_radius_m = max(
+            0.0, float(getattr(self.cfg, "juggle_ball_radius_m", 0.020)))
+        surface_gap_m = float(ball[2] - racket_pos[2] - ball_radius_m)
+        lateral_distance_m = float(np.linalg.norm(ball[:2] - racket_pos[:2]))
+        relative_vz = float(velocity[2] - racket_velocity[2])
+        contact_search_window_s = max(
+            float(options.pre_contact_window_s)
+            if options.enabled else 0.0,
+            float(options.vertical_pre_contact_window_s)
+            if options.vertical_energy_enabled else 0.0,
+        )
+        time_to_contact_s = self._contact_time_from_vertical_state(
+            max(0.0, surface_gap_m),
+            relative_vz,
+            contact_search_window_s,
+        )
+        descending = bool(
+            velocity[2] <= -options.min_downward_velocity_m_s)
+        if descending:
+            self.contact_shield_last_descending_s = float(self.now_s)
+        recent_descent = bool(
+            float(self.now_s) - float(self.contact_shield_last_descending_s)
+            <= max(
+                0.10,
+                contact_search_window_s
+                + options.post_contact_window_s,
+            ))
+        rebound = bool(
+            options.enabled
+            and recent_descent
+            and velocity[2] >= options.min_downward_velocity_m_s
+            and abs(surface_gap_m) <= options.contact_tolerance_m
+            and lateral_distance_m <= options.max_lateral_distance_m)
+        if rebound:
+            self.contact_shield_post_until_s = max(
+                float(self.contact_shield_post_until_s),
+                float(self.now_s) + options.post_contact_window_s,
+            )
+        contact_approach = bool(
+            descending
+            and time_to_contact_s is not None
+            and surface_gap_m >= -options.contact_tolerance_m
+            and lateral_distance_m <= options.max_lateral_distance_m)
+        lateral_pre_contact = bool(
+            options.enabled
+            and contact_approach
+            and time_to_contact_s is not None
+            and time_to_contact_s <= options.pre_contact_window_s)
+        vertical_pre_contact = bool(
+            options.vertical_energy_enabled
+            and contact_approach
+            and time_to_contact_s is not None
+            and time_to_contact_s <= options.vertical_pre_contact_window_s)
+        post_contact = bool(
+            options.enabled
+            and float(self.now_s) <= float(self.contact_shield_post_until_s))
+        lateral_active = bool(lateral_pre_contact or post_contact)
+        active = bool(lateral_active or vertical_pre_contact)
+        phase = "pre_contact" if (
+            lateral_pre_contact or vertical_pre_contact) else (
+            "post_contact" if post_contact else "inactive")
+        info.update({
+            "active": active,
+            "phase": phase,
+            "reason": phase,
+            "surfaceGapM": round(surface_gap_m, 6),
+            "lateralDistanceM": round(lateral_distance_m, 6),
+            "timeToContactS": (
+                None if time_to_contact_s is None
+                else round(float(time_to_contact_s), 6)),
+            "ballVelocityMps": _rounded_vector(velocity),
+            "racketPositionM": _rounded_vector(racket_pos),
+            "racketVelocityMps": _rounded_vector(racket_velocity),
+            "normalBefore": _rounded_vector(racket_normal),
+            "reboundDetected": rebound,
+            "lateralActive": lateral_active,
+            "verticalEnergyActive": vertical_pre_contact,
+        })
+        if not active:
+            return
+
+        prediction_horizon_s = max(
+            dt,
+            float(time_to_contact_s)
+            if (lateral_pre_contact or vertical_pre_contact)
+            and time_to_contact_s is not None else dt,
+        )
+        rows: list[np.ndarray] = []
+        bounds: list[float] = []
+        names: list[str] = []
+
+        max_lateral_speed = float(options.max_lateral_speed_m_s)
+        if lateral_active:
+            for axis, axis_name in ((0, "x"), (1, "y")):
+                row = jacobian_position[axis].copy()
+                rows.extend((row, -row))
+                bounds.extend((max_lateral_speed, max_lateral_speed))
+                names.extend((
+                    f"racket_v{axis_name}_high",
+                    f"racket_v{axis_name}_low",
+                ))
+
+        nx, ny, nz = [float(value) for value in racket_normal]
+        normal_rate_from_omega = np.asarray([
+            [0.0, nz, -ny],
+            [-nz, 0.0, nx],
+            [ny, -nx, 0.0],
+        ], dtype=np.float64)
+        normal_jacobian = normal_rate_from_omega @ jacobian_rotation
+        max_normal_lateral = float(options.max_normal_lateral)
+        if lateral_active:
+            for axis, axis_name in ((0, "x"), (1, "y")):
+                row = normal_jacobian[axis].copy()
+                current = float(racket_normal[axis])
+                rows.extend((row, -row))
+                bounds.extend((
+                    (max_normal_lateral - current) / prediction_horizon_s,
+                    (max_normal_lateral + current) / prediction_horizon_s,
+                ))
+                names.extend((
+                    f"normal_{axis_name}_high",
+                    f"normal_{axis_name}_low",
+                ))
+
+        vertical_incoming_vz_m_s: float | None = None
+        vertical_target_outgoing_vz_m_s: float | None = None
+        vertical_max_racket_vz_m_s: float | None = None
+        if vertical_pre_contact:
+            assert time_to_contact_s is not None
+            vertical_incoming_vz_m_s = float(
+                velocity[2] - 9.81 * float(time_to_contact_s))
+            (
+                vertical_max_racket_vz_m_s,
+                vertical_target_outgoing_vz_m_s,
+            ) = _vertical_contact_energy_speed_cap(
+                vertical_incoming_vz_m_s,
+                options.vertical_target_apex_height_m,
+                options.vertical_restitution,
+                options.vertical_max_racket_upward_speed_m_s,
+            )
+            rows.append(jacobian_position[2].copy())
+            bounds.append(vertical_max_racket_vz_m_s)
+            names.append("racket_vz_energy_high")
+
+        workspace_margin = float(options.workspace_margin_m)
+        predicted_ball_xy = (
+            ball[:2] + velocity[:2] * prediction_horizon_s)
+        recenter_active = False
+        if lateral_active:
+            for axis, axis_name, limits in (
+                (0, "x", self.cfg.ee_x_limits_m),
+                (1, "y", self.cfg.ee_y_limits_m),
+            ):
+                if limits is None:
+                    continue
+                lo, hi = [float(value) for value in limits]
+                inset_lo = lo + workspace_margin
+                inset_hi = hi - workspace_margin
+                if inset_lo >= inset_hi:
+                    continue
+                row = jacobian_position[axis].copy()
+                rows.extend((row, -row))
+                bounds.extend((
+                    (inset_hi - float(racket_pos[axis]))
+                    / prediction_horizon_s,
+                    (float(racket_pos[axis]) - inset_lo)
+                    / prediction_horizon_s,
+                ))
+                names.extend((
+                    f"workspace_{axis_name}_high",
+                    f"workspace_{axis_name}_low",
+                ))
+                recenter_active = bool(
+                    recenter_active
+                    or predicted_ball_xy[axis] < inset_lo
+                    or predicted_ball_xy[axis] > inset_hi
+                    or racket_pos[axis] < inset_lo
+                    or racket_pos[axis] > inset_hi)
+
+        row_matrix = np.asarray(rows, dtype=np.float64).reshape(
+            -1, len(RIGHT_ARM_JOINTS))
+        bound_vector = np.asarray(bounds, dtype=np.float64)
+        velocity_limit = np.asarray(
+            self.controller.arm_vel_limit_rad_s, dtype=np.float64)
+        acceleration_limit = np.asarray(
+            self.controller.arm_acc_limit_rad_s2, dtype=np.float64)
+        lower = np.maximum.reduce((
+            -velocity_limit,
+            previous_dq - acceleration_limit * dt,
+            (np.asarray(self.controller.arm_q_low, dtype=np.float64)
+             - previous_q) / dt,
+        ))
+        upper = np.minimum.reduce((
+            velocity_limit,
+            previous_dq + acceleration_limit * dt,
+            (np.asarray(self.controller.arm_q_high, dtype=np.float64)
+             - previous_q) / dt,
+        ))
+        damping = float(options.dls_damping)
+        objective_metric = (
+            jacobian_position.T @ jacobian_position
+            / max(max_lateral_speed, 0.05) ** 2
+            + normal_jacobian.T @ normal_jacobian
+            / max(max_normal_lateral, 0.01) ** 2
+            + damping * damping * np.eye(len(RIGHT_ARM_JOINTS))
+        )
+        selected_dq, projection_info = _project_velocity_halfspaces(
+            raw_dq,
+            row_matrix,
+            bound_vector,
+            lower=lower,
+            upper=upper,
+            scale=velocity_limit,
+            metric=objective_metric,
+            max_sweeps=32,
+        )
+        if (not projection_info.get("feasible", False)
+                and not projection_info.get("uncontrollable", False)):
+            fallback_dq, fallback_info = _project_velocity_halfspaces(
+                raw_dq,
+                row_matrix,
+                bound_vector,
+                lower=lower,
+                upper=upper,
+                scale=velocity_limit,
+                max_sweeps=64,
+            )
+            if fallback_info.get("feasible", False):
+                selected_dq = fallback_dq
+                fallback_info = dict(fallback_info)
+                fallback_info["objectiveFallback"] = "scaled_joint"
+                projection_info = fallback_info
+        if not projection_info.get("feasible", False):
+            selected_dq = np.clip(
+                np.zeros_like(raw_dq), lower, upper)
+            projection_info = dict(projection_info)
+            projection_info["publishedFallback"] = (
+                "reachable_zero_velocity_brake")
+        selected_q = np.clip(
+            previous_q + selected_dq * dt,
+            self.controller.arm_q_low,
+            self.controller.arm_q_high,
+        )
+        correction = selected_dq - raw_dq
+        intervened = bool(np.linalg.norm(correction) > 1e-9)
+        if intervened:
+            self._write_contact_shielded_policy_command(
+                selected_q, selected_dq, previous_dq)
+        predicted_normal = (
+            racket_normal
+            + prediction_horizon_s * normal_jacobian @ selected_dq)
+        violations_before = row_matrix @ raw_dq - bound_vector
+        info.update({
+            "intervened": intervened,
+            "predictionHorizonS": round(prediction_horizon_s, 6),
+            "predictedBallContactXyM": _rounded_vector(predicted_ball_xy),
+            "workspaceRecenterActive": recenter_active,
+            "rawJointVelocityRadS": _rounded_vector(raw_dq),
+            "selectedJointVelocityRadS": _rounded_vector(selected_dq),
+            "jointCorrectionVelocityRadS": _rounded_vector(correction),
+            "rawLateralVelocityMps": _rounded_vector(
+                (jacobian_position @ raw_dq)[:2]),
+            "selectedLateralVelocityMps": _rounded_vector(
+                (jacobian_position @ selected_dq)[:2]),
+            "rawRacketVerticalVelocityMps": round(float(
+                (jacobian_position @ raw_dq)[2]), 6),
+            "selectedRacketVerticalVelocityMps": round(float(
+                (jacobian_position @ selected_dq)[2]), 6),
+            "verticalIncomingBallVelocityMps": (
+                None if vertical_incoming_vz_m_s is None else round(
+                    vertical_incoming_vz_m_s, 6)),
+            "verticalTargetOutgoingBallVelocityMps": (
+                None if vertical_target_outgoing_vz_m_s is None else round(
+                    vertical_target_outgoing_vz_m_s, 6)),
+            "verticalComputedMaxRacketVelocityMps": (
+                None if vertical_max_racket_vz_m_s is None else round(
+                    vertical_max_racket_vz_m_s, 6)),
+            "predictedNormalAfter": _rounded_vector(predicted_normal),
+            "activeConstraints": [
+                names[index]
+                for index in np.flatnonzero(violations_before > 1e-9)
+            ],
+            "projection": dict(projection_info),
+        })
+
     def _predict_policy_with_feedback(
         self,
         ball_pos: np.ndarray,
@@ -13432,8 +15205,16 @@ class PolicySafetyProbe:
                     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
                 ),
             ))
-        self.controller.use_valid_ball_obs_age = bool(
-            options.rl_use_valid_ball_obs_age)
+        active_policy_profile = getattr(
+            self,
+            "active_policy_profile",
+            OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+        )
+        self.controller.use_valid_ball_obs_age = (
+            _policy_uses_valid_ball_obs_age(
+                active_policy_profile,
+                bool(options.rl_use_valid_ball_obs_age),
+            ))
         self.now_s += self.cfg.control_dt
         self.workspace_soft_prediction_active = False
         self.workspace_soft_conditions = {}
@@ -13441,6 +15222,66 @@ class PolicySafetyProbe:
             "active": False,
             "predictive": False,
             "alpha": 1.0,
+        }
+        contact_action_shield = getattr(
+            options, "contact_action_shield", None)
+        if contact_action_shield is None:
+            # Keep legacy/test RuntimeOptions-like callers compatible.  The
+            # real web/CLI path always provides the complete frozen options.
+            contact_action_shield = ContactActionShieldOptions(
+                enabled=False,
+                pre_contact_window_s=float(getattr(
+                    self.cfg, "contact_shield_pre_contact_window_s", 0.06)),
+                post_contact_window_s=float(getattr(
+                    self.cfg, "contact_shield_post_contact_window_s", 0.05)),
+                contact_tolerance_m=float(getattr(
+                    self.cfg, "contact_shield_contact_tolerance_m", 0.04)),
+                max_lateral_distance_m=float(getattr(
+                    self.cfg, "contact_shield_max_lateral_distance_m", 0.12)),
+                min_downward_velocity_m_s=float(getattr(
+                    self.cfg,
+                    "contact_shield_min_downward_velocity_m_s",
+                    0.25,
+                )),
+                max_normal_lateral=float(getattr(
+                    self.cfg, "contact_shield_max_normal_lateral", 0.03)),
+                max_lateral_speed_m_s=float(getattr(
+                    self.cfg,
+                    "contact_shield_max_lateral_speed_m_s",
+                    0.25,
+                )),
+                workspace_margin_m=float(getattr(
+                    self.cfg, "contact_shield_workspace_margin_m", 0.035)),
+                dls_damping=float(getattr(
+                    self.cfg, "contact_shield_dls_damping", 0.03)),
+                vertical_energy_enabled=bool(getattr(
+                    self.cfg,
+                    "enable_vertical_contact_energy_shield",
+                    False,
+                )),
+                vertical_pre_contact_window_s=float(getattr(
+                    self.cfg,
+                    "vertical_contact_pre_contact_window_s",
+                    0.12,
+                )),
+                vertical_target_apex_height_m=float(getattr(
+                    self.cfg,
+                    "vertical_contact_target_apex_height_m",
+                    0.30,
+                )),
+                vertical_restitution=float(getattr(
+                    self.cfg, "vertical_contact_restitution", 0.66)),
+                vertical_max_racket_upward_speed_m_s=float(getattr(
+                    self.cfg,
+                    "vertical_contact_max_racket_upward_speed_m_s",
+                    0.90,
+                )),
+            )
+        self.last_contact_action_shield_info = {
+            **contact_action_shield.payload(),
+            "active": False,
+            "intervened": False,
+            "reason": "not_policy_command",
         }
         default_workspace_mode = getattr(
             self.cfg, "workspace_safety_mode", "position_soft")
@@ -14026,17 +15867,33 @@ class PolicySafetyProbe:
             if self.policy_needs_reentry_reset:
                 self._reset_real_policy_for_sim_reentry()
             self.last_control_mode = "policy"
+            policy_arm_dq, policy_dq_adapter_info = (
+                self._joint_velocity_observation_for_policy(
+                    arm_dq,
+                    arm_sample_stamp_s,
+                    options.enable_policy_dq_adapter,
+                ))
             self._predict_policy_with_feedback(
                 ball_pos,
                 ball_vel,
                 valid=valid,
                 age_s=age_s,
                 arm_q=arm_q,
-                arm_dq=arm_dq,
+                arm_dq=policy_arm_dq,
                 arm_sample_stamp_s=arm_sample_stamp_s,
                 observation_scales=options.policy_observation_scales,
             )
             policy_executed = True
+            raw_policy_command = self.controller.latest_command_state()
+            self._apply_contact_action_shield(
+                ball_pos,
+                ball_vel,
+                valid=valid,
+                age_s=age_s,
+                arm_q=arm_q,
+                arm_dq=arm_dq,
+                options=contact_action_shield,
+            )
             policy_obs_action = self.controller.latest_obs_and_action()
             policy_command = self.controller.latest_command_state()
             self.last_policy_execution_trace = {
@@ -14047,6 +15904,15 @@ class PolicySafetyProbe:
                     dtype=np.float32).copy(),
                 "action": np.asarray(
                     policy_obs_action["action"], dtype=np.float32).copy(),
+                "executedAction": np.asarray(
+                    policy_obs_action.get(
+                        "executed_action", policy_obs_action["action"]),
+                    dtype=np.float32,
+                ).copy(),
+                "rawPosition": np.asarray(
+                    raw_policy_command["position"], dtype=np.float32).copy(),
+                "rawVelocity": np.asarray(
+                    raw_policy_command["velocity"], dtype=np.float32).copy(),
                 "position": np.asarray(
                     policy_command["position"], dtype=np.float32).copy(),
                 "velocity": np.asarray(
@@ -14054,6 +15920,18 @@ class PolicySafetyProbe:
                 "acceleration": np.asarray(
                     policy_command["acceleration"], dtype=np.float32).copy(),
                 "jointFeedbackTiming": dict(arm_feedback_timing),
+                "rawJointPosition": (
+                    None if arm_q is None else np.asarray(
+                        arm_q, dtype=np.float32).copy()),
+                "rawJointVelocity": (
+                    None if arm_dq is None else np.asarray(
+                        arm_dq, dtype=np.float32).copy()),
+                "policyJointVelocity": (
+                    None if policy_arm_dq is None else np.asarray(
+                        policy_arm_dq, dtype=np.float32).copy()),
+                "policyDqAdapter": dict(policy_dq_adapter_info),
+                "contactActionShield": dict(
+                    self.last_contact_action_shield_info),
             }
         racket_pos, racket_quat, fk_ok = (
             self._workspace_safety_racket_pose(options))
@@ -14483,8 +16361,13 @@ class PolicySafetyProbe:
         )
         policy_profile = normalize_observation_profile(
             payload.get("policyProfile", self.cfg.policy_profile))
+        default_observation_scales = _default_policy_observation_scales(
+            self.cfg.policy_obs_dim,
+            self.cfg.policy_dq_observation_scale,
+        )
         policy_observation_scales = _policy_observation_scales(
-            payload.get("policyObservationScales"),
+            payload.get(
+                "policyObservationScales", default_observation_scales),
             self.cfg.policy_obs_dim,
         )
         rl_use_valid_ball_obs_age = _policy_uses_valid_ball_obs_age(
@@ -14697,6 +16580,11 @@ class PolicySafetyProbe:
             # Pin sampled policy profiles to the experiment-wide sim2real
             # rate instead of a stale hard-coded 60 Hz value.
             obs_rate = float(self.cfg.ball_observation_rate_hz)
+        elif policy_profile == OBSERVATION_PROFILE_SIMCODE6_QVEL67:
+            # Checkpoint-authoritative qvel-v14 contract.  Keep this immutable
+            # even when the UI switches to simcode6 after another profile was
+            # launched with a different experiment-wide camera rate.
+            obs_rate = 60.0
         comp_mode = str(payload.get(
             "compensationMode", self.cfg.compensation_mode)).strip().lower()
         comp_mode = comp_mode.replace("-", "_")
@@ -14870,6 +16758,76 @@ class PolicySafetyProbe:
             min_value=1.0,
             max_value=1000.0,
         )
+        high_ball_prediction_history_frames = _payload_int(
+            payload,
+            "highBallPredictionHistoryFrames",
+            self.cfg.high_ball_prediction_history_frames,
+            min_value=3,
+            max_value=30,
+        )
+        high_ball_prediction_activation_z_m = _payload_float(
+            payload,
+            "highBallPredictionActivationZMinM",
+            self.cfg.high_ball_prediction_activation_z_m,
+            min_value=0.5,
+            max_value=2.5,
+        )
+        high_ball_prediction_min_upward_velocity_m_s = _payload_float(
+            payload,
+            "highBallPredictionMinUpwardVelocityMps",
+            self.cfg.high_ball_prediction_min_upward_velocity_m_s,
+            min_value=0.0,
+            max_value=10.0,
+        )
+        high_ball_prediction_max_prediction_s = _payload_float(
+            payload,
+            "highBallPredictionMaxPredictionS",
+            self.cfg.high_ball_prediction_max_prediction_s,
+            min_value=0.02,
+            max_value=1.0,
+        )
+        high_ball_prediction_stop_z_m = _payload_float(
+            payload,
+            "highBallPredictionStopZMinM",
+            self.cfg.high_ball_prediction_stop_z_m,
+            min_value=0.3,
+            max_value=2.5,
+        )
+        high_ball_prediction_drag_coefficient_per_m = _payload_float(
+            payload,
+            "highBallPredictionDragCoefficientPerM",
+            self.cfg.high_ball_prediction_drag_coefficient_per_m,
+            min_value=0.0,
+            max_value=2.0,
+        )
+        high_ball_prediction_integration_step_s = _payload_float(
+            payload,
+            "highBallPredictionIntegrationStepS",
+            self.cfg.high_ball_prediction_integration_step_s,
+            min_value=0.0005,
+            max_value=0.05,
+        )
+        high_ball_prediction_reacquisition_gate_m = _payload_float(
+            payload,
+            "highBallPredictionReacquisitionGateM",
+            self.cfg.high_ball_prediction_reacquisition_gate_m,
+            min_value=0.01,
+            max_value=1.0,
+        )
+        high_ball_reacquisition_velocity_frames = _payload_int(
+            payload,
+            "highBallReacquisitionVelocityFrames",
+            self.cfg.high_ball_reacquisition_velocity_frames,
+            min_value=2,
+            max_value=9,
+        )
+        high_ball_reacquisition_velocity_blend_s = _payload_float(
+            payload,
+            "highBallReacquisitionVelocityBlendS",
+            self.cfg.high_ball_reacquisition_velocity_blend_s,
+            min_value=0.005,
+            max_value=0.25,
+        )
         done_prediction_horizon_s = _payload_float(
             payload,
             "donePredictionHorizonS",
@@ -14915,9 +16873,14 @@ class PolicySafetyProbe:
             use_depth_sensor=bool(payload.get(
                 "cameraSensorDepth", self.cfg.use_depth_sensor)),
             depth_mode=(
-                str(payload.get("cameraDepthMode", "sensor")).strip().lower()
-                if str(payload.get("cameraDepthMode", "sensor")).strip().lower()
-                in ("sensor", "geometry") else "sensor"),
+                str(payload.get(
+                    "cameraDepthMode", self.cfg.camera_depth_mode)).strip().lower()
+                if str(payload.get(
+                    "cameraDepthMode", self.cfg.camera_depth_mode)).strip().lower()
+                in ("sensor", "geometry", "adaptive") else "sensor"),
+            sensor_surface_to_center_depth_enabled=bool(payload.get(
+                "cameraSensorSurfaceToCenterDepth",
+                self.cfg.enable_sensor_surface_to_center_depth)),
             use_undistort=bool(payload.get(
                 "cameraUndistort", self.cfg.use_undistort)),
             use_kalman=bool(payload.get(
@@ -14932,6 +16895,44 @@ class PolicySafetyProbe:
                     payload, "cameraDepthTemporalWindowFrames",
                     self.cfg.depth_temporal_window_frames,
                     min_value=1, max_value=9) | 1),
+            velocity_least_squares_enabled=bool(payload.get(
+                "cameraVelocityLeastSquares",
+                self.cfg.camera_velocity_least_squares)),
+            velocity_window_frames=_payload_int(
+                payload, "cameraVelocityWindowFrames",
+                self.cfg.camera_velocity_window_frames,
+                min_value=2, max_value=9),
+            clear_buffers_on_detection_loss_enabled=bool(payload.get(
+                "cameraClearBuffersOnDetectionLoss",
+                self.cfg.enable_camera_clear_buffers_on_loss)),
+            motion_consistency_gate_enabled=bool(payload.get(
+                "cameraMotionConsistencyGate",
+                self.cfg.enable_camera_motion_consistency_gate)),
+            physics_constrained_velocity_enabled=bool(payload.get(
+                "cameraPhysicsConstrainedVelocity",
+                self.cfg.enable_camera_physics_constrained_velocity)),
+            trajectory_position_smoothing_enabled=bool(payload.get(
+                "cameraTrajectoryPositionSmoothing",
+                self.cfg.enable_camera_trajectory_position_smoothing)),
+            impact_velocity_reset_enabled=bool(payload.get(
+                "cameraImpactVelocityReset",
+                self.cfg.camera_impact_velocity_reset)),
+            impact_min_downward_velocity_m_s=_payload_float(
+                payload, "cameraImpactMinDownwardVelocityMps",
+                self.cfg.camera_impact_min_downward_velocity_m_s,
+                min_value=0.0, max_value=10.0),
+            impact_min_upward_velocity_m_s=_payload_float(
+                payload, "cameraImpactMinUpwardVelocityMps",
+                self.cfg.camera_impact_min_upward_velocity_m_s,
+                min_value=0.0, max_value=10.0),
+            impact_min_velocity_jump_m_s=_payload_float(
+                payload, "cameraImpactMinVelocityJumpMps",
+                self.cfg.camera_impact_min_velocity_jump_m_s,
+                min_value=0.0, max_value=20.0),
+            impact_refractory_s=_payload_float(
+                payload, "cameraImpactRefractoryS",
+                self.cfg.camera_impact_refractory_s,
+                min_value=0.0, max_value=1.0),
             pixel_kalman_enabled=bool(payload.get(
                 "cameraPixelKalman", self.cfg.use_pixel_kalman)),
             pixel_kalman_process_noise_pos=_payload_float(
@@ -14980,9 +16981,71 @@ class PolicySafetyProbe:
             payload.get("workspaceSafetyMode", self.cfg.workspace_safety_mode),
             self.cfg.workspace_safety_mode,
         )
+        contact_action_shield = ContactActionShieldOptions(
+            enabled=bool(payload.get(
+                "enableContactActionShield",
+                self.cfg.enable_contact_action_shield)),
+            pre_contact_window_s=_payload_float(
+                payload, "contactShieldPreContactWindowS",
+                self.cfg.contact_shield_pre_contact_window_s,
+                min_value=0.0, max_value=0.5),
+            post_contact_window_s=_payload_float(
+                payload, "contactShieldPostContactWindowS",
+                self.cfg.contact_shield_post_contact_window_s,
+                min_value=0.0, max_value=0.5),
+            contact_tolerance_m=_payload_float(
+                payload, "contactShieldContactToleranceM",
+                self.cfg.contact_shield_contact_tolerance_m,
+                min_value=0.001, max_value=0.25),
+            max_lateral_distance_m=_payload_float(
+                payload, "contactShieldMaxLateralDistanceM",
+                self.cfg.contact_shield_max_lateral_distance_m,
+                min_value=0.005, max_value=0.5),
+            min_downward_velocity_m_s=_payload_float(
+                payload, "contactShieldMinDownwardVelocityMps",
+                self.cfg.contact_shield_min_downward_velocity_m_s,
+                min_value=0.0, max_value=10.0),
+            max_normal_lateral=_payload_float(
+                payload, "contactShieldMaxNormalLateral",
+                self.cfg.contact_shield_max_normal_lateral,
+                min_value=0.0, max_value=1.0),
+            max_lateral_speed_m_s=_payload_float(
+                payload, "contactShieldMaxLateralSpeedMps",
+                self.cfg.contact_shield_max_lateral_speed_m_s,
+                min_value=0.0, max_value=3.0),
+            workspace_margin_m=_payload_float(
+                payload, "contactShieldWorkspaceMarginM",
+                self.cfg.contact_shield_workspace_margin_m,
+                min_value=0.0, max_value=0.15),
+            dls_damping=_payload_float(
+                payload, "contactShieldDlsDamping",
+                self.cfg.contact_shield_dls_damping,
+                min_value=1.0e-6, max_value=1.0),
+            vertical_energy_enabled=bool(payload.get(
+                "enableVerticalContactEnergyShield",
+                self.cfg.enable_vertical_contact_energy_shield)),
+            vertical_pre_contact_window_s=_payload_float(
+                payload, "verticalContactPreContactWindowS",
+                self.cfg.vertical_contact_pre_contact_window_s,
+                min_value=0.01, max_value=0.5),
+            vertical_target_apex_height_m=_payload_float(
+                payload, "verticalContactTargetApexHeightM",
+                self.cfg.vertical_contact_target_apex_height_m,
+                min_value=0.02, max_value=1.0),
+            vertical_restitution=_payload_float(
+                payload, "verticalContactRestitution",
+                self.cfg.vertical_contact_restitution,
+                min_value=0.05, max_value=1.5),
+            vertical_max_racket_upward_speed_m_s=_payload_float(
+                payload, "verticalContactMaxRacketUpwardSpeedMps",
+                self.cfg.vertical_contact_max_racket_upward_speed_m_s,
+                min_value=0.0, max_value=3.0),
+        )
         enable_compensation = bool(payload.get(
             "enableCompensation", self.cfg.enable_compensation))
-        if policy_profile == OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67:
+        if policy_profile in {
+                OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+                OBSERVATION_PROFILE_SIMCODE6_QVEL67}:
             # Hardware is the checkpoint's actuator plant.  Applying any
             # software compensation here would duplicate the modeled joint
             # dynamics and invalidate both commands and observation history.
@@ -14991,6 +17054,10 @@ class PolicySafetyProbe:
         return RuntimeOptions(
             control_mode=control_mode,
             policy_profile=policy_profile,
+            enable_policy_dq_adapter=bool(payload.get(
+                "enablePolicyDqAdapter",
+                self.cfg.enable_policy_dq_adapter,
+            )),
             policy_observation_scales=policy_observation_scales,
             racket_tracking_height_offset_m=tracking_height_offset_m,
             racket_tracking_use_mpc=bool(payload.get(
@@ -15028,6 +17095,7 @@ class PolicySafetyProbe:
                 "enableLostFailsafe", self.cfg.enable_ball_lost_failsafe)),
             enable_done_monitoring=bool(payload.get(
                 "enableDoneMonitoring", self.cfg.enable_done_monitoring)),
+            contact_action_shield=contact_action_shield,
             workspace_safety_mode=workspace_mode,
             done_prediction_horizon_s=done_prediction_horizon_s,
             done_prediction_dt_s=done_prediction_dt_s,
@@ -15071,6 +17139,43 @@ class PolicySafetyProbe:
             estimator_q_depth_vel_mult=estimator_q_depth_vel_mult,
             estimator_r_lateral_mm=estimator_r_lateral_mm,
             estimator_r_depth_mm=estimator_r_depth_mm,
+            high_ball_occlusion_prediction=bool(payload.get(
+                "highBallOcclusionPrediction",
+                self.cfg.enable_high_ball_occlusion_prediction)),
+            sensor_depth_anomaly_prediction=bool(payload.get(
+                "sensorDepthAnomalyPrediction",
+                self.cfg.enable_sensor_depth_anomaly_prediction)),
+            high_ball_prediction_history_frames=(
+                high_ball_prediction_history_frames),
+            high_ball_prediction_activation_z_m=(
+                high_ball_prediction_activation_z_m),
+            high_ball_prediction_min_upward_velocity_m_s=(
+                high_ball_prediction_min_upward_velocity_m_s),
+            high_ball_prediction_max_prediction_s=(
+                high_ball_prediction_max_prediction_s),
+            high_ball_prediction_stop_z_m=high_ball_prediction_stop_z_m,
+            high_ball_prediction_drag_coefficient_per_m=(
+                high_ball_prediction_drag_coefficient_per_m),
+            high_ball_prediction_integration_step_s=(
+                high_ball_prediction_integration_step_s),
+            high_ball_prediction_reacquisition_gate_m=(
+                high_ball_prediction_reacquisition_gate_m),
+            high_ball_reacquisition_velocity_handover=bool(payload.get(
+                "highBallReacquisitionVelocityHandover",
+                self.cfg.enable_high_ball_reacquisition_velocity_handover)),
+            high_ball_reacquisition_velocity_frames=(
+                high_ball_reacquisition_velocity_frames),
+            high_ball_reacquisition_velocity_blend_s=(
+                high_ball_reacquisition_velocity_blend_s),
+            camera_control_time_compensation=bool(payload.get(
+                "cameraControlTimeCompensation",
+                self.cfg.enable_camera_control_time_compensation)),
+            camera_reacquisition_smoothing=bool(payload.get(
+                "cameraReacquisitionSmoothing",
+                self.cfg.enable_camera_reacquisition_smoothing)),
+            optimized_ball_prediction_initial_state=bool(payload.get(
+                "optimizedBallPredictionInitialState",
+                self.cfg.enable_optimized_ball_prediction_initial_state)),
             ball_observation_rate_hz=obs_rate,
             ball_source=ball_source,
             camera=camera_options,
@@ -15160,6 +17265,9 @@ class PolicySafetyProbe:
                         "visualize": bool(self.cfg.enable_camera_visualization),
                         "yolo": bool(self.cfg.enable_yolo),
                         "sensorDepth": bool(self.cfg.use_depth_sensor),
+                        "depthMode": str(self.cfg.camera_depth_mode),
+                        "sensorSurfaceToCenterDepth": bool(
+                            self.cfg.enable_sensor_surface_to_center_depth),
                         "undistort": bool(self.cfg.use_undistort),
                         "kalman": bool(self.cfg.use_kalman),
                         "irDepthKalman": bool(
@@ -15168,6 +17276,28 @@ class PolicySafetyProbe:
                             self.cfg.use_synchronized_ir_depth),
                         "depthTemporalWindowFrames": int(
                             self.cfg.depth_temporal_window_frames),
+                        "velocityLeastSquares": bool(
+                            self.cfg.camera_velocity_least_squares),
+                        "velocityWindowFrames": int(
+                            self.cfg.camera_velocity_window_frames),
+                        "clearBuffersOnDetectionLoss": bool(
+                            self.cfg.enable_camera_clear_buffers_on_loss),
+                        "motionConsistencyGate": bool(
+                            self.cfg.enable_camera_motion_consistency_gate),
+                        "physicsConstrainedVelocity": bool(
+                            self.cfg.enable_camera_physics_constrained_velocity),
+                        "trajectoryPositionSmoothing": bool(
+                            self.cfg.enable_camera_trajectory_position_smoothing),
+                        "impactVelocityReset": bool(
+                            self.cfg.camera_impact_velocity_reset),
+                        "impactMinDownwardVelocityMps": float(
+                            self.cfg.camera_impact_min_downward_velocity_m_s),
+                        "impactMinUpwardVelocityMps": float(
+                            self.cfg.camera_impact_min_upward_velocity_m_s),
+                        "impactMinVelocityJumpMps": float(
+                            self.cfg.camera_impact_min_velocity_jump_m_s),
+                        "impactRefractoryS": float(
+                            self.cfg.camera_impact_refractory_s),
                         "pixelKalman": bool(self.cfg.use_pixel_kalman),
                         "candidateFilter": bool(
                             self.cfg.enable_hybrid_candidate_filter),
@@ -15218,6 +17348,9 @@ class PolicySafetyProbe:
                 "visualize": bool(self.cfg.enable_camera_visualization),
                 "yolo": bool(self.cfg.enable_yolo),
                 "sensorDepth": bool(self.cfg.use_depth_sensor),
+                "depthMode": str(self.cfg.camera_depth_mode),
+                "sensorSurfaceToCenterDepth": bool(
+                    self.cfg.enable_sensor_surface_to_center_depth),
                 "undistort": bool(self.cfg.use_undistort),
                 "kalman": bool(self.cfg.use_kalman),
                 "irDepthKalman": bool(self.cfg.use_ir_depth_kalman),
@@ -15225,6 +17358,28 @@ class PolicySafetyProbe:
                     self.cfg.use_synchronized_ir_depth),
                 "depthTemporalWindowFrames": int(
                     self.cfg.depth_temporal_window_frames),
+                "velocityLeastSquares": bool(
+                    self.cfg.camera_velocity_least_squares),
+                "velocityWindowFrames": int(
+                    self.cfg.camera_velocity_window_frames),
+                "clearBuffersOnDetectionLoss": bool(
+                    self.cfg.enable_camera_clear_buffers_on_loss),
+                "motionConsistencyGate": bool(
+                    self.cfg.enable_camera_motion_consistency_gate),
+                "physicsConstrainedVelocity": bool(
+                    self.cfg.enable_camera_physics_constrained_velocity),
+                "trajectoryPositionSmoothing": bool(
+                    self.cfg.enable_camera_trajectory_position_smoothing),
+                "impactVelocityReset": bool(
+                    self.cfg.camera_impact_velocity_reset),
+                "impactMinDownwardVelocityMps": float(
+                    self.cfg.camera_impact_min_downward_velocity_m_s),
+                "impactMinUpwardVelocityMps": float(
+                    self.cfg.camera_impact_min_upward_velocity_m_s),
+                "impactMinVelocityJumpMps": float(
+                    self.cfg.camera_impact_min_velocity_jump_m_s),
+                "impactRefractoryS": float(
+                    self.cfg.camera_impact_refractory_s),
                 "pixelKalman": bool(self.cfg.use_pixel_kalman),
                 "candidateFilter": bool(
                     self.cfg.enable_hybrid_candidate_filter),
@@ -15416,6 +17571,10 @@ class PolicySafetyProbe:
             policy_obs_unscaled = np.asarray(
                 trace.get("obsUnscaled", trace["obs"]), dtype=np.float32)
             policy_action = np.asarray(trace["action"], dtype=np.float32)
+            policy_executed_action = np.asarray(
+                trace.get("executedAction", trace["action"]),
+                dtype=np.float32,
+            )
             policy_cmd = {
                 "position": np.asarray(trace["position"], dtype=np.float32),
                 "velocity": np.asarray(trace["velocity"], dtype=np.float32),
@@ -15428,6 +17587,10 @@ class PolicySafetyProbe:
                 obs_action.get("obs_unscaled", obs_action["obs"]),
                 dtype=np.float32)
             policy_action = np.asarray(obs_action["action"], dtype=np.float32)
+            policy_executed_action = np.asarray(
+                obs_action.get("executed_action", obs_action["action"]),
+                dtype=np.float32,
+            )
             policy_cmd = cmd
         policy_racket = (
             np.asarray(policy_obs[26:29], dtype=np.float32)
@@ -15436,6 +17599,15 @@ class PolicySafetyProbe:
         estimator_payload = (
             self.last_estimator_info
             if isinstance(self.last_estimator_info, dict) else {}
+        )
+        high_occlusion_payload = (
+            self.last_high_ball_occlusion_info
+            if isinstance(self.last_high_ball_occlusion_info, dict) else {}
+        )
+        prediction_payload = (
+            high_occlusion_payload
+            if bool(high_occlusion_payload.get("predicted", False))
+            else estimator_payload
         )
         command_racket = None
         command_racket_fk_ok = False
@@ -15490,7 +17662,7 @@ class PolicySafetyProbe:
             _overlay_policy_trace_joint_feedback(
                 ros_light, trace, policy_obs)
         sample = {
-            "schemaVersion": 8,
+            "schemaVersion": 9,
             "sourceSeq": int(source_seq),
             "sourceTimeS": round(float(source_time_s), 9),
             "ballObservationSeq": int(ball_observation_seq),
@@ -15524,11 +17696,11 @@ class PolicySafetyProbe:
             # Exact six-dimensional ball slice consumed by the policy:
             # [x, y, z, vx, vy, vz].
             "ballState6D": _float32_vector(policy_obs[20:26]),
-            "predictedBall": _point_or_none(estimator_payload.get("positionM")),
+            "predictedBall": _point_or_none(prediction_payload.get("positionM")),
             "predictedVelocity": _point_or_none(
-                estimator_payload.get("velocityMps")),
+                prediction_payload.get("velocityMps")),
             "predictedBallIsPredicted": bool(
-                estimator_payload.get("predicted", False)),
+                prediction_payload.get("predicted", False)),
             "racket": (
                 _rounded_vector(policy_racket)
                 if policy_racket is not None else None),
@@ -15547,9 +17719,23 @@ class PolicySafetyProbe:
             "noiseStdM": round(float(noise_std_m), 6),
             "policyObs": _rounded_vector(policy_obs),
             "policyObsUnscaled": _rounded_vector(policy_obs_unscaled),
+            "policyDqAdapter": dict(
+                trace.get("policyDqAdapter", self.last_policy_dq_adapter_info)
+                if trace is not None
+                else self.last_policy_dq_adapter_info),
             "policyBallObservation": _float32_vector(
                 policy_obs[20:26]),
             "policyAction": _rounded_vector(policy_action),
+            "policyExecutedAction": _rounded_vector(
+                policy_executed_action),
+            "rawPolicyCommand": {
+                "position": _rounded_vector(
+                    trace.get("rawPosition", policy_cmd["position"])
+                    if trace is not None else policy_cmd["position"]),
+                "velocity": _rounded_vector(
+                    trace.get("rawVelocity", policy_cmd["velocity"])
+                    if trace is not None else policy_cmd["velocity"]),
+            },
             "policyCommand": {
                 "position": _rounded_vector(policy_cmd["position"]),
                 "velocity": _rounded_vector(policy_cmd["velocity"]),
@@ -15572,6 +17758,8 @@ class PolicySafetyProbe:
                 "hardWorkspaceStop": self._hard_workspace_stop_payload(),
                 "softWorkspaceReset": self._soft_workspace_reset_payload(),
                 "resetRecovery": self._reset_recovery_payload(),
+                "contactActionShield": dict(
+                    self.last_contact_action_shield_info),
                 "compensation": self._compensation_payload(
                     self._real_compensation_options(options)),
                 "servoPlanner": {
@@ -15628,11 +17816,16 @@ class PolicySafetyProbe:
                 "policyProfile": str(options.policy_profile),
                 "activePolicyProfile": str(self.active_policy_profile),
                 "policyGeneration": int(self.policy_generation),
+                "policyContract": _policy_runtime_contract(self.controller),
                 "policyObservationScales": [round(float(value), 6)
                     for value in options.policy_observation_scales],
                 "policyObservationScaleIndices": [index for index, value in
                     enumerate(options.policy_observation_scales)
                     if abs(float(value) - 1.0) > 1e-7],
+                "enablePolicyDqAdapter": bool(
+                    options.enable_policy_dq_adapter),
+                "policyDqAdapter": dict(
+                    self.last_policy_dq_adapter_info),
                 "resetInitialPose": str(self.reset_initial_pose_id),
                 "resetInitialJointPosition": _rounded_vector(
                     self._current_reset_pose_q()),
@@ -15661,6 +17854,16 @@ class PolicySafetyProbe:
                 "estimatorOutputMode": str(options.estimator_output_mode),
                 "estimatorReleaseGatedDynamics": bool(
                     options.estimator_release_gated_dynamics),
+                "highBallOcclusionPrediction": bool(
+                    options.high_ball_occlusion_prediction),
+                "sensorDepthAnomalyPrediction": bool(
+                    options.sensor_depth_anomaly_prediction),
+                "cameraControlTimeCompensation": bool(
+                    options.camera_control_time_compensation),
+                "cameraReacquisitionSmoothing": bool(
+                    options.camera_reacquisition_smoothing),
+                "optimizedBallPredictionInitialState": bool(
+                    options.optimized_ball_prediction_initial_state),
                 "releaseGate": bool(options.enable_ball_release_gate),
                 "releaseUseEstimatorState": bool(
                     options.ball_release_use_estimator_state),
@@ -15675,10 +17878,14 @@ class PolicySafetyProbe:
                     float(options.done_prediction_margin_m), 6),
                 "donePredictionOrientationMarginRad": round(
                     float(options.done_prediction_orientation_margin_rad), 6),
+                "contactActionShield": (
+                    options.contact_action_shield.payload()),
             },
             "tracking": dict(self.last_tracking_info),
             "juggle": dict(self.last_juggle_info),
             "estimator": dict(self.last_estimator_info),
+            "highBallOcclusionPrediction": dict(
+                self.last_high_ball_occlusion_info),
             "releaseGate": dict(self.last_release_gate_info),
             "ros": ros_light,
             "simSyncLatest": dict(
@@ -15709,10 +17916,19 @@ class PolicySafetyProbe:
             include_feedback=make_snapshot)
         measured_p, measured_v = self._apply_ball_noise(
             ball_pos, ball_vel, valid, noise_std_m)
+        (
+            policy_measured_p,
+            policy_measured_v,
+            policy_measured_valid,
+            policy_measurement_stamp_s,
+            high_ball_occlusion_info,
+        ) = self._resolve_high_ball_occlusion_state(
+            measured_p, measured_v, valid, ball_stamp_s, options,
+            camera_measurement)
         obs_p, obs_v, control_valid, age_override_s, estimator_info = (
             self._resolve_control_ball_state(
-                measured_p, measured_v, valid, options,
-                measurement_stamp_s=ball_stamp_s))
+                policy_measured_p, policy_measured_v, policy_measured_valid,
+                options, measurement_stamp_s=policy_measurement_stamp_s))
         # Reentry reset must happen before this tick's fractional sampling.
         # Resetting later inside `_run_one_control_step` would leave the first
         # actor observation with the release-gate sampler's stale age/phase.
@@ -15726,11 +17942,28 @@ class PolicySafetyProbe:
                     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
                     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
                     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+                    OBSERVATION_PROFILE_SIMCODE6_QVEL67,
                 }):
             self._reset_policy_ball_sampling_contract()
         obs_p, obs_v, control_valid, age_override_s = (
             self._apply_policy_ball_sampling_contract(
-                obs_p, obs_v, control_valid, age_override_s, options))
+                obs_p, obs_v, control_valid, age_override_s, options,
+                force_invalidate=bool(
+                    high_ball_occlusion_info.get("enabled", False)
+                    and not policy_measured_valid),
+                source_timestamp_s=ball_stamp_s,
+                force_fresh_source=bool(
+                    getattr(options, "ball_source", "") == "camera"
+                    and (
+                        high_ball_occlusion_info.get("state") in {
+                            "reacquisition_handover",
+                            "reacquisition_smoothing",
+                        }
+                        or bool(
+                            isinstance(camera_measurement, dict)
+                            and camera_measurement.get(
+                                "velocity_impact_detected", False)))),
+            ))
         release_kwargs = {}
         if not options.ball_release_use_estimator_state:
             release_kwargs = {
@@ -15759,6 +17992,7 @@ class PolicySafetyProbe:
         self.last_measured_ball_pos = measured_p.copy()
         self.last_measured_ball_vel = measured_v.copy()
         self.last_estimator_info = estimator_info
+        self.last_high_ball_occlusion_info = high_ball_occlusion_info
         active_command_mode = mode in {
             "policy", "racket_tracking", "mpc_juggle"}
         command_profile = (
@@ -15792,13 +18026,16 @@ class PolicySafetyProbe:
         if policy_executed and mode != "policy":
             self.sim_needs_policy_reset = True
         if make_snapshot and self.ros_bridge is not None and self.cfg.enable_camera_ball:
-            racket_pos, _fk_ok = self._racket_pos()
+            racket_pos, racket_state_valid = self._racket_pos()
             if options.publish_commands:
                 ros_racket_pos, ros_fk_ok = self._ros_joint_racket_pos()
                 if ros_fk_ok and ros_racket_pos is not None:
                     racket_pos = ros_racket_pos
+                racket_state_valid = bool(
+                    ros_fk_ok and ros_racket_pos is not None)
             self.ros_bridge.set_policy_viz_state(
-                obs_p, obs_v, control_valid, self.anchor(), racket_pos)
+                obs_p, obs_v, control_valid, self.anchor(), racket_pos,
+                racket_state_valid)
         self._record_control_sample(
             source_seq=source_seq,
             source_time_s=float(self.now_s),
@@ -15963,10 +18200,20 @@ class PolicySafetyProbe:
                 p = start_pos * (1.0 - alpha) + ball_pos * alpha
                 v = start_vel * (1.0 - alpha) + ball_vel * alpha
                 measured_p, measured_v = self._apply_ball_noise(p, v, valid, noise_std_m)
+                (
+                    policy_measured_p,
+                    policy_measured_v,
+                    policy_measured_valid,
+                    policy_measurement_stamp_s,
+                    high_ball_occlusion_info,
+                ) = self._resolve_high_ball_occlusion_state(
+                    measured_p, measured_v, valid, ball_stamp_s, options,
+                    camera_measurement)
                 obs_p, obs_v, control_valid, age_override_s, estimator_info = (
                     self._resolve_control_ball_state(
-                        measured_p, measured_v, valid, options,
-                        measurement_stamp_s=ball_stamp_s))
+                        policy_measured_p, policy_measured_v,
+                        policy_measured_valid, options,
+                        measurement_stamp_s=policy_measurement_stamp_s))
                 release_kwargs = {}
                 if not options.ball_release_use_estimator_state:
                     release_kwargs = {
@@ -16008,13 +18255,16 @@ class PolicySafetyProbe:
                     self.sim_needs_policy_reset = True
                 self.control_loop_tick += 1
             if self.ros_bridge is not None and self.cfg.enable_camera_ball:
-                racket_pos, _fk_ok = self._racket_pos()
+                racket_pos, racket_state_valid = self._racket_pos()
                 if options.publish_commands:
                     ros_racket_pos, ros_fk_ok = self._ros_joint_racket_pos()
                     if ros_fk_ok and ros_racket_pos is not None:
                         racket_pos = ros_racket_pos
+                    racket_state_valid = bool(
+                        ros_fk_ok and ros_racket_pos is not None)
                 self.ros_bridge.set_policy_viz_state(
-                    obs_p, obs_v, control_valid, self.anchor(), racket_pos)
+                    obs_p, obs_v, control_valid, self.anchor(), racket_pos,
+                    racket_state_valid)
             self.last_ball_pos = ball_pos.copy()
             self.last_ball_vel = ball_vel.copy()
             self.last_observed_ball_pos = obs_p.copy()
@@ -16022,6 +18272,7 @@ class PolicySafetyProbe:
             self.last_measured_ball_pos = measured_p.copy()
             self.last_measured_ball_vel = measured_v.copy()
             self.last_estimator_info = estimator_info
+            self.last_high_ball_occlusion_info = high_ball_occlusion_info
             command_published = False
             if options.publish_commands or self._hard_workspace_stop_active():
                 active_command_mode = mode in {
@@ -16123,6 +18374,16 @@ class PolicySafetyProbe:
                 "policyProfile": str(self.cfg.policy_profile),
                 "activePolicyProfile": str(self.active_policy_profile),
                 "policyGeneration": int(self.policy_generation),
+                "policyContract": _policy_runtime_contract(self.controller),
+                "policyObservationScales": list(
+                    _default_policy_observation_scales(
+                        self.cfg.policy_obs_dim,
+                        self.cfg.policy_dq_observation_scale,
+                    )),
+                "enablePolicyDqAdapter": bool(
+                    self.cfg.enable_policy_dq_adapter),
+                "policyDqAdapter": dict(
+                    self.last_policy_dq_adapter_info),
                 "resetInitialPose": str(self.reset_initial_pose_id),
                 "resetInitialJointPosition": _rounded_vector(
                     self._current_reset_pose_q()),
@@ -16165,10 +18426,44 @@ class PolicySafetyProbe:
                     float(self.cfg.done_prediction_margin_m), 6),
                 "donePredictionOrientationMarginRad": round(
                     float(self.cfg.done_prediction_orientation_margin_rad), 6),
+                "contactActionShield": ContactActionShieldOptions(
+                    enabled=self.cfg.enable_contact_action_shield,
+                    pre_contact_window_s=(
+                        self.cfg.contact_shield_pre_contact_window_s),
+                    post_contact_window_s=(
+                        self.cfg.contact_shield_post_contact_window_s),
+                    contact_tolerance_m=(
+                        self.cfg.contact_shield_contact_tolerance_m),
+                    max_lateral_distance_m=(
+                        self.cfg.contact_shield_max_lateral_distance_m),
+                    min_downward_velocity_m_s=(
+                        self.cfg.contact_shield_min_downward_velocity_m_s),
+                    max_normal_lateral=(
+                        self.cfg.contact_shield_max_normal_lateral),
+                    max_lateral_speed_m_s=(
+                        self.cfg.contact_shield_max_lateral_speed_m_s),
+                    workspace_margin_m=(
+                        self.cfg.contact_shield_workspace_margin_m),
+                    dls_damping=self.cfg.contact_shield_dls_damping,
+                    vertical_energy_enabled=(
+                        self.cfg.enable_vertical_contact_energy_shield),
+                    vertical_pre_contact_window_s=(
+                        self.cfg.vertical_contact_pre_contact_window_s),
+                    vertical_target_apex_height_m=(
+                        self.cfg.vertical_contact_target_apex_height_m),
+                    vertical_restitution=(
+                        self.cfg.vertical_contact_restitution),
+                    vertical_max_racket_upward_speed_m_s=(
+                        self.cfg.vertical_contact_max_racket_upward_speed_m_s),
+                ).payload(),
                 "enableSimMirror": bool(self.cfg.sim_mirror_default_enabled),
                 "estimatorBackend": (
                     "hybrid_ekf9"
                     if self.cfg.enable_hybrid_ball_tracker else "legacy_kf6"),
+                "highBallOcclusionPrediction": bool(
+                    self.cfg.enable_high_ball_occlusion_prediction),
+                "sensorDepthAnomalyPrediction": bool(
+                    self.cfg.enable_sensor_depth_anomaly_prediction),
             }
         else:
             runtime_payload = {
@@ -16176,11 +18471,16 @@ class PolicySafetyProbe:
                 "policyProfile": str(runtime_options.policy_profile),
                 "activePolicyProfile": str(self.active_policy_profile),
                 "policyGeneration": int(self.policy_generation),
+                "policyContract": _policy_runtime_contract(self.controller),
                 "policyObservationScales": [round(float(value), 6)
                     for value in runtime_options.policy_observation_scales],
                 "policyObservationScaleIndices": [index for index, value in
                     enumerate(runtime_options.policy_observation_scales)
                     if abs(float(value) - 1.0) > 1e-7],
+                "enablePolicyDqAdapter": bool(
+                    runtime_options.enable_policy_dq_adapter),
+                "policyDqAdapter": dict(
+                    self.last_policy_dq_adapter_info),
                 "resetInitialPose": str(self.reset_initial_pose_id),
                 "resetInitialJointPosition": _rounded_vector(
                     self._current_reset_pose_q()),
@@ -16244,6 +18544,8 @@ class PolicySafetyProbe:
                     float(runtime_options.done_prediction_margin_m), 6),
                 "donePredictionOrientationMarginRad": round(
                     float(runtime_options.done_prediction_orientation_margin_rad), 6),
+                "contactActionShield": (
+                    runtime_options.contact_action_shield.payload()),
                 "enableSimMirror": bool(runtime_options.enable_sim_mirror),
                 "estimatorBackend": (
                     "hybrid_ekf9"
@@ -16287,6 +18589,38 @@ class PolicySafetyProbe:
                     float(runtime_options.estimator_r_lateral_mm), 6),
                 "estimatorRDepthMm": round(
                     float(runtime_options.estimator_r_depth_mm), 6),
+                "highBallOcclusionPrediction": bool(
+                    runtime_options.high_ball_occlusion_prediction),
+                "sensorDepthAnomalyPrediction": bool(
+                    runtime_options.sensor_depth_anomaly_prediction),
+                "highBallPredictionHistoryFrames": int(
+                    runtime_options.high_ball_prediction_history_frames),
+                "highBallPredictionActivationZMinM": round(float(
+                    runtime_options.high_ball_prediction_activation_z_m), 6),
+                "highBallPredictionMinUpwardVelocityMps": round(float(
+                    runtime_options.high_ball_prediction_min_upward_velocity_m_s), 6),
+                "highBallPredictionMaxPredictionS": round(float(
+                    runtime_options.high_ball_prediction_max_prediction_s), 6),
+                "highBallPredictionStopZMinM": round(float(
+                    runtime_options.high_ball_prediction_stop_z_m), 6),
+                "highBallPredictionDragCoefficientPerM": round(float(
+                    runtime_options.high_ball_prediction_drag_coefficient_per_m), 6),
+                "highBallPredictionIntegrationStepS": round(float(
+                    runtime_options.high_ball_prediction_integration_step_s), 6),
+                "highBallPredictionReacquisitionGateM": round(float(
+                    runtime_options.high_ball_prediction_reacquisition_gate_m), 6),
+                "highBallReacquisitionVelocityHandover": bool(
+                    runtime_options.high_ball_reacquisition_velocity_handover),
+                "highBallReacquisitionVelocityFrames": int(
+                    runtime_options.high_ball_reacquisition_velocity_frames),
+                "highBallReacquisitionVelocityBlendS": round(float(
+                    runtime_options.high_ball_reacquisition_velocity_blend_s), 6),
+                "cameraControlTimeCompensation": bool(
+                    runtime_options.camera_control_time_compensation),
+                "cameraReacquisitionSmoothing": bool(
+                    runtime_options.camera_reacquisition_smoothing),
+                "optimizedBallPredictionInitialState": bool(
+                    runtime_options.optimized_ball_prediction_initial_state),
             }
         lease_remaining_ms = max(
             0.0,
@@ -16437,9 +18771,26 @@ class PolicySafetyProbe:
             "noiseStdM": round(float(noise_std_m), 6),
             "ballSource": str(ball_source),
             "runtime": runtime_payload,
+            "policyDqAdapter": dict(
+                self.last_policy_dq_adapter_info),
             "tracking": dict(self.last_tracking_info),
             "juggle": dict(self.last_juggle_info),
             "estimator": estimator_info,
+            "highBallOcclusionPrediction": dict(
+                self.last_high_ball_occlusion_info),
+            "predictedBall": _point_or_none(
+                self.last_high_ball_occlusion_info.get("positionM")
+                if bool(self.last_high_ball_occlusion_info.get(
+                    "predicted", False))
+                else estimator_info.get("positionM")),
+            "predictedVelocity": _point_or_none(
+                self.last_high_ball_occlusion_info.get("velocityMps")
+                if bool(self.last_high_ball_occlusion_info.get(
+                    "predicted", False))
+                else estimator_info.get("velocityMps")),
+            "predictedBallIsPredicted": bool(
+                self.last_high_ball_occlusion_info.get("predicted", False)
+                or estimator_info.get("predicted", False)),
             "compensation": self._compensation_payload(
                 None if runtime_options is None
                 else self._real_compensation_options(runtime_options)),
@@ -16469,6 +18820,8 @@ class PolicySafetyProbe:
                     self.workspace_soft_prediction_active),
                 "filter": dict(self.workspace_soft_filter),
             },
+            "contactActionShield": dict(
+                self.last_contact_action_shield_info),
             "racket": [round(float(x), 6) for x in racket_pos],
             "racketSource": racket_source,
             "commandRacket": [round(float(x), 6) for x in cmd_racket_pos],
@@ -16482,6 +18835,13 @@ class PolicySafetyProbe:
             "jointAcceleration": [round(float(x), 6) for x in cmd["acceleration"]],
             "action": [round(float(x), 6) for x in obs_action["action"]],
             "actionAbsMax": round(float(np.max(np.abs(obs_action["action"]))), 6),
+            "executedAction": [
+                round(float(x), 6) for x in obs_action.get(
+                    "executed_action", obs_action["action"])
+            ],
+            "executedActionAbsMax": round(float(np.max(np.abs(
+                obs_action.get("executed_action", obs_action["action"])
+            ))), 6),
             "policyTrace": {
                 "obs": [round(float(x), 6) for x in obs_action["obs"]],
                 "obsUnscaled": [
@@ -16489,6 +18849,10 @@ class PolicySafetyProbe:
                     for x in obs_action.get("obs_unscaled", obs_action["obs"])
                 ],
                 "action": [round(float(x), 6) for x in obs_action["action"]],
+                "executedAction": [
+                    round(float(x), 6) for x in obs_action.get(
+                        "executed_action", obs_action["action"])
+                ],
                 "commandPosition": [round(float(x), 6) for x in cmd["position"]],
                 "commandVelocity": [round(float(x), 6) for x in cmd["velocity"]],
                 "commandAcceleration": [
@@ -16535,6 +18899,11 @@ class PolicySafetyProbe:
                 self.cfg.simcode5_model_path,
                 self.cfg.simcode5_policy_xml_path,
                 self.cfg.simcode5_sim_xml_path,
+            ),
+            OBSERVATION_PROFILE_SIMCODE6_QVEL67: (
+                self.cfg.simcode6_model_path,
+                self.cfg.simcode6_policy_xml_path,
+                self.cfg.simcode6_sim_xml_path,
             ),
         }
         (
@@ -16661,12 +19030,30 @@ class PolicySafetyProbe:
                 "mpcDeltaWeight": 0.0,
                 "mpcMaxDeltaRad": 0.0,
             },
+            OBSERVATION_PROFILE_SIMCODE6_QVEL67: {
+                "mode": "none",
+                "delayMs": 45.0,
+                "tauS": 0.0,
+                "gain": 1.0,
+                "mpcBeta": 0.0,
+                "mpcDelayScale": 1.0,
+                "mpcTauScale": 1.0,
+                "mpcHorizonSteps": 1,
+                "mpcTrackingWeight": 0.0,
+                "mpcNominalWeight": 0.0,
+                "mpcDeltaWeight": 0.0,
+                "mpcMaxDeltaRad": 0.0,
+            },
         }
         # Preserve explicit launch overrides for the profile used at startup;
         # the inactive profile retains its own known-good defaults.
         compensation_profile_defaults[
             normalize_observation_profile(self.cfg.policy_profile)
         ] = dict(active_compensation_defaults)
+        policy_profile_contracts = {
+            str(profile): _policy_runtime_contract(controller)
+            for profile, controller in self.policy_controllers.items()
+        }
         margin = 0.18
         return {
             "controlRateHz": self.cfg.control_rate_hz,
@@ -16738,9 +19125,14 @@ class PolicySafetyProbe:
                 "policyXmlPath": str(active_policy_xml_path),
                 "observationDim": int(self.cfg.policy_obs_dim),
                 "observationNames": _obs_names(int(self.cfg.policy_obs_dim)),
+                "profileContracts": policy_profile_contracts,
                 "observationScale": {
-                    "scales": [1.0] * int(self.cfg.policy_obs_dim),
+                    "scales": list(_default_policy_observation_scales(
+                        self.cfg.policy_obs_dim,
+                        self.cfg.policy_dq_observation_scale,
+                    )),
                 },
+                "dqAdapter": self.policy_dq_adapter.config.payload(),
                 "useValidBallObsAge": bool(self.cfg.rl_use_valid_ball_obs_age),
                 "resetBall": dict(getattr(
                     self, "reset_ball_contract", {}) or {}),
@@ -16791,6 +19183,36 @@ class PolicySafetyProbe:
                 "triggerMarginM": self.cfg.workspace_hold_trigger_margin_m,
                 "releasePolicy": "candidate_fk_moves_inward",
             },
+            "contactActionShield": ContactActionShieldOptions(
+                enabled=self.cfg.enable_contact_action_shield,
+                pre_contact_window_s=(
+                    self.cfg.contact_shield_pre_contact_window_s),
+                post_contact_window_s=(
+                    self.cfg.contact_shield_post_contact_window_s),
+                contact_tolerance_m=(
+                    self.cfg.contact_shield_contact_tolerance_m),
+                max_lateral_distance_m=(
+                    self.cfg.contact_shield_max_lateral_distance_m),
+                min_downward_velocity_m_s=(
+                    self.cfg.contact_shield_min_downward_velocity_m_s),
+                max_normal_lateral=(
+                    self.cfg.contact_shield_max_normal_lateral),
+                max_lateral_speed_m_s=(
+                    self.cfg.contact_shield_max_lateral_speed_m_s),
+                workspace_margin_m=(
+                    self.cfg.contact_shield_workspace_margin_m),
+                dls_damping=self.cfg.contact_shield_dls_damping,
+                vertical_energy_enabled=(
+                    self.cfg.enable_vertical_contact_energy_shield),
+                vertical_pre_contact_window_s=(
+                    self.cfg.vertical_contact_pre_contact_window_s),
+                vertical_target_apex_height_m=(
+                    self.cfg.vertical_contact_target_apex_height_m),
+                vertical_restitution=(
+                    self.cfg.vertical_contact_restitution),
+                vertical_max_racket_upward_speed_m_s=(
+                    self.cfg.vertical_contact_max_racket_upward_speed_m_s),
+            ).payload(),
             "simMirror": {
                 "enabled": bool(self.cfg.enable_sim_mirror),
                 "defaultEnabled": bool(self.cfg.sim_mirror_default_enabled),
@@ -16844,6 +19266,55 @@ class PolicySafetyProbe:
                 "rLateralMm": self.cfg.ball_estimator_r_lateral_mm,
                 "rDepthMm": self.cfg.ball_estimator_r_depth_mm,
             },
+            "highBallOcclusionPrediction": {
+                "enabled": bool(
+                    self.cfg.enable_high_ball_occlusion_prediction),
+                "sensorDepthAnomalyPrediction": bool(
+                    self.cfg.enable_sensor_depth_anomaly_prediction),
+                "model": (
+                    "robust_xy_gravity_z_neutral_paper_drag"
+                    if self.cfg.enable_optimized_ball_prediction_initial_state
+                    else "iros2249_ls_gravity_quadratic_drag"),
+                "visibleMeasurementsPassThrough": bool(
+                    not (
+                        self.cfg.enable_high_ball_reacquisition_velocity_handover
+                        or self.cfg.enable_camera_control_time_compensation
+                        or self.cfg.enable_camera_reacquisition_smoothing)),
+                "visiblePositionsPassThrough": bool(not (
+                    self.cfg.enable_camera_control_time_compensation
+                    or self.cfg.enable_camera_reacquisition_smoothing)),
+                "cameraOnly": True,
+                "mutuallyExclusiveWithBallEstimator": True,
+                "historyFrames": int(
+                    self.cfg.high_ball_prediction_history_frames),
+                "activationZMinM": float(
+                    self.cfg.high_ball_prediction_activation_z_m),
+                "minUpwardVelocityMps": float(
+                    self.cfg.high_ball_prediction_min_upward_velocity_m_s),
+                "maxPredictionS": float(
+                    self.cfg.high_ball_prediction_max_prediction_s),
+                "stopPredictionZMinM": float(
+                    self.cfg.high_ball_prediction_stop_z_m),
+                "dragCoefficientPerM": float(
+                    self.cfg.high_ball_prediction_drag_coefficient_per_m),
+                "gravityMps2": 9.8,
+                "integrationStepS": float(
+                    self.cfg.high_ball_prediction_integration_step_s),
+                "reacquisitionGateM": float(
+                    self.cfg.high_ball_prediction_reacquisition_gate_m),
+                "reacquisitionVelocityHandover": bool(
+                    self.cfg.enable_high_ball_reacquisition_velocity_handover),
+                "reacquisitionVelocityFrames": int(
+                    self.cfg.high_ball_reacquisition_velocity_frames),
+                "reacquisitionVelocityBlendS": float(
+                    self.cfg.high_ball_reacquisition_velocity_blend_s),
+                "controlTimeCompensation": bool(
+                    self.cfg.enable_camera_control_time_compensation),
+                "reacquisitionSmoothing": bool(
+                    self.cfg.enable_camera_reacquisition_smoothing),
+                "optimizedInitialState": bool(
+                    self.cfg.enable_optimized_ball_prediction_initial_state),
+            },
             "parking": {
                 "velocityScale": self.cfg.safety_parking_velocity_scale,
                 "accelerationScale": (
@@ -16871,7 +19342,9 @@ class PolicySafetyProbe:
                 "sourceMode": self.cfg.camera_source_mode,
                 "useHybridDetector": bool(self.cfg.use_hybrid_detector),
                 "useDepthSensor": bool(self.cfg.use_depth_sensor),
-                "depthMode": "sensor",
+                "depthMode": str(self.cfg.camera_depth_mode),
+                "sensorSurfaceToCenterDepth": bool(
+                    self.cfg.enable_sensor_surface_to_center_depth),
                 "imageWidth": int(self.cfg.image_width),
                 "imageHeight": int(self.cfg.image_height),
                 "realsenseFps": int(self.cfg.realsense_fps),
@@ -16890,7 +19363,9 @@ class PolicySafetyProbe:
                     "visualize": bool(self.cfg.enable_camera_visualization),
                     "yolo": bool(self.cfg.enable_yolo),
                     "sensorDepth": bool(self.cfg.use_depth_sensor),
-                    "depthMode": "sensor",
+                    "depthMode": str(self.cfg.camera_depth_mode),
+                    "sensorSurfaceToCenterDepth": bool(
+                        self.cfg.enable_sensor_surface_to_center_depth),
                     "undistort": bool(self.cfg.use_undistort),
                     "kalman": bool(self.cfg.use_kalman),
                     "irDepthKalman": bool(
@@ -16899,6 +19374,28 @@ class PolicySafetyProbe:
                         self.cfg.use_synchronized_ir_depth),
                     "depthTemporalWindowFrames": int(
                         self.cfg.depth_temporal_window_frames),
+                    "velocityLeastSquares": bool(
+                        self.cfg.camera_velocity_least_squares),
+                    "velocityWindowFrames": int(
+                        self.cfg.camera_velocity_window_frames),
+                    "clearBuffersOnDetectionLoss": bool(
+                        self.cfg.enable_camera_clear_buffers_on_loss),
+                    "motionConsistencyGate": bool(
+                        self.cfg.enable_camera_motion_consistency_gate),
+                    "physicsConstrainedVelocity": bool(
+                        self.cfg.enable_camera_physics_constrained_velocity),
+                    "trajectoryPositionSmoothing": bool(
+                        self.cfg.enable_camera_trajectory_position_smoothing),
+                    "impactVelocityReset": bool(
+                        self.cfg.camera_impact_velocity_reset),
+                    "impactMinDownwardVelocityMps": float(
+                        self.cfg.camera_impact_min_downward_velocity_m_s),
+                    "impactMinUpwardVelocityMps": float(
+                        self.cfg.camera_impact_min_upward_velocity_m_s),
+                    "impactMinVelocityJumpMps": float(
+                        self.cfg.camera_impact_min_velocity_jump_m_s),
+                    "impactRefractoryS": float(
+                        self.cfg.camera_impact_refractory_s),
                     "pixelKalman": bool(self.cfg.use_pixel_kalman),
                     "pixelKalmanProcessNoisePos": (
                         self.cfg.pixel_kalman_process_noise_pos),
@@ -17435,6 +19932,25 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div class="row"><label for="z">ball z</label><input id="z" type="number" step="0.005"></div>
       <div class="row"><label for="noise">noise mm</label><input id="noise" type="number" min="0" step="0.5"></div>
       <div class="row"><label for="obsHz">ball obs hz</label><input id="obsHz" type="number" min="1" max="240" step="1"></div>
+      <div class="section-title">Camera Velocity / Impact</div>
+      <div class="section-note">右侧 LS velocity 与 impact reset 控制开关；仅在 IR+depth 3D KF 关闭时决定策略使用的相机速度。</div>
+      <div class="row"><label for="cameraVelocityWindowFrames">velocity frames</label><input id="cameraVelocityWindowFrames" type="number" min="2" max="9" step="1"></div>
+      <div class="row"><label for="cameraImpactMinDownwardVelocityMps">impact down m/s</label><input id="cameraImpactMinDownwardVelocityMps" type="number" min="0" max="10" step="0.05"></div>
+      <div class="row"><label for="cameraImpactMinUpwardVelocityMps">impact up m/s</label><input id="cameraImpactMinUpwardVelocityMps" type="number" min="0" max="10" step="0.05"></div>
+      <div class="row"><label for="cameraImpactMinVelocityJumpMps">impact jump m/s</label><input id="cameraImpactMinVelocityJumpMps" type="number" min="0" max="20" step="0.05"></div>
+      <div class="row"><label for="cameraImpactRefractoryS">impact refractory s</label><input id="cameraImpactRefractoryS" type="number" min="0" max="1" step="0.01"></div>
+      <div class="section-title">High-FOV Ball Prediction</div>
+      <div class="section-note">论文 IROS2249 模型：仅在高位上升球出视野时，以最近 N 个可见位置拟合并短时外推；正常可见帧完全透传。</div>
+      <div class="row"><label for="highBallPredictionHistoryFrames">fit frames N</label><input id="highBallPredictionHistoryFrames" type="number" min="3" max="30" step="1"></div>
+      <div class="row"><label for="highBallPredictionActivationZMinM">activation z m</label><input id="highBallPredictionActivationZMinM" type="number" min="0.5" max="2.5" step="0.01"></div>
+      <div class="row"><label for="highBallPredictionMinUpwardVelocityMps">min up vz m/s</label><input id="highBallPredictionMinUpwardVelocityMps" type="number" min="0" max="10" step="0.05"></div>
+      <div class="row"><label for="highBallPredictionMaxPredictionS">max predict s</label><input id="highBallPredictionMaxPredictionS" type="number" min="0.02" max="1" step="0.01"></div>
+      <div class="row"><label for="highBallPredictionStopZMinM">stop z m</label><input id="highBallPredictionStopZMinM" type="number" min="0.3" max="2.5" step="0.01"></div>
+      <div class="row"><label for="highBallPredictionDragCoefficientPerM">drag k 1/m</label><input id="highBallPredictionDragCoefficientPerM" type="number" min="0" max="2" step="0.005"></div>
+      <div class="row"><label for="highBallPredictionIntegrationStepS">integration s</label><input id="highBallPredictionIntegrationStepS" type="number" min="0.0005" max="0.05" step="0.0005"></div>
+      <div class="row"><label for="highBallPredictionReacquisitionGateM">reacquire gate m</label><input id="highBallPredictionReacquisitionGateM" type="number" min="0.01" max="1" step="0.01"></div>
+      <div class="row"><label for="highBallReacquisitionVelocityFrames">handover frames</label><input id="highBallReacquisitionVelocityFrames" type="number" min="2" max="9" step="1"></div>
+      <div class="row"><label for="highBallReacquisitionVelocityBlendS">handover blend s</label><input id="highBallReacquisitionVelocityBlendS" type="number" min="0.005" max="0.25" step="0.005"></div>
       <div class="section-title">Hybrid Pixel Kalman</div>
       <div class="section-note">右侧 Camera Flow / hybrid pixel KF 控制开关；参数修改后下一相机帧生效并重置像素滤波状态。</div>
       <div class="row"><label for="cameraPixelKalmanInnovationGatePx">innovation px</label><input id="cameraPixelKalmanInnovationGatePx" type="number" min="0" max="1000" step="1"></div>
@@ -17452,6 +19968,23 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div class="row"><label for="donePredictionDtS">step s</label><input id="donePredictionDtS" type="number" min="0.001" max="0.1" step="0.001"></div>
       <div class="row"><label for="donePredictionMarginM">margin m</label><input id="donePredictionMarginM" type="number" min="0" max="0.15" step="0.001"></div>
       <div class="row"><label for="donePredictionOrientationMarginRad">ori margin</label><input id="donePredictionOrientationMarginRad" type="number" min="0" max="0.5" step="0.005"></div>
+      <div class="section-title">Contact Action Shield</div>
+      <div class="section-note">仅作用于 RL policy；在预计触球和反弹短窗口内约束拍面横向法向、横移速度及内缩工作空间。</div>
+      <div class="row"><label for="contactShieldPreContactWindowS">pre window s</label><input id="contactShieldPreContactWindowS" type="number" min="0" max="0.5" step="0.005"></div>
+      <div class="row"><label for="contactShieldPostContactWindowS">post window s</label><input id="contactShieldPostContactWindowS" type="number" min="0" max="0.5" step="0.005"></div>
+      <div class="row"><label for="contactShieldContactToleranceM">contact tol m</label><input id="contactShieldContactToleranceM" type="number" min="0.001" max="0.25" step="0.001"></div>
+      <div class="row"><label for="contactShieldMaxLateralDistanceM">contact xy m</label><input id="contactShieldMaxLateralDistanceM" type="number" min="0.005" max="0.5" step="0.005"></div>
+      <div class="row"><label for="contactShieldMinDownwardVelocityMps">min down m/s</label><input id="contactShieldMinDownwardVelocityMps" type="number" min="0" max="10" step="0.05"></div>
+      <div class="row"><label for="contactShieldMaxNormalLateral">max |nx,ny|</label><input id="contactShieldMaxNormalLateral" type="number" min="0" max="1" step="0.005"></div>
+      <div class="row"><label for="contactShieldMaxLateralSpeedMps">max xy speed</label><input id="contactShieldMaxLateralSpeedMps" type="number" min="0" max="3" step="0.01"></div>
+      <div class="row"><label for="contactShieldWorkspaceMarginM">workspace margin</label><input id="contactShieldWorkspaceMarginM" type="number" min="0" max="0.15" step="0.005"></div>
+      <div class="row"><label for="contactShieldDlsDamping">DLS damping</label><input id="contactShieldDlsDamping" type="number" min="0.000001" max="1" step="0.005"></div>
+      <div class="section-title">Vertical Contact Energy</div>
+      <div class="section-note">仅作用于 RL policy；根据预计触球时的入射 vz 和恢复系数限制球拍向上速度。target apex 为触球点以上的相对高度，hard vz 为额外硬上限。</div>
+      <div class="row"><label for="verticalContactPreContactWindowS">vertical pre s</label><input id="verticalContactPreContactWindowS" type="number" min="0.01" max="0.5" step="0.005"></div>
+      <div class="row"><label for="verticalContactTargetApexHeightM">target apex Δz m</label><input id="verticalContactTargetApexHeightM" type="number" min="0.02" max="1" step="0.01"></div>
+      <div class="row"><label for="verticalContactRestitution">restitution e</label><input id="verticalContactRestitution" type="number" min="0.05" max="1.5" step="0.01"></div>
+      <div class="row"><label for="verticalContactMaxRacketUpwardSpeedMps">hard racket vz</label><input id="verticalContactMaxRacketUpwardSpeedMps" type="number" min="0" max="3" step="0.01"></div>
       <div class="section-title">Racket MPC — Shared</div>
       <div class="section-note">Tracking ball 与 MPC 颠球共用；修改后下一控制 tick 生效。</div>
       <div class="row"><label for="racketMpcHorizonSteps">horizon</label><input id="racketMpcHorizonSteps" type="number" min="1" max="128" step="1"></div>
@@ -17583,6 +20116,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <option value="simcode3_actuator67">simcode3 actuator + compensation</option>
           <option value="simcode4_servo67" disabled>simcode4 compensation (disabled)</option>
           <option value="simcode5_pure_actuator67">simcode5 pure actuator (direct real command)</option>
+          <option value="simcode6_qvel67">simcode6 qvel (direct real command)</option>
         </select>
       </div>
       <div class="section-title">Policy Observation Scale</div>
@@ -17630,6 +20164,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div class="section-title">Node Flow</div>
       <div class="checks">
         <label class="checkrow"><input id="rlUseValidBallObsAge" type="checkbox"><span>policy age</span></label>
+        <label class="checkrow" title="Real simcode5 policy obs[7:14] only: gain × delayed EMA of measured joint dq; safety keeps raw dq"><input id="enablePolicyDqAdapter" type="checkbox"><span>policy dq adapter</span></label>
         <label class="checkrow"><input id="enableCompensation" type="checkbox"><span>compensation</span></label>
         <label class="checkrow"><input id="enableSimMirror" type="checkbox"><span>sim mirror</span></label>
         <label class="checkrow" title="3D Kalman filtering; required by prediction and control-rate bridging"><input id="useBallEstimator" type="checkbox"><span>3D filter</span></label>
@@ -17643,6 +20178,8 @@ HTML_TEMPLATE = r"""<!doctype html>
         <label class="checkrow"><input id="enableReleaseGate" type="checkbox"><span>release gate</span></label>
         <label class="checkrow"><input id="enableLostFailsafe" type="checkbox"><span>lost failsafe</span></label>
         <label class="checkrow"><input id="enableDoneMonitoring" type="checkbox"><span>done monitor</span></label>
+        <label class="checkrow" title="RL-only contact phase task-space command projection with anti-windup"><input id="enableContactActionShield" type="checkbox"><span>contact shield</span></label>
+        <label class="checkrow" title="RL-only vertical impact-energy guard; independent of the lateral contact shield"><input id="enableVerticalContactEnergyShield" type="checkbox"><span>vertical energy</span></label>
       </div>
       <div class="section-title">Camera Flow</div>
       <div class="checks">
@@ -17650,7 +20187,20 @@ HTML_TEMPLATE = r"""<!doctype html>
         <label class="checkrow"><input id="cameraVisualize" type="checkbox"><span>overlay</span></label>
         <label class="checkrow" title="Optional RGB YOLO ROI assistance; off uses IR-only tracking"><input id="cameraYolo" type="checkbox"><span>YOLO ROI</span></label>
         <label class="checkrow"><input id="cameraSensorDepth" type="checkbox"><span>sensor depth</span></label>
-        <label class="checkrow" title="Use depth from the current stereo frameset; off uses the legacy five-frame median depth"><input id="cameraSynchronizedDepth" type="checkbox"><span>sync IR+depth</span></label>
+        <label class="checkrow" title="Independent calibrated correction: convert trusted RealSense ball-surface depth to ball-centre depth before 3D backprojection. It does not alter IR 2D centring, FK/extrinsics, geometry depth, or depth-fault prediction."><input id="cameraSensorSurfaceToCenterDepth" type="checkbox"><span>surface→center depth</span></label>
+        <label class="checkrow" title="Use depth from the current stereo frameset; off uses the configured temporal median"><input id="cameraSynchronizedDepth" type="checkbox"><span>sync IR+depth</span></label>
+        <label class="checkrow" title="Timestamped least-squares fit over the configured 3D position window"><input id="cameraVelocityLeastSquares" type="checkbox"><span>LS velocity</span></label>
+        <label class="checkrow" title="Clear pre-impact position history when vertical velocity reverses from falling to rising"><input id="cameraImpactVelocityReset" type="checkbox"><span>impact reset</span></label>
+        <label class="checkrow" title="Experimental, independent: clear depth/position/pixel/KF histories on the first lost frame"><input id="cameraClearBuffersOnDetectionLoss" type="checkbox"><span>clear lost buffers</span></label>
+        <label class="checkrow" title="Experimental, independent: reject 3D points inconsistent with the last trusted ballistic state before updating any position/velocity history"><input id="cameraMotionConsistencyGate" type="checkbox"><span>3D motion gate</span></label>
+        <label class="checkrow" title="Experimental, independent: robust XY linear fit plus fixed-gravity Z fit over one continuous flight segment"><input id="cameraPhysicsConstrainedVelocity" type="checkbox"><span>physics velocity</span></label>
+        <label class="checkrow" title="Experimental, independent: bounded causal trajectory endpoint fit to suppress small high-frequency 3D position noise"><input id="cameraTrajectoryPositionSmoothing" type="checkbox"><span>trajectory pos smooth</span></label>
+        <label class="checkrow" title="IROS2249 position-fit + aerodynamic prediction only while a high rising ball is above the FOV"><input id="cameraHighBallPrediction" type="checkbox"><span>high-FOV prediction</span></label>
+        <label class="checkrow" title="Independent switch: when adaptive depth rejects sensor ranging, feed the policy a bounded IROS2249 3D ball prediction; detector fallback remains available for display and diagnostics"><input id="cameraSensorDepthAnomalyPrediction" type="checkbox"><span>depth-fault prediction</span></label>
+        <label class="checkrow" title="At high-FOV reacquisition, pass camera position immediately while blending predicted velocity into a fresh visible-only fit"><input id="cameraHighBallReacquisitionVelocityHandover" type="checkbox"><span>reacq velocity</span></label>
+        <label class="checkrow" title="Experimental, independent: propagate each 90 Hz trusted camera state to the current 200 Hz control tick, capped at 25 ms"><input id="cameraControlTimeCompensation" type="checkbox"><span>90→200 time comp</span></label>
+        <label class="checkrow" title="Experimental, independent: confirm two reacquisition frames and smooth the full position/velocity handover over 25 ms"><input id="cameraReacquisitionSmoothing" type="checkbox"><span>reacq smooth 6D</span></label>
+        <label class="checkrow" title="Experimental, independent: nine-frame robust XY/fixed-gravity Z initialization calibrated from recorded prediction transitions"><input id="cameraOptimizedPredictionInitialState" type="checkbox"><span>optimized pred init</span></label>
         <label class="checkrow"><input id="cameraUndistort" type="checkbox"><span>undistort</span></label>
         <label class="checkrow" title="Ordinary RGB detector Kalman filter"><input id="cameraKalman" type="checkbox"><span>RGB kalman</span></label>
         <label class="checkrow" title="Joint 3D Kalman filter after IR-pixel/depth back-projection; independent of sync IR+depth"><input id="cameraIrDepthKalman" type="checkbox"><span>IR+depth 3D KF</span></label>
@@ -17660,16 +20210,17 @@ HTML_TEMPLATE = r"""<!doctype html>
         <label class="checkrow"><input id="cameraTemporalTracker" type="checkbox"><span>tracker</span></label>
         <label class="checkrow"><input id="cameraColorFilter" type="checkbox"><span>color filter</span></label>
       </div>
-      <div class="row" title="Preferred depth source; the other source is used only when the selected source is unavailable">
+      <div class="row" title="Adaptive normally uses sensor depth. Any one condition rejects it: frame jump &gt;200 mm, sensor &gt;1000 mm, or |sensor-geometry| &gt;300 mm; rejection uses short prediction with weak geometry correction.">
         <label for="cameraDepthMode">depth source</label>
         <select id="cameraDepthMode">
-          <option value="sensor">sensor (recommended)</option>
+          <option value="sensor">sensor</option>
           <option value="geometry">geometry</option>
+          <option value="adaptive">adaptive sensor guard (recommended)</option>
         </select>
       </div>
       <div class="row" title="Used only when sync IR+depth is off. Larger odd windows smooth more but add more delay.">
         <label for="cameraDepthTemporalWindowFrames">depth median frames</label>
-        <input id="cameraDepthTemporalWindowFrames" type="number" min="1" max="9" step="2" value="5">
+        <input id="cameraDepthTemporalWindowFrames" type="number" min="1" max="9" step="2" value="3">
       </div>
       <div class="section-title">Curves</div>
       <div class="checks">
@@ -17889,6 +20440,7 @@ const curveEls = {
 };
 const flowEls = {
   rlUseValidBallObsAge: document.getElementById('rlUseValidBallObsAge'),
+  enablePolicyDqAdapter: document.getElementById('enablePolicyDqAdapter'),
   enableCompensation: document.getElementById('enableCompensation'),
   enableSimMirror: document.getElementById('enableSimMirror'),
   useBallEstimator: document.getElementById('useBallEstimator'),
@@ -17901,14 +20453,29 @@ const flowEls = {
   enableCaptureGate: document.getElementById('enableCaptureGate'),
   enableReleaseGate: document.getElementById('enableReleaseGate'),
   enableLostFailsafe: document.getElementById('enableLostFailsafe'),
-  enableDoneMonitoring: document.getElementById('enableDoneMonitoring')
+  enableDoneMonitoring: document.getElementById('enableDoneMonitoring'),
+  enableContactActionShield: document.getElementById('enableContactActionShield'),
+  enableVerticalContactEnergyShield: document.getElementById('enableVerticalContactEnergyShield')
 };
 const cameraFlowEls = {
   detect: document.getElementById('cameraDetect'),
   visualize: document.getElementById('cameraVisualize'),
   yolo: document.getElementById('cameraYolo'),
   sensorDepth: document.getElementById('cameraSensorDepth'),
+  sensorSurfaceToCenterDepth: document.getElementById('cameraSensorSurfaceToCenterDepth'),
   synchronizedDepth: document.getElementById('cameraSynchronizedDepth'),
+  velocityLeastSquares: document.getElementById('cameraVelocityLeastSquares'),
+  impactVelocityReset: document.getElementById('cameraImpactVelocityReset'),
+  clearBuffersOnDetectionLoss: document.getElementById('cameraClearBuffersOnDetectionLoss'),
+  motionConsistencyGate: document.getElementById('cameraMotionConsistencyGate'),
+  physicsConstrainedVelocity: document.getElementById('cameraPhysicsConstrainedVelocity'),
+  trajectoryPositionSmoothing: document.getElementById('cameraTrajectoryPositionSmoothing'),
+  highBallPrediction: document.getElementById('cameraHighBallPrediction'),
+  sensorDepthAnomalyPrediction: document.getElementById('cameraSensorDepthAnomalyPrediction'),
+  highBallReacquisitionVelocityHandover: document.getElementById('cameraHighBallReacquisitionVelocityHandover'),
+  controlTimeCompensation: document.getElementById('cameraControlTimeCompensation'),
+  reacquisitionSmoothing: document.getElementById('cameraReacquisitionSmoothing'),
+  optimizedPredictionInitialState: document.getElementById('cameraOptimizedPredictionInitialState'),
   undistort: document.getElementById('cameraUndistort'),
   kalman: document.getElementById('cameraKalman'),
   irDepthKalman: document.getElementById('cameraIrDepthKalman'),
@@ -17933,6 +20500,21 @@ const inputs = {
   cameraPixelKalmanMeasurementNoise: document.getElementById('cameraPixelKalmanMeasurementNoise'),
   cameraPixelKalmanResetAfterOutliers: document.getElementById('cameraPixelKalmanResetAfterOutliers'),
   cameraDepthTemporalWindowFrames: document.getElementById('cameraDepthTemporalWindowFrames'),
+  cameraVelocityWindowFrames: document.getElementById('cameraVelocityWindowFrames'),
+  cameraImpactMinDownwardVelocityMps: document.getElementById('cameraImpactMinDownwardVelocityMps'),
+  cameraImpactMinUpwardVelocityMps: document.getElementById('cameraImpactMinUpwardVelocityMps'),
+  cameraImpactMinVelocityJumpMps: document.getElementById('cameraImpactMinVelocityJumpMps'),
+  cameraImpactRefractoryS: document.getElementById('cameraImpactRefractoryS'),
+  highBallPredictionHistoryFrames: document.getElementById('highBallPredictionHistoryFrames'),
+  highBallPredictionActivationZMinM: document.getElementById('highBallPredictionActivationZMinM'),
+  highBallPredictionMinUpwardVelocityMps: document.getElementById('highBallPredictionMinUpwardVelocityMps'),
+  highBallPredictionMaxPredictionS: document.getElementById('highBallPredictionMaxPredictionS'),
+  highBallPredictionStopZMinM: document.getElementById('highBallPredictionStopZMinM'),
+  highBallPredictionDragCoefficientPerM: document.getElementById('highBallPredictionDragCoefficientPerM'),
+  highBallPredictionIntegrationStepS: document.getElementById('highBallPredictionIntegrationStepS'),
+  highBallPredictionReacquisitionGateM: document.getElementById('highBallPredictionReacquisitionGateM'),
+  highBallReacquisitionVelocityFrames: document.getElementById('highBallReacquisitionVelocityFrames'),
+  highBallReacquisitionVelocityBlendS: document.getElementById('highBallReacquisitionVelocityBlendS'),
   cameraCandidateMinBrightness: document.getElementById('cameraCandidateMinBrightness'),
   cameraCandidateMaxDepthDisagreementMm: document.getElementById('cameraCandidateMaxDepthDisagreementMm'),
   cameraCandidateMotionScalePx: document.getElementById('cameraCandidateMotionScalePx'),
@@ -17942,6 +20524,19 @@ const inputs = {
   donePredictionDtS: document.getElementById('donePredictionDtS'),
   donePredictionMarginM: document.getElementById('donePredictionMarginM'),
   donePredictionOrientationMarginRad: document.getElementById('donePredictionOrientationMarginRad'),
+  contactShieldPreContactWindowS: document.getElementById('contactShieldPreContactWindowS'),
+  contactShieldPostContactWindowS: document.getElementById('contactShieldPostContactWindowS'),
+  contactShieldContactToleranceM: document.getElementById('contactShieldContactToleranceM'),
+  contactShieldMaxLateralDistanceM: document.getElementById('contactShieldMaxLateralDistanceM'),
+  contactShieldMinDownwardVelocityMps: document.getElementById('contactShieldMinDownwardVelocityMps'),
+  contactShieldMaxNormalLateral: document.getElementById('contactShieldMaxNormalLateral'),
+  contactShieldMaxLateralSpeedMps: document.getElementById('contactShieldMaxLateralSpeedMps'),
+  contactShieldWorkspaceMarginM: document.getElementById('contactShieldWorkspaceMarginM'),
+  contactShieldDlsDamping: document.getElementById('contactShieldDlsDamping'),
+  verticalContactPreContactWindowS: document.getElementById('verticalContactPreContactWindowS'),
+  verticalContactTargetApexHeightM: document.getElementById('verticalContactTargetApexHeightM'),
+  verticalContactRestitution: document.getElementById('verticalContactRestitution'),
+  verticalContactMaxRacketUpwardSpeedMps: document.getElementById('verticalContactMaxRacketUpwardSpeedMps'),
   racketMpcHorizonSteps: document.getElementById('racketMpcHorizonSteps'),
   racketMpcPositionWeight: document.getElementById('racketMpcPositionWeight'),
   racketMpcVelocityWeight: document.getElementById('racketMpcVelocityWeight'),
@@ -18052,7 +20647,7 @@ function applyCompensationProfileDefaults(profile) {
   setNumberValue(inputs.compMpcNominalWeight, defaults.mpcNominalWeight, 2);
   setNumberValue(inputs.compMpcDeltaWeight, defaults.mpcDeltaWeight, 2);
   setNumberValue(inputs.compMpcMaxDeltaRad, defaults.mpcMaxDeltaRad, 3);
-  if (profile === 'simcode5_pure_actuator67') {
+  if (['simcode5_pure_actuator67', 'simcode6_qvel67'].includes(profile)) {
     flowEls.enableCompensation.checked = false;
   }
 }
@@ -18120,14 +20715,36 @@ function syncEstimatorModeControl() {
     inputs.cameraDepthTemporalWindowFrames,
     cameraFlowEls.synchronizedDepth.disabled
       || cameraFlowEls.synchronizedDepth.checked);
+  const cameraVelocityUnavailable = cameraFlowEls.velocityLeastSquares.disabled;
+  setControlDisabled(inputs.cameraVelocityWindowFrames, cameraVelocityUnavailable);
+  const impactResetOff = (
+    cameraFlowEls.impactVelocityReset.disabled
+    || !cameraFlowEls.impactVelocityReset.checked);
+  for (const el of [
+    inputs.cameraImpactMinDownwardVelocityMps,
+    inputs.cameraImpactMinUpwardVelocityMps,
+    inputs.cameraImpactMinVelocityJumpMps,
+    inputs.cameraImpactRefractoryS
+  ]) {
+    setControlDisabled(el, impactResetOff);
+  }
   const ageLockedTrueProfile = [
     'simcode2_idealpd67', 'simcode3_actuator67'
   ].includes(policyProfileEl.value);
   const ageLockedFalseProfile = [
-    'simcode4_servo67', 'simcode5_pure_actuator67'
+    'simcode4_servo67', 'simcode5_pure_actuator67', 'simcode6_qvel67'
   ].includes(policyProfileEl.value);
   const directPhysicalActuatorProfile = (
+    ['simcode5_pure_actuator67', 'simcode6_qvel67'].includes(
+      policyProfileEl.value));
+  const simcode5DqAdapterProfile = (
     policyProfileEl.value === 'simcode5_pure_actuator67');
+  setControlDisabled(
+    flowEls.enablePolicyDqAdapter,
+    !simcode5DqAdapterProfile);
+  if (!simcode5DqAdapterProfile) {
+    flowEls.enablePolicyDqAdapter.checked = false;
+  }
   if (directPhysicalActuatorProfile) {
     flowEls.enableCompensation.checked = false;
   }
@@ -18143,6 +20760,50 @@ function syncEstimatorModeControl() {
   const estimatorOff = !flowEls.useBallEstimator.checked;
   const predictionOff = estimatorOff || !flowEls.estimatorPrediction.checked;
   const hybridEstimator = flowEls.hybridBallTracker.checked;
+  const highPredictionUnavailable = (
+    !(CONFIG.cameraBall && CONFIG.cameraBall.enabled && CONFIG.cameraBall.available)
+    || ballSourceEl.value !== 'camera'
+    || !estimatorOff);
+  setControlDisabled(cameraFlowEls.highBallPrediction, highPredictionUnavailable);
+  setControlDisabled(
+    cameraFlowEls.sensorDepthAnomalyPrediction,
+    highPredictionUnavailable);
+  setControlDisabled(
+    cameraFlowEls.controlTimeCompensation,
+    highPredictionUnavailable);
+  const highPredictionOff = (
+    highPredictionUnavailable
+    || !(cameraFlowEls.highBallPrediction.checked
+      || cameraFlowEls.sensorDepthAnomalyPrediction.checked));
+  setControlDisabled(
+    cameraFlowEls.highBallReacquisitionVelocityHandover,
+    highPredictionOff);
+  setControlDisabled(cameraFlowEls.reacquisitionSmoothing, highPredictionOff);
+  setControlDisabled(
+    cameraFlowEls.optimizedPredictionInitialState,
+    highPredictionOff);
+  for (const el of [
+    inputs.highBallPredictionHistoryFrames,
+    inputs.highBallPredictionActivationZMinM,
+    inputs.highBallPredictionMinUpwardVelocityMps,
+    inputs.highBallPredictionMaxPredictionS,
+    inputs.highBallPredictionStopZMinM,
+    inputs.highBallPredictionDragCoefficientPerM,
+    inputs.highBallPredictionIntegrationStepS,
+    inputs.highBallPredictionReacquisitionGateM
+  ]) {
+    setControlDisabled(el, highPredictionOff);
+  }
+  const reacquisitionHandoverOff = (
+    highPredictionOff
+    || cameraFlowEls.highBallReacquisitionVelocityHandover.disabled
+    || !cameraFlowEls.highBallReacquisitionVelocityHandover.checked);
+  for (const el of [
+    inputs.highBallReacquisitionVelocityFrames,
+    inputs.highBallReacquisitionVelocityBlendS
+  ]) {
+    setControlDisabled(el, reacquisitionHandoverOff);
+  }
   const hybridAvailable = (
     (CONFIG.ballEstimator || {}).hybridAvailable !== false);
   const releaseOff = !flowEls.enableReleaseGate.checked;
@@ -18152,6 +20813,41 @@ function syncEstimatorModeControl() {
       inputs.workspaceSafetyMode.value));
   const compensationOff = (
     flowEls.enableCompensation.disabled || !flowEls.enableCompensation.checked);
+  const contactShieldUnavailable = controlModeEl.value !== 'policy';
+  setControlDisabled(
+    flowEls.enableContactActionShield, contactShieldUnavailable);
+  setControlDisabled(
+    flowEls.enableVerticalContactEnergyShield, contactShieldUnavailable);
+  const contactShieldOff = (
+    contactShieldUnavailable || !flowEls.enableContactActionShield.checked);
+  const verticalEnergyOff = (
+    contactShieldUnavailable
+    || !flowEls.enableVerticalContactEnergyShield.checked);
+  for (const el of [
+    inputs.contactShieldPreContactWindowS,
+    inputs.contactShieldPostContactWindowS,
+    inputs.contactShieldMaxNormalLateral,
+    inputs.contactShieldMaxLateralSpeedMps,
+    inputs.contactShieldWorkspaceMarginM
+  ]) {
+    setControlDisabled(el, contactShieldOff);
+  }
+  for (const el of [
+    inputs.contactShieldContactToleranceM,
+    inputs.contactShieldMaxLateralDistanceM,
+    inputs.contactShieldMinDownwardVelocityMps,
+    inputs.contactShieldDlsDamping
+  ]) {
+    setControlDisabled(el, contactShieldOff && verticalEnergyOff);
+  }
+  for (const el of [
+    inputs.verticalContactPreContactWindowS,
+    inputs.verticalContactTargetApexHeightM,
+    inputs.verticalContactRestitution,
+    inputs.verticalContactMaxRacketUpwardSpeedMps
+  ]) {
+    setControlDisabled(el, verticalEnergyOff);
+  }
   const trackingDefaults = CONFIG.racketTracking || {};
   const trackingOff = (
     controlModeEl.value !== 'racket_tracking'
@@ -18277,6 +20973,7 @@ function setRuntimeDefaults() {
   const racketMpcDefaults = CONFIG.racketMpc || {};
   const juggleDefaults = CONFIG.mpcJuggle || {};
   const cameraDefaults = (CONFIG.cameraBall && CONFIG.cameraBall.defaults) || {};
+  const highBallPredictionDefaults = CONFIG.highBallOcclusionPrediction || {};
   controlModeEl.value = controlDefaults.defaultMode || 'policy';
   for (const opt of Array.from(controlModeEl.options)) {
     if (opt.value === 'racket_tracking') {
@@ -18369,14 +21066,53 @@ function setRuntimeDefaults() {
   cameraFlowEls.visualize.checked = cameraDefaults.visualize !== false;
   cameraFlowEls.yolo.checked = !!cameraDefaults.yolo;
   cameraFlowEls.sensorDepth.checked = cameraDefaults.sensorDepth !== false;
+  cameraFlowEls.sensorSurfaceToCenterDepth.checked =
+    !!cameraDefaults.sensorSurfaceToCenterDepth;
   cameraFlowEls.synchronizedDepth.checked = !!cameraDefaults.synchronizedDepth;
-  cameraDepthModeEl.value = cameraDefaults.depthMode === 'geometry' ? 'geometry' : 'sensor';
+  cameraFlowEls.velocityLeastSquares.checked = cameraDefaults.velocityLeastSquares !== false;
+  cameraFlowEls.impactVelocityReset.checked = cameraDefaults.impactVelocityReset !== false;
+  cameraFlowEls.clearBuffersOnDetectionLoss.checked =
+    !!cameraDefaults.clearBuffersOnDetectionLoss;
+  cameraFlowEls.motionConsistencyGate.checked =
+    !!cameraDefaults.motionConsistencyGate;
+  cameraFlowEls.physicsConstrainedVelocity.checked =
+    !!cameraDefaults.physicsConstrainedVelocity;
+  cameraFlowEls.trajectoryPositionSmoothing.checked =
+    !!cameraDefaults.trajectoryPositionSmoothing;
+  cameraFlowEls.highBallPrediction.checked = !!highBallPredictionDefaults.enabled;
+  cameraFlowEls.sensorDepthAnomalyPrediction.checked =
+    !!highBallPredictionDefaults.sensorDepthAnomalyPrediction;
+  cameraFlowEls.highBallReacquisitionVelocityHandover.checked =
+    !!highBallPredictionDefaults.reacquisitionVelocityHandover;
+  cameraFlowEls.controlTimeCompensation.checked =
+    !!highBallPredictionDefaults.controlTimeCompensation;
+  cameraFlowEls.reacquisitionSmoothing.checked =
+    !!highBallPredictionDefaults.reacquisitionSmoothing;
+  cameraFlowEls.optimizedPredictionInitialState.checked =
+    !!highBallPredictionDefaults.optimizedInitialState;
+  cameraDepthModeEl.value = ['sensor', 'geometry', 'adaptive'].includes(cameraDefaults.depthMode)
+    ? cameraDefaults.depthMode : 'sensor';
   cameraFlowEls.undistort.checked = cameraDefaults.undistort !== false;
   cameraFlowEls.kalman.checked = !!cameraDefaults.kalman;
   cameraFlowEls.irDepthKalman.checked = !!cameraDefaults.irDepthKalman;
   cameraFlowEls.pixelKalman.checked = !!cameraDefaults.pixelKalman;
   cameraFlowEls.candidateFilter.checked = cameraDefaults.candidateFilter !== false;
   setNumberDefault(inputs.cameraDepthTemporalWindowFrames, cameraDefaults.depthTemporalWindowFrames ?? 3, 0);
+  setNumberDefault(inputs.cameraVelocityWindowFrames, cameraDefaults.velocityWindowFrames ?? 3, 0);
+  setNumberDefault(inputs.cameraImpactMinDownwardVelocityMps, cameraDefaults.impactMinDownwardVelocityMps ?? 0.25, 2);
+  setNumberDefault(inputs.cameraImpactMinUpwardVelocityMps, cameraDefaults.impactMinUpwardVelocityMps ?? 0.25, 2);
+  setNumberDefault(inputs.cameraImpactMinVelocityJumpMps, cameraDefaults.impactMinVelocityJumpMps ?? 0.80, 2);
+  setNumberDefault(inputs.cameraImpactRefractoryS, cameraDefaults.impactRefractoryS ?? 0.08, 3);
+  setNumberDefault(inputs.highBallPredictionHistoryFrames, highBallPredictionDefaults.historyFrames ?? 10, 0);
+  setNumberDefault(inputs.highBallPredictionActivationZMinM, highBallPredictionDefaults.activationZMinM ?? 1.42, 3);
+  setNumberDefault(inputs.highBallPredictionMinUpwardVelocityMps, highBallPredictionDefaults.minUpwardVelocityMps ?? 0.20, 3);
+  setNumberDefault(inputs.highBallPredictionMaxPredictionS, highBallPredictionDefaults.maxPredictionS ?? 0.45, 3);
+  setNumberDefault(inputs.highBallPredictionStopZMinM, highBallPredictionDefaults.stopPredictionZMinM ?? 1.24, 3);
+  setNumberDefault(inputs.highBallPredictionDragCoefficientPerM, highBallPredictionDefaults.dragCoefficientPerM ?? 0.13545, 5);
+  setNumberDefault(inputs.highBallPredictionIntegrationStepS, highBallPredictionDefaults.integrationStepS ?? 0.005, 4);
+  setNumberDefault(inputs.highBallPredictionReacquisitionGateM, highBallPredictionDefaults.reacquisitionGateM ?? 0.18, 3);
+  setNumberDefault(inputs.highBallReacquisitionVelocityFrames, highBallPredictionDefaults.reacquisitionVelocityFrames ?? 3, 0);
+  setNumberDefault(inputs.highBallReacquisitionVelocityBlendS, highBallPredictionDefaults.reacquisitionVelocityBlendS ?? 0.04, 3);
   setNumberDefault(inputs.cameraPixelKalmanInnovationGatePx, cameraDefaults.pixelKalmanInnovationGatePx ?? 15.0, 1);
   setNumberDefault(inputs.cameraPixelKalmanProcessNoisePos, cameraDefaults.pixelKalmanProcessNoisePos ?? 0.3, 2);
   setNumberDefault(inputs.cameraPixelKalmanProcessNoiseVel, cameraDefaults.pixelKalmanProcessNoiseVel ?? 3.0, 2);
@@ -18401,6 +21137,21 @@ function setRuntimeDefaults() {
     inputs.cameraPixelKalmanMeasurementNoise,
     inputs.cameraPixelKalmanResetAfterOutliers,
     inputs.cameraDepthTemporalWindowFrames,
+    inputs.cameraVelocityWindowFrames,
+    inputs.cameraImpactMinDownwardVelocityMps,
+    inputs.cameraImpactMinUpwardVelocityMps,
+    inputs.cameraImpactMinVelocityJumpMps,
+    inputs.cameraImpactRefractoryS,
+    inputs.highBallPredictionHistoryFrames,
+    inputs.highBallPredictionActivationZMinM,
+    inputs.highBallPredictionMinUpwardVelocityMps,
+    inputs.highBallPredictionMaxPredictionS,
+    inputs.highBallPredictionStopZMinM,
+    inputs.highBallPredictionDragCoefficientPerM,
+    inputs.highBallPredictionIntegrationStepS,
+    inputs.highBallPredictionReacquisitionGateM,
+    inputs.highBallReacquisitionVelocityFrames,
+    inputs.highBallReacquisitionVelocityBlendS,
     inputs.cameraCandidateMinBrightness,
     inputs.cameraCandidateMaxDepthDisagreementMm,
     inputs.cameraCandidateMotionScalePx,
@@ -18411,6 +21162,7 @@ function setRuntimeDefaults() {
   useRosStateEl.parentElement.classList.toggle('disabled', useRosStateEl.disabled);
   publishCommandsEl.parentElement.classList.toggle('disabled', publishCommandsEl.disabled);
   const policyDefaults = CONFIG.policy || {};
+  const dqAdapterDefaults = policyDefaults.dqAdapter || {};
   policyProfileEl.value = policyDefaults.defaultProfile || 'legacy_bug_compatible';
   const observationNames = Array.isArray(policyDefaults.observationNames)
     ? policyDefaults.observationNames : [];
@@ -18436,7 +21188,10 @@ function setRuntimeDefaults() {
   const releaseDefaults = CONFIG.releaseGate || {};
   const estimatorDefaults = CONFIG.ballEstimator || {};
   const donePredictionDefaults = CONFIG.donePrediction || {};
+  const contactShieldDefaults = CONFIG.contactActionShield || {};
   flowEls.rlUseValidBallObsAge.checked = policyDefaults.useValidBallObsAge !== false;
+  flowEls.enablePolicyDqAdapter.checked =
+    !!dqAdapterDefaults.configuredEnabled;
   flowEls.enableCompensation.checked = compensationDefaults.enabled !== false;
   flowEls.enableCompensation.disabled = compensationDefaults.available === false;
   flowEls.enableCompensation.closest('.checkrow').classList.toggle(
@@ -18471,6 +21226,22 @@ function setRuntimeDefaults() {
   flowEls.enableReleaseGate.checked = !!(CONFIG.flowDefaults && CONFIG.flowDefaults.releaseGate);
   flowEls.enableLostFailsafe.checked = !!(CONFIG.flowDefaults && CONFIG.flowDefaults.lostFailsafe);
   flowEls.enableDoneMonitoring.checked = !!(CONFIG.flowDefaults && CONFIG.flowDefaults.doneMonitoring);
+  flowEls.enableContactActionShield.checked = !!contactShieldDefaults.enabled;
+  flowEls.enableVerticalContactEnergyShield.checked =
+    !!contactShieldDefaults.verticalEnergyEnabled;
+  setNumberDefault(inputs.contactShieldPreContactWindowS, contactShieldDefaults.preContactWindowS ?? 0.06, 3);
+  setNumberDefault(inputs.contactShieldPostContactWindowS, contactShieldDefaults.postContactWindowS ?? 0.05, 3);
+  setNumberDefault(inputs.contactShieldContactToleranceM, contactShieldDefaults.contactToleranceM ?? 0.04, 3);
+  setNumberDefault(inputs.contactShieldMaxLateralDistanceM, contactShieldDefaults.maxLateralDistanceM ?? 0.12, 3);
+  setNumberDefault(inputs.contactShieldMinDownwardVelocityMps, contactShieldDefaults.minDownwardVelocityMps ?? 0.25, 2);
+  setNumberDefault(inputs.contactShieldMaxNormalLateral, contactShieldDefaults.maxNormalLateral ?? 0.03, 3);
+  setNumberDefault(inputs.contactShieldMaxLateralSpeedMps, contactShieldDefaults.maxLateralSpeedMps ?? 0.25, 2);
+  setNumberDefault(inputs.contactShieldWorkspaceMarginM, contactShieldDefaults.workspaceMarginM ?? 0.035, 3);
+  setNumberDefault(inputs.contactShieldDlsDamping, contactShieldDefaults.dlsDamping ?? 0.03, 3);
+  setNumberDefault(inputs.verticalContactPreContactWindowS, contactShieldDefaults.verticalPreContactWindowS ?? 0.12, 3);
+  setNumberDefault(inputs.verticalContactTargetApexHeightM, contactShieldDefaults.verticalTargetApexHeightM ?? 0.30, 3);
+  setNumberDefault(inputs.verticalContactRestitution, contactShieldDefaults.verticalRestitution ?? 0.66, 3);
+  setNumberDefault(inputs.verticalContactMaxRacketUpwardSpeedMps, contactShieldDefaults.verticalMaxRacketUpwardSpeedMps ?? 0.90, 3);
   setNumberDefault(inputs.estimatorFrameHoldHz, estimatorDefaults.frameHoldOutputRateHz, 1);
   setNumberDefault(inputs.estimatorMaxExtrapolationS, estimatorDefaults.maxExtrapolationS, 3);
   setNumberDefault(inputs.estimatorControlMaxExtrapolationS, estimatorDefaults.controlMaxExtrapolationS, 3);
@@ -18524,6 +21295,14 @@ for (const el of [
   inputs.cameraPixelKalmanMeasurementNoise,
   inputs.cameraPixelKalmanResetAfterOutliers,
   inputs.cameraDepthTemporalWindowFrames,
+  inputs.highBallPredictionHistoryFrames,
+  inputs.highBallPredictionActivationZMinM,
+  inputs.highBallPredictionMinUpwardVelocityMps,
+  inputs.highBallPredictionMaxPredictionS,
+  inputs.highBallPredictionStopZMinM,
+  inputs.highBallPredictionDragCoefficientPerM,
+  inputs.highBallPredictionIntegrationStepS,
+  inputs.highBallPredictionReacquisitionGateM,
   inputs.cameraCandidateMinBrightness,
   inputs.cameraCandidateMaxDepthDisagreementMm,
   inputs.cameraCandidateMotionScalePx,
@@ -18940,7 +21719,7 @@ function updateVisionFrame(camera) {
     const camRt = (camera && camera.runtime) || {};
     const sensorDepthOn = camRt.sensorDepth !== false;
     const sourceText = source === 'direct_realsense'
-      ? `direct RealSense ${camera.imageWidth || '?'}x${camera.imageHeight || '?'}@${camera.realsenseFps || '?'} hybrid=${camera.useHybridDetector ? 'on' : 'off'} sensorDepth=${sensorDepthOn ? 'on' : 'off'} depthMode=${camRt.depthMode || 'sensor'}`
+      ? `direct RealSense ${camera.imageWidth || '?'}x${camera.imageHeight || '?'}@${camera.realsenseFps || '?'} hybrid=${camera.useHybridDetector ? 'on' : 'off'} sensorDepth=${sensorDepthOn ? 'on' : 'off'} centerDepth=${camRt.sensorSurfaceToCenterDepth ? 'on' : 'off'} depthMode=${camRt.depthMode || 'sensor'}`
       : (camera && camera.imageTransport === 'raw'
         ? `topic=${camera.rawImageTopic}`
         : (camera && camera.imageTransport === 'compressed'
@@ -19644,6 +22423,13 @@ function sim2realGroupConfig(group) {
       names: rowNames.length ? rowNames : ((analysisData && analysisData.actionNames) || []),
       y: 'action value',
     },
+    executed_action: {
+      label: 'Conditioned / Executed Action',
+      real: 'policyExecutedAction',
+      sim: 'simPolicyExecutedAction',
+      names: rowNames.length ? rowNames : ((analysisData && analysisData.actionNames) || []),
+      y: 'normalized action',
+    },
     joint_position: {
       label: 'Joint Position',
       real: 'realJointPositionObs',
@@ -20041,7 +22827,7 @@ function renderAnalysisCurve() {
     if (analysisDetail === 'overview') {
       const colors = ['#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f','#edc948','#b07aa1'];
       const width = Math.max(0, ...samples.map(r => (r.policyAction || []).length));
-      drawLineChart(analysisCurveCanvasEl, 'Policy Action Overview', Array.from({length: width}, (_, idx) => ({
+      drawLineChart(analysisCurveCanvasEl, 'Raw Actor Action Overview', Array.from({length: width}, (_, idx) => ({
         name: (analysisData.actionNames || [])[idx] || `action[${idx}]`,
         color: colors[idx % colors.length],
         values: samples.map(r => Number((r.policyAction || [])[idx]))
@@ -20050,15 +22836,29 @@ function renderAnalysisCurve() {
       const idx = Number((analysisDetail.split('.')[1] || 0));
       const name = (analysisData.actionNames || [])[idx] || `action[${idx}]`;
       const series = [{
-        name: `real ${name}`,
+        name: `real raw ${name}`,
         color: '#e15759',
         values: samples.map(r => Number((r.policyAction || [])[idx]))
       }];
+      if (samples.some(r => (r.policyExecutedAction || []).length > idx)) {
+        series.push({
+          name: `real executed ${name}`,
+          color: '#4e79a7',
+          values: samples.map(r => Number((r.policyExecutedAction || [])[idx]))
+        });
+      }
       if (samples.some(r => (r.simPolicyAction || []).length > idx)) {
         series.push({
-          name: `sim ${name}`,
+          name: `sim raw ${name}`,
           color: '#0f766e',
           values: samples.map(r => Number((r.simPolicyAction || [])[idx]))
+        });
+      }
+      if (samples.some(r => (r.simPolicyExecutedAction || []).length > idx)) {
+        series.push({
+          name: `sim executed ${name}`,
+          color: '#7c3aed',
+          values: samples.map(r => Number((r.simPolicyExecutedAction || [])[idx]))
         });
       }
       drawLineChart(analysisCurveCanvasEl, `Policy Action ${idx}`, series, analysisIndex, 'action value');
@@ -20217,6 +23017,7 @@ async function step() {
   const releaseDefaults = CONFIG.releaseGate || {};
   const compensationDefaults = CONFIG.compensation || {};
   const donePredictionDefaults = CONFIG.donePrediction || {};
+  const contactShieldDefaults = CONFIG.contactActionShield || {};
   const trackingDefaults = CONFIG.racketTracking || {};
   const racketMpcDefaults = CONFIG.racketMpc || {};
   const juggleDefaults = CONFIG.mpcJuggle || {};
@@ -20236,6 +23037,9 @@ async function step() {
         999),
       controlMode: controlModeEl.value || 'policy',
       policyProfile: policyProfileEl.value || 'legacy_bug_compatible',
+      enablePolicyDqAdapter: (
+        flowEls.enablePolicyDqAdapter.checked
+        && !flowEls.enablePolicyDqAdapter.disabled),
       policyObservationScales: policyObservationScales.slice(),
       racketTrackingHeightOffsetM: readNumber(
         inputs.trackingHeightOffsetM,
@@ -20299,6 +23103,21 @@ async function step() {
         donePredictionDefaults.orientationMarginRad ?? 0.035,
         0,
         0.5),
+      enableContactActionShield: flowEls.enableContactActionShield.checked && !flowEls.enableContactActionShield.disabled,
+      contactShieldPreContactWindowS: readNumber(inputs.contactShieldPreContactWindowS, contactShieldDefaults.preContactWindowS ?? 0.06, 0, 0.5),
+      contactShieldPostContactWindowS: readNumber(inputs.contactShieldPostContactWindowS, contactShieldDefaults.postContactWindowS ?? 0.05, 0, 0.5),
+      contactShieldContactToleranceM: readNumber(inputs.contactShieldContactToleranceM, contactShieldDefaults.contactToleranceM ?? 0.04, 0.001, 0.25),
+      contactShieldMaxLateralDistanceM: readNumber(inputs.contactShieldMaxLateralDistanceM, contactShieldDefaults.maxLateralDistanceM ?? 0.12, 0.005, 0.5),
+      contactShieldMinDownwardVelocityMps: readNumber(inputs.contactShieldMinDownwardVelocityMps, contactShieldDefaults.minDownwardVelocityMps ?? 0.25, 0, 10),
+      contactShieldMaxNormalLateral: readNumber(inputs.contactShieldMaxNormalLateral, contactShieldDefaults.maxNormalLateral ?? 0.03, 0, 1),
+      contactShieldMaxLateralSpeedMps: readNumber(inputs.contactShieldMaxLateralSpeedMps, contactShieldDefaults.maxLateralSpeedMps ?? 0.25, 0, 3),
+      contactShieldWorkspaceMarginM: readNumber(inputs.contactShieldWorkspaceMarginM, contactShieldDefaults.workspaceMarginM ?? 0.035, 0, 0.15),
+      contactShieldDlsDamping: readNumber(inputs.contactShieldDlsDamping, contactShieldDefaults.dlsDamping ?? 0.03, 0.000001, 1),
+      enableVerticalContactEnergyShield: flowEls.enableVerticalContactEnergyShield.checked && !flowEls.enableVerticalContactEnergyShield.disabled,
+      verticalContactPreContactWindowS: readNumber(inputs.verticalContactPreContactWindowS, contactShieldDefaults.verticalPreContactWindowS ?? 0.12, 0.01, 0.5),
+      verticalContactTargetApexHeightM: readNumber(inputs.verticalContactTargetApexHeightM, contactShieldDefaults.verticalTargetApexHeightM ?? 0.30, 0.02, 1),
+      verticalContactRestitution: readNumber(inputs.verticalContactRestitution, contactShieldDefaults.verticalRestitution ?? 0.66, 0.05, 1.5),
+      verticalContactMaxRacketUpwardSpeedMps: readNumber(inputs.verticalContactMaxRacketUpwardSpeedMps, contactShieldDefaults.verticalMaxRacketUpwardSpeedMps ?? 0.90, 0, 3),
       enableCompensation: flowEls.enableCompensation.checked && !flowEls.enableCompensation.disabled,
       enableSimMirror: flowEls.enableSimMirror.checked && !flowEls.enableSimMirror.disabled,
       compensationParameterTarget: inputs.compensationParameterTarget.value || 'real',
@@ -20358,6 +23177,32 @@ async function step() {
         inputs.estimatorRLateralMm, estimatorDefaults.rLateralMm ?? 20.0, 1, 500),
       ballEstimatorRDepthMm: readNumber(
         inputs.estimatorRDepthMm, estimatorDefaults.rDepthMm ?? 60.0, 1, 1000),
+      highBallOcclusionPrediction: cameraFlowEls.highBallPrediction.checked && !cameraFlowEls.highBallPrediction.disabled,
+      sensorDepthAnomalyPrediction: cameraFlowEls.sensorDepthAnomalyPrediction.checked && !cameraFlowEls.sensorDepthAnomalyPrediction.disabled,
+      highBallPredictionHistoryFrames: readInt(
+        inputs.highBallPredictionHistoryFrames, 10, 3, 30),
+      highBallPredictionActivationZMinM: readNumber(
+        inputs.highBallPredictionActivationZMinM, 1.42, 0.5, 2.5),
+      highBallPredictionMinUpwardVelocityMps: readNumber(
+        inputs.highBallPredictionMinUpwardVelocityMps, 0.20, 0, 10),
+      highBallPredictionMaxPredictionS: readNumber(
+        inputs.highBallPredictionMaxPredictionS, 0.45, 0.02, 1),
+      highBallPredictionStopZMinM: readNumber(
+        inputs.highBallPredictionStopZMinM, 1.24, 0.3, 2.5),
+      highBallPredictionDragCoefficientPerM: readNumber(
+        inputs.highBallPredictionDragCoefficientPerM, 0.13545, 0, 2),
+      highBallPredictionIntegrationStepS: readNumber(
+        inputs.highBallPredictionIntegrationStepS, 0.005, 0.0005, 0.05),
+      highBallPredictionReacquisitionGateM: readNumber(
+        inputs.highBallPredictionReacquisitionGateM, 0.18, 0.01, 1),
+      highBallReacquisitionVelocityHandover: cameraFlowEls.highBallReacquisitionVelocityHandover.checked && !cameraFlowEls.highBallReacquisitionVelocityHandover.disabled,
+      cameraControlTimeCompensation: cameraFlowEls.controlTimeCompensation.checked && !cameraFlowEls.controlTimeCompensation.disabled,
+      cameraReacquisitionSmoothing: cameraFlowEls.reacquisitionSmoothing.checked && !cameraFlowEls.reacquisitionSmoothing.disabled,
+      optimizedBallPredictionInitialState: cameraFlowEls.optimizedPredictionInitialState.checked && !cameraFlowEls.optimizedPredictionInitialState.disabled,
+      highBallReacquisitionVelocityFrames: readInt(
+        inputs.highBallReacquisitionVelocityFrames, 3, 2, 9),
+      highBallReacquisitionVelocityBlendS: readNumber(
+        inputs.highBallReacquisitionVelocityBlendS, 0.04, 0.005, 0.25),
       enableCaptureGate: flowEls.enableCaptureGate.checked,
       enableReleaseGate: flowEls.enableReleaseGate.checked,
       enableLostFailsafe: flowEls.enableLostFailsafe.checked,
@@ -20377,7 +23222,14 @@ async function step() {
       cameraVisualize: cameraFlowEls.visualize.checked && !cameraFlowEls.visualize.disabled,
       cameraYolo: cameraFlowEls.yolo.checked && !cameraFlowEls.yolo.disabled,
       cameraSensorDepth: cameraFlowEls.sensorDepth.checked && !cameraFlowEls.sensorDepth.disabled,
+      cameraSensorSurfaceToCenterDepth: cameraFlowEls.sensorSurfaceToCenterDepth.checked && !cameraFlowEls.sensorSurfaceToCenterDepth.disabled,
       cameraSynchronizedDepth: cameraFlowEls.synchronizedDepth.checked && !cameraFlowEls.synchronizedDepth.disabled,
+      cameraVelocityLeastSquares: cameraFlowEls.velocityLeastSquares.checked && !cameraFlowEls.velocityLeastSquares.disabled,
+      cameraImpactVelocityReset: cameraFlowEls.impactVelocityReset.checked && !cameraFlowEls.impactVelocityReset.disabled,
+      cameraClearBuffersOnDetectionLoss: cameraFlowEls.clearBuffersOnDetectionLoss.checked && !cameraFlowEls.clearBuffersOnDetectionLoss.disabled,
+      cameraMotionConsistencyGate: cameraFlowEls.motionConsistencyGate.checked && !cameraFlowEls.motionConsistencyGate.disabled,
+      cameraPhysicsConstrainedVelocity: cameraFlowEls.physicsConstrainedVelocity.checked && !cameraFlowEls.physicsConstrainedVelocity.disabled,
+      cameraTrajectoryPositionSmoothing: cameraFlowEls.trajectoryPositionSmoothing.checked && !cameraFlowEls.trajectoryPositionSmoothing.disabled,
       cameraDepthMode: cameraDepthModeEl.disabled ? 'sensor' : cameraDepthModeEl.value,
       cameraUndistort: cameraFlowEls.undistort.checked && !cameraFlowEls.undistort.disabled,
       cameraKalman: cameraFlowEls.kalman.checked && !cameraFlowEls.kalman.disabled,
@@ -20387,6 +23239,21 @@ async function step() {
       cameraDepthTemporalWindowFrames: readInt(
         inputs.cameraDepthTemporalWindowFrames,
         cameraDefaults.depthTemporalWindowFrames ?? 3, 1, 9),
+      cameraVelocityWindowFrames: readInt(
+        inputs.cameraVelocityWindowFrames,
+        cameraDefaults.velocityWindowFrames ?? 3, 2, 9),
+      cameraImpactMinDownwardVelocityMps: readNumber(
+        inputs.cameraImpactMinDownwardVelocityMps,
+        cameraDefaults.impactMinDownwardVelocityMps ?? 0.25, 0, 10),
+      cameraImpactMinUpwardVelocityMps: readNumber(
+        inputs.cameraImpactMinUpwardVelocityMps,
+        cameraDefaults.impactMinUpwardVelocityMps ?? 0.25, 0, 10),
+      cameraImpactMinVelocityJumpMps: readNumber(
+        inputs.cameraImpactMinVelocityJumpMps,
+        cameraDefaults.impactMinVelocityJumpMps ?? 0.80, 0, 20),
+      cameraImpactRefractoryS: readNumber(
+        inputs.cameraImpactRefractoryS,
+        cameraDefaults.impactRefractoryS ?? 0.08, 0, 1),
       cameraPixelKalmanInnovationGatePx: readNumber(
         inputs.cameraPixelKalmanInnovationGatePx,
         cameraDefaults.pixelKalmanInnovationGatePx ?? 15.0, 0, 1000),
@@ -20439,6 +23306,7 @@ async function step() {
     const mocap = latest.mocap || CONFIG.mocapBall || {};
     const sim = latest.sim || {};
     const est = latest.estimator || {};
+    const highPrediction = latest.highBallOcclusionPrediction || {};
     updateRecordingUi(latest.recording || {});
     updateVisionFrame(camera);
     updateSimFrame(sim);
@@ -20495,7 +23363,7 @@ async function step() {
     const cameraSource = camera.sourceMode || 'ros_topic';
     const sensorDepthOn = camRt.sensorDepth !== false;
     const cameraPath = cameraSource === 'direct_realsense'
-      ? `direct_realsense ${camera.imageWidth || '?'}x${camera.imageHeight || '?'}@${camera.realsenseFps || '?'} hybrid=${camera.useHybridDetector ? 'on' : 'off'} sensorDepth=${sensorDepthOn ? 'on' : 'off'} syncDepth=${camRt.synchronizedDepth ? 'on' : 'off'} medianN=${camRt.depthTemporalWindowFrames ?? 3} irDepthKF=${camRt.irDepthKalman ? 'on' : 'off'} depthMode=${camRt.depthMode || 'sensor'} active=${camera.activeTransport || 'none'} ${imageAgeBits}`
+      ? `direct_realsense ${camera.imageWidth || '?'}x${camera.imageHeight || '?'}@${camera.realsenseFps || '?'} hybrid=${camera.useHybridDetector ? 'on' : 'off'} sensorDepth=${sensorDepthOn ? 'on' : 'off'} centerDepth=${camRt.sensorSurfaceToCenterDepth ? 'on' : 'off'} syncDepth=${camRt.synchronizedDepth ? 'on' : 'off'} medianN=${camRt.depthTemporalWindowFrames ?? 3} velocity=${camRt.physicsConstrainedVelocity ? 'physics' : (camRt.velocityLeastSquares ? 'LS' : 'endpoint')}N${camRt.velocityWindowFrames ?? 3} clearLoss=${camRt.clearBuffersOnDetectionLoss ? 'on' : 'off'} motionGate=${camRt.motionConsistencyGate ? 'on' : 'off'} impactReset=${camRt.impactVelocityReset ? 'on' : 'off'} irDepthKF=${camRt.irDepthKalman ? 'on' : 'off'} depthMode=${camRt.depthMode || 'sensor'} active=${camera.activeTransport || 'none'} ${imageAgeBits}`
       : `topics transport=${camera.imageTransport || 'none'} active=${camera.activeTransport || 'none'} compressed=${camera.imageTopic || 'none'} raw=${camera.rawImageTopic || 'none'} ${imageAgeBits}`;
     const measured = latest.measuredBall || [NaN, NaN, NaN];
     const commandRacket = latest.commandRacket || null;
@@ -20505,6 +23373,7 @@ async function step() {
     const releaseGate = latest.releaseGate || {};
     const comp = latest.compensation || {};
     const runtime = latest.runtime || {};
+    const dqAdapter = runtime.policyDqAdapter || {};
     const simClock = sim.simClock || {};
     const simSyncStatus = sim.sync || {};
     const backendLoop = latest.backendControlLoop || {};
@@ -20522,6 +23391,9 @@ async function step() {
       .filter(([, v]) => v).map(([k]) => k).join(', ') || 'none';
     const estBits = est.enabled
       ? `${est.backend || 'unknown'} ${est.state || 'unknown'} ${est.predicted ? 'pred' : 'meas'} predict=${est.prediction ? 'on' : 'off'}${latest.estimatorPredictionPending ? '(PENDING)' : ''} mode=${est.outputMode || 'unknown'} dyn=${est.ballisticDynamics === false ? 'held-cv' : 'ballistic'} rgdyn=${est.releaseGatedDynamics ? 'on' : 'off'} ctrl=${est.controlValid === false ? `reject:${est.controlRejectReason || 'stale'}` : 'valid'} loss=${Number.isFinite(est.lossS) ? fmt(est.lossS) : 'none'}s extrap=${Number.isFinite(est.extrapolationS) ? fmt(est.extrapolationS) : 'none'}s cap=${Number.isFinite(est.controlMaxExtrapolationS) ? fmt(est.controlMaxExtrapolationS) : 'none'}s hold=${Number.isFinite(est.snapshotHoldS) ? fmt(est.snapshotHoldS) : 'none'}s impact=${est.impactValid && Number.isFinite(est.timeToContactS) ? `${fmt(est.timeToContactS)}s` : 'none'} acc=${est.updatesAccepted || 0} rej=${est.updatesRejected || 0}`
+      : 'off';
+    const highPredictionBits = highPrediction.enabled
+      ? `highFOV=${highPrediction.highFovEnabled ? 'on' : 'off'} depthFault=${highPrediction.sensorDepthAnomalyPredictionEnabled ? 'on' : 'off'} timeComp=${highPrediction.controlTimeCompensationEnabled ? 'on' : 'off'}/${Number.isFinite(highPrediction.controlTimeCompensationAppliedS) ? fmt(highPrediction.controlTimeCompensationAppliedS, 3) : '0'}s reacqSmooth=${highPrediction.reacquisitionSmoothingEnabled ? 'on' : 'off'} optInit=${highPrediction.optimizedInitialStateEnabled ? 'on' : 'off'} anomaly=${highPrediction.sensorDepthAnomalyDetected ? 'yes' : 'no'} ${highPrediction.state || 'idle'} reason=${highPrediction.reason || 'none'} trigger=${highPrediction.activeTrigger || 'none'} active=${highPrediction.active ? 'yes' : 'no'} elapsed=${Number.isFinite(highPrediction.elapsedS) ? fmt(highPrediction.elapsedS) : 'none'}s fitN=${highPrediction.historySamples || 0}/${highPrediction.historyFrames || '?'} fitRMSE=${Array.isArray(highPrediction.fitRmseMm) ? highPrediction.fitRmseMm.map(v => fmt(v, 1)).join('/') : 'none'}mm reacqErr=${Number.isFinite(highPrediction.lastReacquisitionErrorNormMm) ? fmt(highPrediction.lastReacquisitionErrorNormMm, 1) : 'none'}mm`
       : 'off';
     const releaseBits = releaseGate.bypassedForTracking
       ? 'bypassed for non-RL racket control'
@@ -20545,11 +23417,15 @@ async function step() {
 	    const appliedScaleBits = appliedScaleValues
 	      .map((value, index) => Math.abs(value - 1.0) > 1e-7 ? `${index}:${fmt(value, 3)}` : null)
 	      .filter(Boolean);
+	    const dqAdapterBits = runtime.enablePolicyDqAdapter
+	      ? `${dqAdapter.active ? 'active' : 'waiting'} reason=${dqAdapter.reason || 'none'} sample=${dqAdapter.sampleIndex ?? -1}`
+	      : 'off';
 	    readoutEl.innerHTML = [
 	      `runtime: ${ros.enabled ? `${ros.useState ? 'ros-state' : 'local-state'} / ${ros.publishCommands ? 'publish' : 'dry-run'}` : 'local only'} proc=${CONFIG.controlSubprocess ? 'subproc' : 'inline'} ui=${fmt(STEP_RATE_HZ, 0)}Hz display=${fmt(DISPLAY_RATE_HZ, 0)}Hz`,
 	      `controller: selected=${controlModeEl.value || 'policy'} applied=${runtime.controlMode || 'waiting'}${latest.controlModePending ? ' (PENDING)' : ''}`,
 	      `RL profile: selected=${policyProfileEl.value || 'legacy_bug_compatible'} active=${runtime.activePolicyProfile || 'waiting'} generation=${runtime.policyGeneration ?? 0}`,
 	      `obs scale: editing=obs[${selectedScaleIndex}] × ${selectedScaleIndex >= 0 ? fmt(policyObservationScales[selectedScaleIndex], 3) : 'none'} configured={${configuredScaleBits.join(', ') || 'all 1'}} applied={${appliedScaleValues.length ? (appliedScaleBits.join(', ') || 'all 1') : 'waiting'}}`,
+	      `policy dq adapter: selected=${flowEls.enablePolicyDqAdapter.checked && !flowEls.enablePolicyDqAdapter.disabled ? 'on' : 'off'} applied=${dqAdapterBits}`,
 	      `reset pose: selected=${resetInitialPoseEl.value || 'default_1'} applied=${resetPose}`,
 	      `racket tracking: ${trackingBits}${latest.trackingHeightPending || latest.trackingMpcPending ? ' (CONFIG PENDING)' : ''}`,
 	      `MPC juggling: ${juggleBits}`,
@@ -20570,7 +23446,7 @@ async function step() {
       mocap.enabled ? `mocap: marker_YY=${Number.isFinite(mocap.markerId) ? mocap.markerId : readInt(inputs.mocapMarkerId, (CONFIG.mocapBall && CONFIG.mocapBall.markerId) ?? 1, 0, 999)} / ${mocap.detected ? 'detected' : (mocap.ready === false ? 'not-ready' : 'lost')} age=${Number.isFinite(mocap.ageS) ? fmt(mocap.ageS) : 'none'}s udp=${mocap.udpHost || '?'}:${mocap.udpPort || '?'}` : null,
       `camera: ${camera.enabled ? `${cameraSource} / ${camera.cameraInfoReceived ? 'info' : 'no-info'} / ${camera.detectorReady ? 'detector' : 'no-detector'} / ${camera.detected ? 'detected' : 'lost'} age=${Number.isFinite(camera.ageS) ? fmt(camera.ageS) : 'none'}s hz=${Number.isFinite(camera.callbackHz) ? fmt(camera.callbackHz, 1) : '0.0'} frame=${camera.frame || 'none'}` : 'off'}`,
       camera.enabled ? `camera path: ${cameraPath}` : null,
-      camera.enabled ? `camera flow: detect=${camRt.detect ? 'on' : 'off'} overlay=${camRt.visualize ? 'on' : 'off'} yolo=${camRt.yolo ? 'on' : 'off'} sensorDepth=${sensorDepthOn ? 'on' : 'off'} depthMode=${camRt.depthMode || 'sensor'} undistort=${camRt.undistort ? 'on' : 'off'} rgbKF=${camRt.kalman ? 'on' : 'off'} pixelKF=${camRt.pixelKalman ? 'on' : 'off'} candidate=${camRt.candidateFilter ? 'on' : 'off'} ellipse=${camRt.ellipseFit ? 'on' : 'off'} tracker=${camRt.temporalTracker ? 'on' : 'off'} color=${camRt.colorFilter ? 'on' : 'off'} frames=${camera.frameCount || 0} det=${camera.detectionCount || 0} vizHz=${Number.isFinite(camera.visualizationRateHz) ? fmt(camera.visualizationRateHz, 0) : '30'} web=${camera.webMaxWidth || 'full'}px/q${camera.webJpegQuality || 62}` : null,
+      camera.enabled ? `camera flow: detect=${camRt.detect ? 'on' : 'off'} overlay=${camRt.visualize ? 'on' : 'off'} yolo=${camRt.yolo ? 'on' : 'off'} sensorDepth=${sensorDepthOn ? 'on' : 'off'} centerDepth=${camRt.sensorSurfaceToCenterDepth ? 'on' : 'off'} depthMode=${camRt.depthMode || 'sensor'} velocity=${camRt.physicsConstrainedVelocity ? 'physics' : (camRt.velocityLeastSquares ? 'LS' : 'endpoint')}N${camRt.velocityWindowFrames ?? 3} clearLoss=${camRt.clearBuffersOnDetectionLoss ? 'on' : 'off'} motionGate=${camRt.motionConsistencyGate ? 'on' : 'off'} impactReset=${camRt.impactVelocityReset ? 'on' : 'off'} undistort=${camRt.undistort ? 'on' : 'off'} rgbKF=${camRt.kalman ? 'on' : 'off'} pixelKF=${camRt.pixelKalman ? 'on' : 'off'} candidate=${camRt.candidateFilter ? 'on' : 'off'} ellipse=${camRt.ellipseFit ? 'on' : 'off'} tracker=${camRt.temporalTracker ? 'on' : 'off'} color=${camRt.colorFilter ? 'on' : 'off'} frames=${camera.frameCount || 0} det=${camera.detectionCount || 0} vizHz=${Number.isFinite(camera.visualizationRateHz) ? fmt(camera.visualizationRateHz, 0) : '30'} web=${camera.webMaxWidth || 'full'}px/q${camera.webJpegQuality || 62}` : null,
       camDetectorBall ? `camera detector ${camera.detectorFrame || camera.frame || 'camera'}: (${fmt(camDetectorBall[0])}, ${fmt(camDetectorBall[1])}, ${fmt(camDetectorBall[2])})` : null,
       camControlBall ? `camera control sim: (${fmt(camControlBall[0])}, ${fmt(camControlBall[1])}, ${fmt(camControlBall[2])})` : null,
       camera.error ? `camera error: ${camera.error}` : null,
@@ -20582,6 +23458,7 @@ async function step() {
       `done ball [${doneBall.source || 'unknown'}]: (${fmt(doneBallPos[0])}, ${fmt(doneBallPos[1])}, ${fmt(doneBallPos[2])}) valid=${doneBall.valid ? 'true' : 'false'} streak=${JSON.stringify(doneBall.streaks || {})}/${doneBall.requiredTicks || '?'}`,
       `release gate: ${releaseBits}`,
       `estimator: ${estBits}`,
+      `ball prediction: ${highPredictionBits}`,
       `robot EE [${racketSource}]: (${fmt(racket.x)}, ${fmt(racket.y)}, ${fmt(racket.z)})`,
       sim.enabled ? `sim: ${sim.active ? 'on' : 'idle'} backend=${sim.backend || 'none'} sync=${simSyncStatus.alignmentValid ? 'valid' : 'NOT-valid'} produced=${Number.isFinite(simSyncStatus.producedSourceSeq) ? simSyncStatus.producedSourceSeq : 'none'} processed=${Number.isFinite(simSyncStatus.sourceSeq) ? simSyncStatus.sourceSeq : 'none'} lag=${Number.isFinite(simSyncStatus.lagTicks) ? simSyncStatus.lagTicks : 0}tick/${Number.isFinite(simSyncStatus.lagS) ? fmt(simSyncStatus.lagS, 3) : 'none'}s hz=${Number.isFinite(simClock.stepHz) ? fmt(simClock.stepHz, 1) : '0.0'} drop=${Number.isFinite(simSyncStatus.commandDrops) ? simSyncStatus.commandDrops : 0}+${Number.isFinite(simSyncStatus.resultDrops) ? simSyncStatus.resultDrops : 0} queued=${Number.isFinite(simClock.queued) ? simClock.queued : 0} batch=${Number.isFinite(simClock.steps) ? simClock.steps : 0}${sim.holdReason ? ` hold=${sim.holdReason}` : ''}${sim.error ? ` error=${sim.error}` : ''}` : 'sim: off',
       simEe ? `sim EE: (${fmt(simEe.x)}, ${fmt(simEe.y)}, ${fmt(simEe.z)})` : null,
@@ -20590,7 +23467,7 @@ async function step() {
       cartEe ? `cart: (${fmt(cartEe.x)}, ${fmt(cartEe.y)}, ${fmt(cartEe.z)}) age=${cartAge}` : `cart: none age=${cartAge}`,
       `cmd-joint err max: ${Number.isFinite(cmdErr) ? fmt(cmdErr) : 'none'}`,
       `noise: ${fmt((latest.noiseStdM || 0) * 1000, 1)} mm`,
-      `action max: ${fmt(latest.actionAbsMax)}`,
+      `action max raw/executed: ${fmt(latest.actionAbsMax)} / ${fmt(latest.executedActionAbsMax)}`,
       `done hits: ${conds}`,
       `fk: ${latest.fkOk ? 'ok' : 'off'}`
     ].filter(Boolean).join('<br>');
@@ -20616,7 +23493,7 @@ document.getElementById('reset').addEventListener('click', async () => {
   ball = pointFromArray(data.rawBall || data.ball || data.observedBall || CONFIG.initialBall)
     || {x: CONFIG.initialBall[0], y: CONFIG.initialBall[1], z: CONFIG.initialBall[2]};
   observedBall = pointFromArray(data.observedBall) || {...ball};
-  predictedBall = pointFromArray((data.estimator || {}).positionM);
+  predictedBall = pointFromArray(data.predictedBall || (data.estimator || {}).positionM);
   racket = pointFromArray(data.racket || data.anchor) || racket;
   trackingTarget = null;
   simEe = null;
@@ -20724,7 +23601,10 @@ analysisReplay3dEl.addEventListener('pointercancel', () => {
 });
 
 visibleEl.addEventListener('change', drawAll);
-ballSourceEl.addEventListener('change', drawAll);
+ballSourceEl.addEventListener('change', () => {
+  syncEstimatorModeControl();
+  drawAll();
+});
 useRosStateEl.addEventListener('change', () => {
   if (publishCommandsEl.checked && !publishCommandsEl.disabled) {
     useRosStateEl.checked = true;
@@ -20747,7 +23627,10 @@ for (const el of Object.values(flowEls)) {
   });
 }
 for (const el of Object.values(cameraFlowEls)) {
-  el.addEventListener('change', drawAll);
+  el.addEventListener('change', () => {
+    syncEstimatorModeControl();
+    drawAll();
+  });
 }
 cameraDepthModeEl.addEventListener('change', drawAll);
 window.addEventListener('resize', () => {
@@ -21844,7 +24727,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--policy-profile",
         type=normalize_observation_profile,
         choices=OBSERVATION_PROFILES,
-        default=OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+        default=OBSERVATION_PROFILE_SIMCODE6_QVEL67,
         help="Initial RL actor/observation profile; both profiles remain switchable in the UI.",
     )
     p.add_argument(
@@ -21871,6 +24754,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--simcode5-policy-xml-path", type=Path,
         default=DEFAULT_SIMCODE5_POLICY_XML)
+    p.add_argument(
+        "--simcode6-model-path", type=Path,
+        default=DEFAULT_SIMCODE6_MODEL_PATH)
+    p.add_argument(
+        "--simcode6-policy-xml-path", type=Path,
+        default=DEFAULT_SIMCODE6_POLICY_XML)
     p.add_argument("--robot-xml-path", type=Path, default=DEFAULT_ROBOT_XML)
     p.add_argument("--policy-obs-dim", type=int, choices=(50, 67), default=67)
     p.add_argument(
@@ -22039,10 +24928,96 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=0.05,
     )
     p.add_argument("--control-rate-hz", type=finite_float, default=200.0)
+    p.add_argument(
+        "--enable-policy-dq-adapter",
+        action="store_true",
+        help=(
+            "For real simcode5 policy observations only, replace arm dq with "
+            "gain * delay(EMA(measured dq)). Raw dq remains authoritative for "
+            "safety and all non-policy controllers."),
+    )
+    p.add_argument(
+        "--policy-dq-adapter-gain",
+        type=parse_joint_float_vector,
+        default=SIMCODE5_DQ_ADAPTER_GAIN,
+        help="Seven per-joint gains for the policy-only dq adapter.",
+    )
+    p.add_argument(
+        "--policy-dq-adapter-tau-s",
+        type=parse_joint_float_vector,
+        default=SIMCODE5_DQ_ADAPTER_TAU_S,
+        help="Seven per-joint EMA time constants in seconds; zero bypasses EMA.",
+    )
+    p.add_argument(
+        "--policy-dq-adapter-delay-steps",
+        type=parse_joint_int_vector,
+        default=SIMCODE5_DQ_ADAPTER_DELAY_STEPS,
+        help="Seven causal delay lengths in fixed-rate policy ticks.",
+    )
+    p.add_argument(
+        "--policy-dq-observation-scale",
+        type=finite_float,
+        default=1.0,
+        help=(
+            "Initial Policy Observation Scale for arm dq obs[7:14]. "
+            "0.5 divides those actor inputs by two for both real and mirror."),
+    )
     p.add_argument("--ball-lost-failsafe-timeout-s", type=finite_float, default=0.6)
     p.add_argument("--enable-safety-limiter", action="store_true")
     p.add_argument("--safety-parking-velocity-scale", type=finite_float, default=0.08)
     p.add_argument("--safety-parking-acceleration-scale", type=finite_float, default=0.06)
+    p.add_argument(
+        "--enable-contact-action-shield", action="store_true",
+        help=(
+            "Constrain RL racket lateral velocity, contact normal, and inset "
+            "workspace motion around predicted ball contact."),
+    )
+    p.add_argument(
+        "--contact-shield-pre-contact-window-s",
+        type=finite_float, default=0.06)
+    p.add_argument(
+        "--contact-shield-post-contact-window-s",
+        type=finite_float, default=0.05)
+    p.add_argument(
+        "--contact-shield-contact-tolerance-m",
+        type=finite_float, default=0.04)
+    p.add_argument(
+        "--contact-shield-max-lateral-distance-m",
+        type=finite_float, default=0.12)
+    p.add_argument(
+        "--contact-shield-min-downward-velocity-m-s",
+        type=finite_float, default=0.25)
+    p.add_argument(
+        "--contact-shield-max-normal-lateral",
+        type=finite_float, default=0.03)
+    p.add_argument(
+        "--contact-shield-max-lateral-speed-m-s",
+        type=finite_float, default=0.25)
+    p.add_argument(
+        "--contact-shield-workspace-margin-m",
+        type=finite_float, default=0.035)
+    p.add_argument(
+        "--contact-shield-dls-damping",
+        type=finite_float, default=0.03)
+    p.add_argument(
+        "--enable-vertical-contact-energy-shield",
+        action="store_true",
+        help=(
+            "Limit commanded upward racket speed before contact from the "
+            "incoming ball vz, restitution, and target relative apex height."),
+    )
+    p.add_argument(
+        "--vertical-contact-pre-contact-window-s",
+        type=finite_float, default=0.12)
+    p.add_argument(
+        "--vertical-contact-target-apex-height-m",
+        type=finite_float, default=0.30)
+    p.add_argument(
+        "--vertical-contact-restitution",
+        type=finite_float, default=0.66)
+    p.add_argument(
+        "--vertical-contact-max-racket-upward-speed-m-s",
+        type=finite_float, default=0.90)
     p.add_argument("--disable-ball-capture-gate", action="store_true")
     p.add_argument("--disable-ball-release-gate", action="store_true")
     p.add_argument("--disable-ball-lost-failsafe", action="store_true")
@@ -22437,6 +25412,121 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=60.0,
         help="Estimator measurement noise sigma for the camera optical-depth axis.",
     )
+    high_ball_prediction_group = p.add_mutually_exclusive_group()
+    high_ball_prediction_group.add_argument(
+        "--enable-high-ball-occlusion-prediction",
+        dest="enable_high_ball_occlusion_prediction",
+        action="store_true",
+        help=(
+            "Use the IROS2249 least-squares + aerodynamic model only while "
+            "a high, rising camera ball is temporarily above the FOV."),
+    )
+    high_ball_prediction_group.add_argument(
+        "--disable-high-ball-occlusion-prediction",
+        dest="enable_high_ball_occlusion_prediction",
+        action="store_false",
+        help="Start with high-FOV prediction disabled in the web runtime.",
+    )
+    p.set_defaults(enable_high_ball_occlusion_prediction=True)
+    sensor_depth_prediction_group = p.add_mutually_exclusive_group()
+    sensor_depth_prediction_group.add_argument(
+        "--enable-sensor-depth-anomaly-prediction",
+        dest="enable_sensor_depth_anomaly_prediction",
+        action="store_true",
+        help=(
+            "When adaptive depth rejects sensor ranging, feed the policy a "
+            "bounded IROS2249 trajectory prediction instead of the detector's "
+            "one-dimensional depth fallback."),
+    )
+    sensor_depth_prediction_group.add_argument(
+        "--disable-sensor-depth-anomaly-prediction",
+        dest="enable_sensor_depth_anomaly_prediction",
+        action="store_false",
+        help="Keep adaptive depth fallback independent from ball-state prediction.",
+    )
+    p.set_defaults(enable_sensor_depth_anomaly_prediction=True)
+    p.add_argument(
+        "--high-ball-prediction-history-frames", type=int, default=10,
+        help="Visible position samples used by the paper's LS initialization.",
+    )
+    p.add_argument(
+        "--high-ball-prediction-activation-z-m",
+        type=finite_float,
+        default=1.42,
+        help="Minimum last-visible Z for treating a loss as above-FOV.",
+    )
+    p.add_argument(
+        "--high-ball-prediction-min-upward-velocity-m-s",
+        type=finite_float,
+        default=0.20,
+        help="Minimum fitted upward velocity required when the track is lost.",
+    )
+    p.add_argument(
+        "--high-ball-prediction-max-prediction-s",
+        type=finite_float,
+        default=0.45,
+        help="Maximum time to feed a predicted ball state to the policy.",
+    )
+    p.add_argument(
+        "--high-ball-prediction-stop-z-m",
+        type=finite_float,
+        default=1.24,
+        help="Stop prediction if the descending ball reaches this Z unseen.",
+    )
+    p.add_argument(
+        "--high-ball-prediction-drag-coefficient-per-m",
+        type=finite_float,
+        default=0.13545,
+        help="Paper-model quadratic drag k_m in 1/m.",
+    )
+    p.add_argument(
+        "--high-ball-prediction-integration-step-s",
+        type=finite_float,
+        default=0.005,
+        help="Forward-Euler integration step for the paper model.",
+    )
+    p.add_argument(
+        "--high-ball-prediction-reacquisition-gate-m",
+        type=finite_float,
+        default=0.18,
+        help=(
+            "Reject an isolated reacquired detection farther than this from "
+            "the predicted trajectory while the bounded prediction is active."),
+    )
+    p.add_argument(
+        "--enable-high-ball-reacquisition-velocity-handover",
+        action="store_true",
+        help=(
+            "On camera reacquisition, use measured position immediately but "
+            "blend model velocity into a fresh visible-only velocity fit."),
+    )
+    p.add_argument(
+        "--high-ball-reacquisition-velocity-frames",
+        type=int,
+        default=3,
+        help="Fresh visible position frames required by velocity handover.",
+    )
+    p.add_argument(
+        "--high-ball-reacquisition-velocity-blend-s",
+        type=finite_float,
+        default=0.04,
+        help="Smooth model-to-camera-fit velocity handover duration.",
+    )
+    p.add_argument(
+        "--enable-camera-control-time-compensation",
+        action="store_true",
+        help="Propagate each trusted 90 Hz camera state to the 200 Hz control time.",
+    )
+    p.add_argument(
+        "--enable-camera-reacquisition-smoothing",
+        action="store_true",
+        help="Confirm two camera frames and smoothly blend full 6D state after prediction.",
+    )
+    p.add_argument(
+        "--enable-optimized-ball-prediction-initial-state",
+        action="store_true",
+        help="Use calibrated robust XY/fixed-gravity Z initialization for high/depth prediction.",
+    )
     p.add_argument(
         "--ros-bridge",
         action="store_true",
@@ -22484,8 +25574,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="s",
     )
     p.add_argument("--mocap-timeout-s", type=finite_float, default=0.5)
-    p.add_argument("--mocap-velocity-alpha", type=finite_float, default=0.35)
+    p.add_argument(
+        "--mocap-velocity-alpha",
+        type=finite_float,
+        default=1.0,
+        help="Optional EMA factor after finite difference (1.0 disables EMA).",
+    )
     p.add_argument("--mocap-max-velocity-m-s", type=finite_float, default=20.0)
+    p.add_argument(
+        "--mocap-velocity-window-frames",
+        type=int,
+        default=3,
+        help="Number of mocap frame intervals for time-aware velocity difference.",
+    )
+    p.add_argument(
+        "--mocap-velocity-window-max-span-s",
+        type=finite_float,
+        default=0.05,
+        help="Reject a velocity difference window spanning longer than this.",
+    )
     p.add_argument(
         "--camera-source-mode",
         choices=("direct_realsense", "ros_topic"),
@@ -22534,8 +25641,53 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--depth-neighborhood-px", type=int, default=2)
     p.add_argument(
+        "--camera-depth-mode",
+        choices=("sensor", "geometry", "adaptive"),
+        default="adaptive",
+        help="Initial hybrid detector depth source shown in the web runtime.",
+    )
+    p.add_argument(
+        "--enable-sensor-surface-to-center-depth",
+        action="store_true",
+        help="Start with the independent calibrated RealSense ball-surface "
+             "to ball-centre depth correction enabled.",
+    )
+    p.add_argument(
         "--depth-temporal-window-frames", type=int, default=3,
         help="Odd legacy depth-median window size (1, 3, 5, 7, or 9).")
+    p.add_argument(
+        "--camera-velocity-least-squares", action="store_true",
+        help="Fit camera ball velocity over timestamped positions by least squares.")
+    p.add_argument(
+        "--camera-velocity-window-frames", type=int, default=3,
+        help="Camera position samples used by the raw 3D velocity estimator.")
+    p.add_argument(
+        "--enable-camera-clear-buffers-on-loss", action="store_true",
+        help="Clear depth/position/pixel/KF histories on the first lost frame.")
+    p.add_argument(
+        "--enable-camera-motion-consistency-gate", action="store_true",
+        help="Reject a 3D measurement inconsistent with the trusted ballistic state.")
+    p.add_argument(
+        "--enable-camera-physics-constrained-velocity", action="store_true",
+        help="Use robust XY linear and fixed-gravity Z causal velocity fitting.")
+    p.add_argument(
+        "--enable-camera-trajectory-position-smoothing", action="store_true",
+        help="Use a bounded causal trajectory fit for camera ball position.")
+    p.add_argument(
+        "--camera-impact-velocity-reset", action="store_true",
+        help="Clear pre-impact camera velocity samples on a falling/rising reversal.")
+    p.add_argument(
+        "--camera-impact-min-downward-velocity-m-s",
+        type=finite_float, default=0.25)
+    p.add_argument(
+        "--camera-impact-min-upward-velocity-m-s",
+        type=finite_float, default=0.25)
+    p.add_argument(
+        "--camera-impact-min-velocity-jump-m-s",
+        type=finite_float, default=0.80)
+    p.add_argument(
+        "--camera-impact-refractory-s",
+        type=finite_float, default=0.08)
     p.add_argument("--infer-imgsz", type=int, default=640)
     p.add_argument("--detector-device", default="0")
     p.add_argument("--detector-half", action="store_true")
@@ -22543,10 +25695,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--use-ir-depth-kalman", action="store_true",
         help="Enable the hybrid detector's joint IR+depth 3D Kalman filter.")
-    p.add_argument(
-        "--use-synchronized-ir-depth", action="store_true",
+    synchronized_depth_group = p.add_mutually_exclusive_group()
+    synchronized_depth_group.add_argument(
+        "--use-synchronized-ir-depth",
+        dest="use_synchronized_ir_depth",
+        action="store_true",
         help="Use raw depth from the current stereo frameset instead of the "
-             "legacy five-frame median depth.")
+             "configured legacy temporal-median depth.")
+    synchronized_depth_group.add_argument(
+        "--disable-synchronized-ir-depth",
+        dest="use_synchronized_ir_depth",
+        action="store_false",
+        help="Start with temporal-median depth instead of synchronized depth.",
+    )
+    p.set_defaults(use_synchronized_ir_depth=False)
     p.add_argument(
         "--use-pixel-kalman", action="store_true",
         help="Enable the hybrid detector's IR-pixel Kalman filter.")
@@ -22638,6 +25800,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--simcode5-sim-xml-path", type=Path,
         default=DEFAULT_SIMCODE5_POLICY_XML)
     p.add_argument(
+        "--simcode6-sim-xml-path", type=Path,
+        default=DEFAULT_SIMCODE6_POLICY_XML)
+    p.add_argument(
         "--enable-sim-video",
         action="store_true",
         help=(
@@ -22664,6 +25829,8 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
     simcode4_policy_xml = args.simcode4_policy_xml_path.expanduser().resolve()
     simcode5_model_path = args.simcode5_model_path.expanduser().resolve()
     simcode5_policy_xml = args.simcode5_policy_xml_path.expanduser().resolve()
+    simcode6_model_path = args.simcode6_model_path.expanduser().resolve()
+    simcode6_policy_xml = args.simcode6_policy_xml_path.expanduser().resolve()
     robot_xml = args.robot_xml_path.expanduser().resolve()
     yolo_model_path = args.yolo_model_path.expanduser().resolve()
     if not model_path.is_file():
@@ -22692,6 +25859,12 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
     if not simcode5_policy_xml.is_file():
         raise FileNotFoundError(
             f"simcode5 policy XML not found: {simcode5_policy_xml}")
+    if not simcode6_model_path.is_file():
+        raise FileNotFoundError(
+            f"simcode6 qvel67 checkpoint not found: {simcode6_model_path}")
+    if not simcode6_policy_xml.is_file():
+        raise FileNotFoundError(
+            f"simcode6 policy XML not found: {simcode6_policy_xml}")
     if not robot_xml.is_file():
         raise FileNotFoundError(f"robot XML not found: {robot_xml}")
     if bool(args.camera_ball) and not yolo_model_path.is_file():
@@ -22701,6 +25874,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
     simcode3_sim_xml = args.simcode3_sim_xml_path.expanduser().resolve()
     simcode4_sim_xml = args.simcode4_sim_xml_path.expanduser().resolve()
     simcode5_sim_xml = args.simcode5_sim_xml_path.expanduser().resolve()
+    simcode6_sim_xml = args.simcode6_sim_xml_path.expanduser().resolve()
     if bool(args.enable_sim_mirror) and not sim_xml.is_file():
         raise FileNotFoundError(f"sim XML not found: {sim_xml}")
     if bool(args.enable_sim_mirror) and not simcode2_sim_xml.is_file():
@@ -22715,6 +25889,9 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
     if bool(args.enable_sim_mirror) and not simcode5_sim_xml.is_file():
         raise FileNotFoundError(
             f"simcode5 sim XML not found: {simcode5_sim_xml}")
+    if bool(args.enable_sim_mirror) and not simcode6_sim_xml.is_file():
+        raise FileNotFoundError(
+            f"simcode6 sim XML not found: {simcode6_sim_xml}")
     hybrid_ball_tracker_config_path = (
         args.hybrid_ball_tracker_config_path.expanduser().resolve())
     if (bool(args.enable_hybrid_ball_tracker)
@@ -22750,6 +25927,8 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         simcode4_policy_xml_path=simcode4_policy_xml,
         simcode5_model_path=simcode5_model_path,
         simcode5_policy_xml_path=simcode5_policy_xml,
+        simcode6_model_path=simcode6_model_path,
+        simcode6_policy_xml_path=simcode6_policy_xml,
         robot_xml_path=robot_xml,
         policy_obs_dim=int(args.policy_obs_dim),
         reset_initial_pose_id=_reset_initial_pose_id(args.reset_initial_pose),
@@ -22863,12 +26042,65 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
             3.0, max(0.001, float(
                 args.juggle_mpc_terminal_velocity_tolerance_m_s))),
         control_rate_hz=float(args.control_rate_hz),
+        enable_policy_dq_adapter=bool(args.enable_policy_dq_adapter),
+        policy_dq_adapter_gain=tuple(
+            float(value) for value in args.policy_dq_adapter_gain),
+        policy_dq_adapter_tau_s=tuple(
+            float(value) for value in args.policy_dq_adapter_tau_s),
+        policy_dq_adapter_delay_steps=tuple(
+            int(value) for value in args.policy_dq_adapter_delay_steps),
+        policy_dq_observation_scale=min(
+            100.0, max(-100.0, float(
+                args.policy_dq_observation_scale))),
         ball_lost_timeout_s=float(args.ball_lost_failsafe_timeout_s),
         enable_safety_limiter=bool(args.enable_safety_limiter),
         safety_parking_velocity_scale=min(
             1.0, max(1e-3, float(args.safety_parking_velocity_scale))),
         safety_parking_acceleration_scale=min(
             1.0, max(1e-3, float(args.safety_parking_acceleration_scale))),
+        enable_contact_action_shield=bool(
+            args.enable_contact_action_shield),
+        contact_shield_pre_contact_window_s=min(
+            0.5, max(0.0, float(
+                args.contact_shield_pre_contact_window_s))),
+        contact_shield_post_contact_window_s=min(
+            0.5, max(0.0, float(
+                args.contact_shield_post_contact_window_s))),
+        contact_shield_contact_tolerance_m=min(
+            0.25, max(0.001, float(
+                args.contact_shield_contact_tolerance_m))),
+        contact_shield_max_lateral_distance_m=min(
+            0.5, max(0.005, float(
+                args.contact_shield_max_lateral_distance_m))),
+        contact_shield_min_downward_velocity_m_s=min(
+            10.0, max(0.0, float(
+                args.contact_shield_min_downward_velocity_m_s))),
+        contact_shield_max_normal_lateral=min(
+            1.0, max(0.0, float(
+                args.contact_shield_max_normal_lateral))),
+        contact_shield_max_lateral_speed_m_s=min(
+            3.0, max(0.0, float(
+                args.contact_shield_max_lateral_speed_m_s))),
+        contact_shield_workspace_margin_m=min(
+            0.15, max(0.0, float(
+                args.contact_shield_workspace_margin_m))),
+        contact_shield_dls_damping=min(
+            1.0, max(1e-6, float(
+                args.contact_shield_dls_damping))),
+        enable_vertical_contact_energy_shield=bool(
+            args.enable_vertical_contact_energy_shield),
+        vertical_contact_pre_contact_window_s=min(
+            0.5, max(0.01, float(
+                args.vertical_contact_pre_contact_window_s))),
+        vertical_contact_target_apex_height_m=min(
+            1.0, max(0.02, float(
+                args.vertical_contact_target_apex_height_m))),
+        vertical_contact_restitution=min(
+            1.5, max(0.05, float(
+                args.vertical_contact_restitution))),
+        vertical_contact_max_racket_upward_speed_m_s=min(
+            3.0, max(0.0, float(
+                args.vertical_contact_max_racket_upward_speed_m_s))),
         enable_compensation=not bool(args.disable_compensation),
         compensation_mode=str(args.compensation_mode),
         comp_delay_ms=float(args.comp_delay_ms),
@@ -23009,6 +26241,45 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
             1.0, float(args.ball_estimator_r_lateral_mm)),
         ball_estimator_r_depth_mm=max(
             1.0, float(args.ball_estimator_r_depth_mm)),
+        enable_high_ball_occlusion_prediction=bool(
+            args.enable_high_ball_occlusion_prediction),
+        enable_sensor_depth_anomaly_prediction=bool(
+            args.enable_sensor_depth_anomaly_prediction),
+        high_ball_prediction_history_frames=min(
+            30, max(3, int(args.high_ball_prediction_history_frames))),
+        high_ball_prediction_activation_z_m=float(
+            args.high_ball_prediction_activation_z_m),
+        high_ball_prediction_min_upward_velocity_m_s=max(
+            0.0, float(
+                args.high_ball_prediction_min_upward_velocity_m_s)),
+        high_ball_prediction_max_prediction_s=min(
+            1.0, max(0.02, float(
+                args.high_ball_prediction_max_prediction_s))),
+        high_ball_prediction_stop_z_m=float(
+            args.high_ball_prediction_stop_z_m),
+        high_ball_prediction_drag_coefficient_per_m=max(
+            0.0, float(
+                args.high_ball_prediction_drag_coefficient_per_m)),
+        high_ball_prediction_integration_step_s=min(
+            0.05, max(0.0005, float(
+                args.high_ball_prediction_integration_step_s))),
+        high_ball_prediction_reacquisition_gate_m=min(
+            1.0, max(0.01, float(
+                args.high_ball_prediction_reacquisition_gate_m))),
+        enable_high_ball_reacquisition_velocity_handover=bool(
+            args.enable_high_ball_reacquisition_velocity_handover),
+        high_ball_reacquisition_velocity_frames=min(
+            9, max(2, int(
+                args.high_ball_reacquisition_velocity_frames))),
+        high_ball_reacquisition_velocity_blend_s=min(
+            0.25, max(0.005, float(
+                args.high_ball_reacquisition_velocity_blend_s))),
+        enable_camera_control_time_compensation=bool(
+            args.enable_camera_control_time_compensation),
+        enable_camera_reacquisition_smoothing=bool(
+            args.enable_camera_reacquisition_smoothing),
+        enable_optimized_ball_prediction_initial_state=bool(
+            args.enable_optimized_ball_prediction_initial_state),
         ros_bridge=bool(args.ros_bridge),
         ros_publish_commands=bool(args.ros_bridge and not args.disable_command_publish),
         command_topic=str(args.command_topic),
@@ -23029,6 +26300,10 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         mocap_timeout_s=float(args.mocap_timeout_s),
         mocap_velocity_alpha=float(args.mocap_velocity_alpha),
         mocap_max_velocity_m_s=float(args.mocap_max_velocity_m_s),
+        mocap_velocity_window_frames=max(
+            1, int(args.mocap_velocity_window_frames)),
+        mocap_velocity_window_max_span_s=max(
+            1e-4, float(args.mocap_velocity_window_max_span_s)),
         camera_source_mode=str(args.camera_source_mode),
         use_hybrid_detector=not bool(args.disable_hybrid_detector),
         use_depth_sensor=not bool(args.disable_depth_sensor),
@@ -23060,8 +26335,36 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         hybrid_roi_margin=max(0, int(args.hybrid_roi_margin)),
         depth_correction_model_path=str(args.depth_correction_model_path),
         depth_neighborhood_px=max(0, int(args.depth_neighborhood_px)),
+        camera_depth_mode=str(args.camera_depth_mode),
+        enable_sensor_surface_to_center_depth=bool(
+            args.enable_sensor_surface_to_center_depth),
         depth_temporal_window_frames=min(
             9, max(1, int(args.depth_temporal_window_frames)) | 1),
+        camera_velocity_least_squares=bool(
+            args.camera_velocity_least_squares),
+        camera_velocity_window_frames=min(
+            9, max(2, int(args.camera_velocity_window_frames))),
+        enable_camera_clear_buffers_on_loss=bool(
+            args.enable_camera_clear_buffers_on_loss),
+        enable_camera_motion_consistency_gate=bool(
+            args.enable_camera_motion_consistency_gate),
+        enable_camera_physics_constrained_velocity=bool(
+            args.enable_camera_physics_constrained_velocity),
+        enable_camera_trajectory_position_smoothing=bool(
+            args.enable_camera_trajectory_position_smoothing),
+        camera_impact_velocity_reset=bool(
+            args.camera_impact_velocity_reset),
+        camera_impact_min_downward_velocity_m_s=min(
+            10.0, max(0.0, float(
+                args.camera_impact_min_downward_velocity_m_s))),
+        camera_impact_min_upward_velocity_m_s=min(
+            10.0, max(0.0, float(
+                args.camera_impact_min_upward_velocity_m_s))),
+        camera_impact_min_velocity_jump_m_s=min(
+            20.0, max(0.0, float(
+                args.camera_impact_min_velocity_jump_m_s))),
+        camera_impact_refractory_s=min(
+            1.0, max(0.0, float(args.camera_impact_refractory_s))),
         infer_imgsz=max(1, int(args.infer_imgsz)),
         detector_device=str(args.detector_device),
         detector_half=bool(args.detector_half),
@@ -23112,12 +26415,21 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         sim_mirror_default_enabled=bool(
             args.enable_sim_mirror and not args.sim_mirror_default_disabled),
         sim_subprocess=not bool(args.disable_sim_subprocess),
-        sim_backend=str(args.sim_backend),
+        # Simcode4's target-aware planner ordering remains MJX-only.  The
+        # simcode5 CPU mirror restores the checkpoint plant settings and keeps
+        # an explicit operator-selected MJX backend available for exact runs.
+        sim_backend=(
+            "mjx"
+            if normalize_observation_profile(args.policy_profile)
+            == OBSERVATION_PROFILE_SIMCODE4_SERVO67
+            else str(args.sim_backend)
+        ),
         sim_xml_path=sim_xml,
         simcode2_sim_xml_path=simcode2_sim_xml,
         simcode3_sim_xml_path=simcode3_sim_xml,
         simcode4_sim_xml_path=simcode4_sim_xml,
         simcode5_sim_xml_path=simcode5_sim_xml,
+        simcode6_sim_xml_path=simcode6_sim_xml,
         sim_enable_video_frames=bool(args.enable_sim_video),
         sim_frame_rate_hz=min(120.0, max(1.0, float(args.sim_frame_rate_hz))),
         sim_render_width=max(320, int(args.sim_render_width)),
@@ -23248,6 +26560,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Simcode3 actuator67 model: {cfg.simcode3_model_path}")
         print(f"Simcode4 servo67 model: {cfg.simcode4_model_path}")
         print(f"Simcode5 pure-actuator67 model: {cfg.simcode5_model_path}")
+        print(f"Simcode6 qvel67 model: {cfg.simcode6_model_path}")
         print(f"Robot XML: {cfg.robot_xml_path}")
         if cfg.enable_sim_mirror:
             print(

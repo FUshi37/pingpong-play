@@ -68,6 +68,13 @@ DEFAULT_ARM_Q_HIGH_RAD = tuple(np.pi for _ in range(7))
 DEFAULT_BALL_OBS_AGE_CLIP_S = 0.20
 # JuggleConfig.action_acc_scale (base value; action_scale_mult is DR-only).
 DEFAULT_ACTION_ACC_SCALE = 1.0
+DEFAULT_ACTION_VELOCITY_SCALE = 1.0
+ACTION_COMMAND_MODE_ACCELERATION = "acceleration"
+ACTION_COMMAND_MODE_VELOCITY = "velocity"
+ACTION_COMMAND_MODES = (
+    ACTION_COMMAND_MODE_ACCELERATION,
+    ACTION_COMMAND_MODE_VELOCITY,
+)
 # MJX _point_to_base keeps the input point's z unchanged, so FK-derived racket
 # positions must keep MuJoCo world z. The real-camera path converts its z into
 # this same world-height convention before building policy observations.
@@ -85,18 +92,21 @@ OBSERVATION_PROFILE_SIMCODE2_IDEALPD67 = "simcode2_idealpd67"
 OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67 = "simcode3_actuator67"
 OBSERVATION_PROFILE_SIMCODE4_SERVO67 = "simcode4_servo67"
 OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67 = "simcode5_pure_actuator67"
+OBSERVATION_PROFILE_SIMCODE6_QVEL67 = "simcode6_qvel67"
 OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+    OBSERVATION_PROFILE_SIMCODE6_QVEL67,
 )
 CORRECTED_67D_OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+    OBSERVATION_PROFILE_SIMCODE6_QVEL67,
 )
 
 
@@ -125,6 +135,9 @@ def normalize_observation_profile(value: object) -> str:
         "simcode5": OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
         "pure_actuator67": OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
         "pure_actuator_67": OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+        "simcode6": OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+        "qvel67": OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+        "qvel_67": OBSERVATION_PROFILE_SIMCODE6_QVEL67,
     }
     profile = aliases.get(profile, profile)
     if profile not in OBSERVATION_PROFILES:
@@ -177,8 +190,9 @@ class RLPolicyController:
     """Loads a PPO policy and maps ball state to right-arm joint targets.
 
     The controller is stateful: every call updates the internal command
-    trajectory (arm_cmd_q, arm_cmd_qvel) via action acceleration integration,
-    exactly like `JuggleEnv.step` with `arm_action_limiter=False`.
+    trajectory (arm_cmd_q, arm_cmd_qvel) using the checkpoint-selected
+    acceleration- or velocity-command path and its limiter settings, exactly
+    like the corresponding ``JuggleEnv.step`` branch.
     """
 
     def __init__(
@@ -187,6 +201,11 @@ class RLPolicyController:
         *,
         dt: float = 0.005,
         action_acc_scale: float = DEFAULT_ACTION_ACC_SCALE,
+        action_command_mode: str = ACTION_COMMAND_MODE_ACCELERATION,
+        action_velocity_scale: float = DEFAULT_ACTION_VELOCITY_SCALE,
+        action_filter_tau_ms: float = 0.0,
+        action_jerk_limit: float = 0.0,
+        action_acc_limit: float = 1.0,
         arm_vel_limit_deg_s=DEFAULT_ARM_VEL_LIMIT_DEG_S,
         arm_acc_limit_deg_s2=DEFAULT_ARM_ACC_LIMIT_DEG_S2,
         arm_q_low_rad=DEFAULT_ARM_Q_LOW_RAD,
@@ -204,6 +223,17 @@ class RLPolicyController:
         self._logger = logger or _LoggerShim()
         self.dt = float(dt)
         self.action_acc_scale = float(action_acc_scale)
+        self.action_command_mode = str(action_command_mode).strip().lower()
+        if self.action_command_mode not in ACTION_COMMAND_MODES:
+            raise ValueError(
+                f"unknown action_command_mode={action_command_mode!r}; "
+                f"expected one of {ACTION_COMMAND_MODES}")
+        self.action_velocity_scale = float(action_velocity_scale)
+        if not np.isfinite(self.action_velocity_scale) or self.action_velocity_scale <= 0.0:
+            raise ValueError("action_velocity_scale must be positive and finite")
+        self.action_filter_tau_ms = max(0.0, float(action_filter_tau_ms))
+        self.action_jerk_limit = max(0.0, float(action_jerk_limit))
+        self.action_acc_limit = float(action_acc_limit)
         self.deterministic = bool(deterministic)
         self.ball_obs_age_clip_s = max(1e-6, float(ball_obs_age_clip_s))
         # When True, clip mapped joint acceleration and the integrated joint
@@ -259,6 +289,10 @@ class RLPolicyController:
         self.command_buffer_extra_steps = 4
         self.max_contact_time_s = 0.50
         self.contact_height_offset_m = 0.0
+        # The checkpoint may override the right-arm gains used by the frozen
+        # MuJoCo warm start/FK model.  This is observation state, not a
+        # hardware-side servo implementation.
+        self.right_arm_pd_profile = "xml"
         self.contact_lost_ball_timeout_s = (
             0.35
             if uses_corrected_67d_observation(self.observation_profile)
@@ -279,6 +313,8 @@ class RLPolicyController:
         self._logger.info(
             f"RL policy loaded | obs_dim={self._expected_obs_dim}, "
             f"act_dim={self.n_arm}, dt={self.dt:.4f}s, device={device}, "
+            f"action_command_mode={self.action_command_mode}, "
+            f"action_velocity_scale={self.action_velocity_scale}, "
             f"arm_action_limiter={self.arm_action_limiter}, "
             f"delay_conditioning={self.enable_delay_conditioning}, "
             f"use_valid_ball_obs_age={self.use_valid_ball_obs_age}, "
@@ -313,7 +349,10 @@ class RLPolicyController:
                         from pingpong_controller.simcode2_xml import (
                             build_simcode2_training_xml,
                         )
-                        xml_path = build_simcode2_training_xml(xml_path)
+                        xml_path = build_simcode2_training_xml(
+                            xml_path,
+                            right_arm_pd_profile=self.right_arm_pd_profile,
+                        )
                     self.mj_model = mj.MjModel.from_xml_path(str(xml_path))
                     self.mj_data = mj.MjData(self.mj_model)
                     self._racket_site_id = mj.mj_name2id(
@@ -483,6 +522,7 @@ class RLPolicyController:
         self._last_racket_sample_vel_base = np.zeros(3, dtype=np.float32)
         # Debug state: latest command trajectory for external monitoring.
         self.last_action = np.zeros(self.n_arm, dtype=np.float32)
+        self.last_executed_action = np.zeros(self.n_arm, dtype=np.float32)
         self.last_cmd_q = self.arm_cmd_q.copy()
         self.last_cmd_qvel = np.zeros(self.n_arm, dtype=np.float32)
         self.last_cmd_qacc = np.zeros(self.n_arm, dtype=np.float32)
@@ -496,8 +536,8 @@ class RLPolicyController:
         if self.enable_delay_conditioning:
             if uses_corrected_67d_observation(self.observation_profile):
                 # Corrected 67D actors use the fixed nominal delay rounded to
-                # control ticks, plus the checkpoint's extra history slots.
-                # control ticks.  Its buffer is 14 delay + 4 extra + current.
+                # control ticks, plus checkpoint extra slots and the current
+                # command. (For simcode6: 9 + 4 + 1 = 14 entries.)
                 self._delay_steps = max(
                     0, int(round(self.delay_conditioning_tau_s / self.dt)))
                 self._command_buffer_len = max(
@@ -1317,21 +1357,61 @@ class RLPolicyController:
             obs = obs.copy()
             obs *= scale_vector
 
-        action = self._policy_action(obs)
-        if not np.all(np.isfinite(action)):
+        raw_action = self._policy_action(obs)
+        if not np.all(np.isfinite(raw_action)):
             self._logger.warn(
                 "RL policy returned non-finite action; holding last command")
             return self.arm_cmd_q.copy()
-        action = np.clip(action, -1.0, 1.0)
+        raw_action = np.clip(raw_action, -1.0, 1.0).astype(np.float32)
 
-        # Action-to-joint integration. Mirrors JuggleEnv.step:
-        #   desired_qdd = action * acc_limit * acc_scale
-        #   cmd_qvel   += desired_qdd * dt
-        #   cmd_q      += cmd_qvel * dt    (clipped to joint range)
-        # When arm_action_limiter is True (set per checkpoint), the mapped
-        # acceleration and the integrated velocity are additionally clipped
-        # to the arm limits, matching the training env's limiter branch.
-        desired_qdd = action * self.arm_acc_limit_rad_s2 * self.action_acc_scale
+        # Match MJX's checkpoint-defined actor-output conditioning.  In
+        # simcode6, prev_action is the actually executed normalized action
+        # after clipping, LPF and slew limiting (not the raw policy mean).
+        if self.action_acc_limit > 0.0:
+            clipped_action = np.clip(
+                raw_action, -self.action_acc_limit, self.action_acc_limit)
+        else:
+            clipped_action = raw_action
+        filter_tau_s = self.action_filter_tau_ms * 1e-3
+        alpha = (
+            1.0 if filter_tau_s <= 1e-9
+            else step_dt / (filter_tau_s + step_dt)
+        )
+        filtered_action = (
+            alpha * clipped_action + (1.0 - alpha) * self.prev_action
+        )
+        if self.action_jerk_limit > 0.0:
+            max_delta = self.action_jerk_limit * step_dt
+            action = self.prev_action + np.clip(
+                filtered_action - self.prev_action, -max_delta, max_delta)
+        else:
+            action = filtered_action
+        action = np.asarray(action, dtype=np.float32)
+
+        # Action-to-joint integration. The legacy acceleration mode maps the
+        # actor to qdd and integrates qvel then q. Simcode6 maps the actor to a
+        # qvel target, applies the physical qacc envelope, and integrates q
+        # exactly once.  The checkpoint selects the branch; both retain the
+        # same velocity/position limits as the training environment.
+        if self.action_command_mode == ACTION_COMMAND_MODE_VELOCITY:
+            desired_qvel = (
+                action
+                * self.arm_vel_limit_rad_s
+                * self.action_velocity_scale
+            )
+            if self.arm_action_limiter:
+                desired_qvel = np.clip(
+                    desired_qvel,
+                    -self.arm_vel_limit_rad_s,
+                    self.arm_vel_limit_rad_s,
+                )
+            desired_qdd = (desired_qvel - self.arm_cmd_qvel) / step_dt
+        else:
+            desired_qdd = (
+                action
+                * self.arm_acc_limit_rad_s2
+                * self.action_acc_scale
+            )
         if self.arm_action_limiter:
             desired_qdd = np.clip(
                 desired_qdd,
@@ -1355,7 +1435,8 @@ class RLPolicyController:
                 self._cmd_history.pop(0)
 
         # Cache latest command state for external debug/monitoring.
-        self.last_action = action.copy()
+        self.last_action = raw_action.copy()
+        self.last_executed_action = action.copy()
         self.last_cmd_qacc = desired_qdd.copy()
         self.last_cmd_qvel = self.arm_cmd_qvel.copy()
         self.last_cmd_q = self.arm_cmd_q.copy()
@@ -1369,7 +1450,8 @@ class RLPolicyController:
     def latest_command_state(self) -> dict:
         """Return the most recent policy command trajectory for debug/monitoring.
 
-        Returns a dict with keys: position, velocity, acceleration, action.
+        Returns position, velocity, acceleration, raw action and the executed
+        normalized action after checkpoint-defined filtering/slew limiting.
         All arrays are float32, shape (7,). Acceleration is the commanded
         joint acceleration (rad/s²) from the last predict() call.
         """
@@ -1378,6 +1460,7 @@ class RLPolicyController:
             "velocity": self.last_cmd_qvel.copy(),
             "acceleration": self.last_cmd_qacc.copy(),
             "action": self.last_action.copy(),
+            "executed_action": self.last_executed_action.copy(),
         }
 
     def latest_obs_and_action(self) -> dict:
@@ -1391,6 +1474,7 @@ class RLPolicyController:
             "obs": self.last_obs.copy(),
             "obs_unscaled": self.last_obs_unscaled.copy(),
             "action": self.last_action.copy(),
+            "executed_action": self.last_executed_action.copy(),
             "observation_scale_indices": list(
                 self.last_observation_scale_indices),
             "observation_scales": self.last_observation_scales.copy(),

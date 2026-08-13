@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for legacy and simcode2/3/4/5 deployment contracts."""
+"""Regression tests for legacy and simcode2/3/4/5/6 deployment contracts."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ from pingpong_controller.mjx_rl_policy import (  # noqa: E402
     Simcode3Actuator67PolicyController,
     Simcode4Servo67PolicyController,
     Simcode5PureActuator67PolicyController,
+    Simcode6Qvel67PolicyController,
     inspect_mjx_checkpoint_metadata,
 )
 from pingpong_controller.rl_policy import (  # noqa: E402
@@ -35,6 +36,7 @@ from pingpong_controller.rl_policy import (  # noqa: E402
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+    OBSERVATION_PROFILE_SIMCODE6_QVEL67,
     RLPolicyController,
     uses_corrected_67d_observation,
 )
@@ -111,6 +113,20 @@ SIMCODE5_MODEL = (
 SIMCODE5_XML = (
     REPO_ROOT / "simcode5" / "pingpong_moz1-main"
     / "pingpong_controller" / "tools" / "rl_sim" / "moz1_pd.xml"
+)
+SIMCODE6_MODEL = (
+    REPO_ROOT / "simcode6" / "pingpong_moz1-main"
+    / "pingpong_controller" / "outputs" / "rl_sim"
+    / "record_new3_plateau_rework_20260812"
+    / "formal_gpu0_v14_heavy_ball_conservative_n1024_s128_e4_online"
+    / "mjx_curriculum_last.pkl"
+)
+SIMCODE6_XML = (
+    REPO_ROOT / "simcode6" / "pingpong_moz1-main"
+    / "pingpong_controller" / "tools" / "rl_sim" / "moz1_pd.xml"
+)
+SIMCODE6_SHA256 = (
+    "2ca715d71fe19a0058b8cac710574630bdff580ec28157ac80a3e1d70f8cef47"
 )
 
 
@@ -573,6 +589,255 @@ class FrozenCheckpointContractTest(unittest.TestCase):
 
 
 
+class Simcode6QvelCheckpointContractTest(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        cls.controller = Simcode6Qvel67PolicyController(
+            str(SIMCODE6_MODEL), robot_xml_path=None)
+        cls.fk_controller = Simcode6Qvel67PolicyController(
+            str(SIMCODE6_MODEL), robot_xml_path=str(SIMCODE6_XML))
+
+    def test_release_identity_network_shape_and_checkpoint_contract(self):
+        digest = hashlib.sha256()
+        with SIMCODE6_MODEL.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        self.assertEqual(digest.hexdigest(), SIMCODE6_SHA256)
+
+        metadata = inspect_mjx_checkpoint_metadata(str(SIMCODE6_MODEL))
+        self.assertEqual((metadata["obs_dim"], metadata["act_dim"]), (67, 7))
+        cfg = metadata["env_cfg"]
+        self.assertEqual(cfg["action_command_mode"], "velocity")
+        self.assertEqual(float(cfg["action_velocity_scale"]), 0.85)
+        self.assertEqual(float(cfg["action_filter_tau_ms"]), 15.0)
+        self.assertEqual(float(cfg["action_jerk_limit"]), 30.0)
+        self.assertTrue(cfg["arm_action_limiter"])
+        self.assertFalse(cfg["enable_anti_windup"])
+        self.assertEqual(float(cfg["ball_obs_rate_hz"]), 60.0)
+        self.assertTrue(cfg["ball_obs_fractional_rate"])
+        self.assertFalse(cfg["ball_obs_age_tracks_stale"])
+        self.assertEqual(cfg["actuator_cmd_model"], "second_order")
+        self.assertTrue(cfg["actuator_cmd_filter"])
+        self.assertFalse(cfg["actuator_delay_observation_only"])
+        self.assertEqual(cfg["actuator_compensation_mode"], "none")
+        self.assertFalse(cfg["arm_servo_target_tracking_planner"])
+        self.assertEqual(
+            cfg["right_arm_pd_profile"], "sport_taskspace_fit_v1")
+
+        weights = self.controller._pi_weights
+        self.assertEqual(weights["l1_w"].shape, (67, 256))
+        self.assertEqual(weights["l2_w"].shape, (256, 256))
+        self.assertEqual(weights["out_w"].shape, (256, 7))
+        self.assertEqual(
+            self.controller.observation_profile,
+            OBSERVATION_PROFILE_SIMCODE6_QVEL67)
+        self.assertEqual(self.controller.action_command_mode, "velocity")
+        self.assertFalse(self.controller.use_valid_ball_obs_age)
+        self.assertEqual(self.controller._delay_steps, 9)
+        self.assertEqual(self.controller._command_buffer_len, 14)
+        np.testing.assert_allclose(
+            np.rad2deg(self.controller.initial_arm_q_rad),
+            [5.736, -44.399, 30.683, 97.142, 49.323, -12.269, 14.214],
+            rtol=0.0,
+            atol=2e-5,
+        )
+
+    def test_all_67_observation_dimensions_keep_training_order_and_units(self):
+        controller = _FixedActionController(
+            "unused",
+            dt=0.005,
+            enable_delay_conditioning=True,
+            observation_profile=OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+            ball_obs_age_clip_s=0.5,
+            arm_action_limiter=True,
+        )
+        controller.delay_conditioning_tau_s = 0.045
+        controller.delay_conditioning_max_s = 0.045
+        controller.reset()
+        q = np.linspace(-0.30, 0.30, 7, dtype=np.float32)
+        dq = np.linspace(-1.40, 1.40, 7, dtype=np.float32)
+        base_q = np.asarray([0.11, -0.22, 0.033], dtype=np.float32)
+        base_dq = np.asarray([0.04, -0.05, 0.006], dtype=np.float32)
+        bpos = np.asarray([0.13, -0.41, 1.18], dtype=np.float32)
+        bvel = np.asarray([0.21, -0.08, -0.73], dtype=np.float32)
+        rpos = np.asarray([-0.09, -0.46, 1.02], dtype=np.float32)
+        previous_rpos = rpos - np.asarray(
+            [0.001, -0.002, 0.003], dtype=np.float32)
+        expected_rvel = (rpos - previous_rpos) / np.float32(0.005)
+        prev_action = np.linspace(-0.6, 0.6, 7, dtype=np.float32)
+        cmd_q = q + np.linspace(0.01, 0.07, 7, dtype=np.float32)
+        cmd_qvel = np.linspace(-0.7, 0.7, 7, dtype=np.float32)
+        active_cmd = q + np.linspace(-0.02, 0.04, 7, dtype=np.float32)
+
+        controller._base_obs_q = base_q.copy()
+        controller._base_obs_dq = base_dq.copy()
+        controller._prev_racket_pos_base = previous_rpos.copy()
+        controller._compute_racket_pose_base = mock.Mock(
+            return_value=(rpos.copy(), True))
+        controller.prev_action = prev_action.copy()
+        controller.arm_cmd_q = cmd_q.copy()
+        controller.arm_cmd_qvel = cmd_qvel.copy()
+        controller._cmd_history = [
+            cmd_q.copy() for _ in range(controller._command_buffer_len)]
+        active_index = (
+            len(controller._cmd_history) - 1 - controller._delay_steps)
+        controller._cmd_history[active_index] = active_cmd.copy()
+
+        obs = controller._build_obs(
+            bpos, bvel, 0.10, 0.005, arm_q=q, arm_dq=dq)
+
+        self.assertEqual(obs.shape, (67,))
+        np.testing.assert_array_equal(obs[0:7], q)          # rad
+        np.testing.assert_array_equal(obs[7:14], dq)        # rad/s
+        np.testing.assert_array_equal(obs[14:17], base_q)   # m,m,rad
+        np.testing.assert_array_equal(obs[17:20], base_dq)  # m/s,m/s,rad/s
+        np.testing.assert_array_equal(obs[20:23], bpos)     # m
+        np.testing.assert_array_equal(obs[23:26], bvel)     # m/s
+        np.testing.assert_array_equal(obs[26:29], rpos)     # m
+        np.testing.assert_allclose(obs[29:32], expected_rvel, atol=1e-6)
+        np.testing.assert_array_equal(obs[32:35], bpos - rpos)
+        np.testing.assert_array_equal(obs[35:42], prev_action)
+        np.testing.assert_array_equal(obs[42:49], cmd_q - q)
+        self.assertAlmostEqual(float(obs[49]), 0.2, places=6)
+        self.assertAlmostEqual(float(obs[50]), 1.0, places=6)
+        np.testing.assert_array_equal(obs[51:58], cmd_qvel)
+        np.testing.assert_array_equal(obs[58:65], active_cmd - q)
+        self.assertGreaterEqual(float(obs[65]), 0.0)
+        self.assertLessEqual(float(obs[65]), controller.max_contact_time_s)
+        self.assertAlmostEqual(
+            float(obs[66]), float(obs[65]) - 0.045, places=6)
+
+    def test_actor_mean_matches_frozen_checkpoint_fixture(self):
+        obs = np.linspace(-0.7, 0.7, 67, dtype=np.float32)
+        expected = np.asarray([
+            0.2165700048,
+            -0.9386982322,
+            -1.3192145824,
+            -1.4440997839,
+            0.9514687061,
+            -0.1772166789,
+            -0.1571901143,
+        ], dtype=np.float32)
+
+        np.testing.assert_allclose(
+            self.controller._policy_action(obs),
+            expected,
+            rtol=0.0,
+            atol=1e-6,
+        )
+
+    def test_sport_pd_xml_warm_state_matches_frozen_fixture(self):
+        np.testing.assert_allclose(
+            self.fk_controller._base_obs_q,
+            [0.0022214563, -0.0035478929, -0.0020711783],
+            rtol=0.0,
+            atol=2e-9,
+        )
+        np.testing.assert_allclose(
+            self.fk_controller._base_obs_dq,
+            [2.4086687e-05, 5.9704171e-06, -6.1149690e-06],
+            rtol=0.0,
+            atol=2e-11,
+        )
+        np.testing.assert_allclose(
+            self.fk_controller._racket_anchor_pos_base,
+            [-0.1141259223, -0.4663432837, 1.0486569405],
+            rtol=0.0,
+            atol=2e-8,
+        )
+
+    def test_qvel_action_is_filtered_slew_limited_and_integrated_once(self):
+        controller = Simcode6Qvel67PolicyController(
+            str(SIMCODE6_MODEL), robot_xml_path=None)
+        controller._policy_action = mock.Mock(
+            return_value=np.ones(7, dtype=np.float32))
+        q_feedback = controller.arm_cmd_q.copy()
+        dq_feedback = np.zeros(7, dtype=np.float32)
+        expected_q = controller.arm_cmd_q.copy()
+        expected_qvel = np.zeros(7, dtype=np.float32)
+        expected_action = np.zeros(7, dtype=np.float32)
+
+        for tick in range(2):
+            lpf = (
+                np.float32(0.25) * np.ones(7, dtype=np.float32)
+                + np.float32(0.75) * expected_action)
+            expected_action = expected_action + np.clip(
+                lpf - expected_action, -0.15, 0.15).astype(np.float32)
+            desired_qvel = (
+                expected_action
+                * controller.arm_vel_limit_rad_s
+                * np.float32(0.85))
+            expected_qdd = np.clip(
+                (desired_qvel - expected_qvel) / np.float32(0.005),
+                -controller.arm_acc_limit_rad_s2,
+                controller.arm_acc_limit_rad_s2,
+            )
+            expected_qvel = np.clip(
+                expected_qvel + expected_qdd * np.float32(0.005),
+                -controller.arm_vel_limit_rad_s,
+                controller.arm_vel_limit_rad_s,
+            ).astype(np.float32)
+            expected_q = np.clip(
+                expected_q + expected_qvel * np.float32(0.005),
+                controller.arm_q_low,
+                controller.arm_q_high,
+            ).astype(np.float32)
+
+            actual_q = controller.predict(
+                np.asarray([0.0, -0.4, 1.1], dtype=np.float32),
+                np.asarray([0.0, 0.0, -0.5], dtype=np.float32),
+                ball_valid=True,
+                arm_q=q_feedback,
+                arm_dq=dq_feedback,
+            )
+            np.testing.assert_allclose(actual_q, expected_q, atol=2e-7)
+            np.testing.assert_allclose(
+                controller.arm_cmd_qvel, expected_qvel, atol=2e-7)
+            np.testing.assert_allclose(
+                controller.prev_action, expected_action, atol=2e-7)
+            if tick == 1:
+                np.testing.assert_allclose(
+                    controller.last_obs[35:42],
+                    np.full(7, 0.15, dtype=np.float32),
+                    atol=2e-7,
+                )
+
+        np.testing.assert_array_equal(
+            controller.last_action, np.ones(7, dtype=np.float32))
+        np.testing.assert_allclose(
+            controller.last_executed_action,
+            np.full(7, 0.30, dtype=np.float32),
+            atol=2e-7,
+        )
+
+    def test_probe_reports_fail_closed_actor_io_and_qvel_semantics(self):
+        contract = _load_probe_module()._policy_runtime_contract(
+            self.controller)
+
+        self.assertTrue(contract["ioShapeValid"])
+        self.assertEqual(contract["modelObservationShape"], [67])
+        self.assertEqual(contract["modelActionShape"], [7])
+        self.assertEqual(contract["actionCommandMode"], "velocity")
+        self.assertEqual(contract["positionIntegrationCount"], 1)
+        self.assertAlmostEqual(contract["controlDtS"], 0.005)
+        self.assertAlmostEqual(contract["delayFeatureS"], 0.045)
+        self.assertFalse(contract["heldValidBallAgeEnabled"])
+        self.assertEqual(contract["observationSegments"][0], {
+            "name": "joint_position", "start": 0, "stop": 7,
+            "unit": "rad",
+        })
+        self.assertEqual(contract["observationSegments"][-1], {
+            "name": "contact_time_margin", "start": 66, "stop": 67,
+            "unit": "s",
+        })
+        self.assertEqual(
+            sum(segment["stop"] - segment["start"]
+                for segment in contract["observationSegments"]),
+            67,
+        )
+
+
 class Simcode4FrozenCheckpointContractTest(unittest.TestCase):
 
     @classmethod
@@ -747,6 +1012,11 @@ class _MjxConfigFields:
     dr_randomize_actuator_cmd_filter: bool = False
     dr_randomize_actuator: bool = False
     dr_randomize_second_order_actuator: bool = False
+    action_command_mode: str = "acceleration"
+    action_velocity_scale: float = 1.0
+    action_filter_tau_ms: float = 0.0
+    action_jerk_limit: float = 0.0
+    action_acc_limit: float = 1.0
     delay_min_ms: float = 0.0
     delay_max_ms: float = 0.0
     delay_jitter_ms: float = 0.0
@@ -772,7 +1042,7 @@ class _MjxConfigFields:
     actuator_mpc_feedback_source: str = "applied"
     arm_servo_target_tracking_planner: bool = False
     arm_servo_target_planner_before_actuator: bool = False
-    arm_servo_target_planner_before_actuator_model: bool = False
+    arm_servo_planner_before_actuator_model: bool = False
     arm_servo_target_limiter: bool = False
     arm_post_compensation_limiter: bool = False
     arm_actual_state_limiter: bool = False
@@ -807,6 +1077,9 @@ class SimMirrorProfileContractTest(unittest.TestCase):
             simcode5_model_path=SIMCODE5_MODEL,
             simcode5_policy_xml_path=SIMCODE5_XML,
             simcode5_sim_xml_path=SIMCODE5_XML,
+            simcode6_model_path=SIMCODE6_MODEL,
+            simcode6_policy_xml_path=SIMCODE6_XML,
+            simcode6_sim_xml_path=SIMCODE6_XML,
         )
 
     def _kwargs(self, cfg: SimMirrorConfig) -> dict:
@@ -818,8 +1091,10 @@ class SimMirrorProfileContractTest(unittest.TestCase):
         mirror._servo_planner_profile = (
             cfg.policy_profile == OBSERVATION_PROFILE_SIMCODE4_SERVO67)
         mirror._pure_actuator_profile = (
-            cfg.policy_profile
-            == OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+            cfg.policy_profile in {
+                OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+                OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+            })
         return mirror._mjx_env_kwargs(_MjxConfigFields)
 
     def test_profile_selection_swaps_model_and_both_xmls_as_one_unit(self):
@@ -957,6 +1232,28 @@ class SimMirrorProfileContractTest(unittest.TestCase):
         self.assertTrue(kwargs["actuator_delay_observation_only"])
         self.assertEqual(float(kwargs["delay_min_ms"]), 72.0)
         self.assertEqual(float(kwargs["delay_max_ms"]), 72.0)
+
+    def test_simcode6_routes_qvel_actor_and_checkpoint_plant_together(self):
+        cfg = sim_mirror_config_for_policy_profile(
+            self._base_config(), OBSERVATION_PROFILE_SIMCODE6_QVEL67)
+        self.assertEqual(cfg.model_path, SIMCODE6_MODEL)
+        self.assertEqual(cfg.policy_xml_path, SIMCODE6_XML)
+        self.assertEqual(cfg.sim_xml_path, SIMCODE6_XML)
+        self.assertEqual(cfg.backend, "mujoco")
+        self.assertFalse(cfg.rl_use_valid_ball_obs_age)
+
+        kwargs = self._kwargs(cfg)
+        self.assertEqual(kwargs["action_command_mode"], "velocity")
+        self.assertEqual(float(kwargs["action_velocity_scale"]), 0.85)
+        self.assertEqual(float(kwargs["action_filter_tau_ms"]), 15.0)
+        self.assertEqual(float(kwargs["action_jerk_limit"]), 30.0)
+        self.assertEqual(kwargs["actuator_cmd_model"], "second_order")
+        self.assertTrue(kwargs["actuator_cmd_filter"])
+        self.assertEqual(kwargs["actuator_compensation_mode"], "none")
+        self.assertFalse(kwargs["arm_servo_target_tracking_planner"])
+        self.assertFalse(kwargs["arm_servo_planner_before_actuator_model"])
+        self.assertFalse(kwargs["ball_obs_age_tracks_stale"])
+        self.assertEqual(kwargs["right_arm_pd_profile"], "sport_taskspace_fit_v1")
 
 
 def _load_probe_module():

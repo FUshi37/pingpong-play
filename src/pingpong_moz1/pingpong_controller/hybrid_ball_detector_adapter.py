@@ -65,10 +65,22 @@ class HybridBallDetectorAdapter:
                  depth_scale: float = 0.001,
                  depth_neighborhood_px: int = 2,
                  depth_mode: str = 'sensor',
+                 sensor_surface_to_center_depth_enabled: bool = False,
                  use_kalman: bool = False,
                  use_ir_depth_kalman: bool = False,
                  use_synchronized_depth: bool = False,
                  depth_temporal_window_frames: int = 5,
+                 velocity_least_squares_enabled: bool = True,
+                 velocity_window_frames: int = 3,
+                 clear_buffers_on_detection_loss_enabled: bool = False,
+                 motion_consistency_gate_enabled: bool = False,
+                 physics_constrained_velocity_enabled: bool = False,
+                 trajectory_position_smoothing_enabled: bool = False,
+                 impact_velocity_reset_enabled: bool = True,
+                 impact_min_downward_velocity_m_s: float = 0.25,
+                 impact_min_upward_velocity_m_s: float = 0.25,
+                 impact_min_velocity_jump_m_s: float = 0.80,
+                 impact_refractory_s: float = 0.08,
                  pixel_kalman_process_noise_pos: float = 0.3,
                  pixel_kalman_process_noise_vel: float = 3.0,
                  pixel_kalman_measurement_noise: float = 1.2,
@@ -177,6 +189,8 @@ class HybridBallDetectorAdapter:
             depth_scale=depth_scale,
             depth_neighborhood_px=depth_neighborhood_px,
             depth_mode=depth_mode,
+            sensor_surface_to_center_depth_enabled=(
+                sensor_surface_to_center_depth_enabled),
             calibration_data=calibration_data,
             output_frame=output_frame,
             print_every=print_every,
@@ -184,6 +198,24 @@ class HybridBallDetectorAdapter:
             ir_depth_kalman_enabled=use_ir_depth_kalman,
             synchronized_depth_enabled=use_synchronized_depth,
             depth_temporal_window_frames=depth_temporal_window_frames,
+            velocity_least_squares_enabled=(
+                velocity_least_squares_enabled),
+            velocity_window_frames=velocity_window_frames,
+            clear_buffers_on_detection_loss_enabled=(
+                clear_buffers_on_detection_loss_enabled),
+            motion_consistency_gate_enabled=(
+                motion_consistency_gate_enabled),
+            physics_constrained_velocity_enabled=(
+                physics_constrained_velocity_enabled),
+            trajectory_position_smoothing_enabled=(
+                trajectory_position_smoothing_enabled),
+            impact_velocity_reset_enabled=impact_velocity_reset_enabled,
+            impact_min_downward_velocity_m_s=(
+                impact_min_downward_velocity_m_s),
+            impact_min_upward_velocity_m_s=(
+                impact_min_upward_velocity_m_s),
+            impact_min_velocity_jump_m_s=impact_min_velocity_jump_m_s,
+            impact_refractory_s=impact_refractory_s,
             pixel_kalman_process_noise_pos=pixel_kalman_process_noise_pos,
             pixel_kalman_process_noise_vel=pixel_kalman_process_noise_vel,
             pixel_kalman_measurement_noise=pixel_kalman_measurement_noise,
@@ -243,6 +275,12 @@ class HybridBallDetectorAdapter:
                 'depth_method': 'none',
                 'yolo_bbox': None,
                 'detection_mode': 'none',
+                # Preserve the estimator-state contract even on invalid
+                # frames.  Depth-fault prediction and transition diagnostics
+                # need the rejection reason although no XYZ is published.
+                'raw_measurement': (
+                    None if result is None
+                    else result.get('raw_measurement')),
             }
 
         # 转换为兼容格式
@@ -265,6 +303,7 @@ class HybridBallDetectorAdapter:
             # 额外信息
             'ir_brightness': result.get('ir_brightness'),
             'timestamp': timestamp,
+            'raw_measurement': result.get('raw_measurement'),
         }
 
     def close(self):

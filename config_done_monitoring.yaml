@@ -33,10 +33,10 @@ pingpong_controller:
     # 3. Set limits here with ~5cm safety margin
     #
     # Example (UNCALIBRATED - ADJUST BEFORE USE):
-    done_ee_x_limits_m: [-0.348, 0.163]    # e.g., [-0.3, 0.3] for ±30cm in x
+    done_ee_x_limits_m: [-0.348, 0.263]    # e.g., [-0.3, 0.3] for ±30cm in x
     # Keep this aligned with RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh. The probe
     # receives its limits from CLI/environment variables, not this ROS YAML.
-    done_ee_y_limits_m: [-0.602, -0.340]    # e.g., [0.2, 0.8] for 20-80cm forward
+    done_ee_y_limits_m: [-0.702, -0.260]    # e.g., [0.2, 0.8] for 20-80cm forward
     # Keep the lower bound below the reset racket anchor (~1.08m), otherwise
     # done-monitoring parks the arm immediately at formal RL start.
     done_ee_z_limits_m: [0.842, 1.462]    # e.g., [0.6, 1.4] for 60-140cm height

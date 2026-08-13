@@ -23,6 +23,7 @@ import glob
 import multiprocessing as mp
 import json
 import csv
+import traceback
 
 os.environ.setdefault('MPLCONFIGDIR', '/tmp/matplotlib')
 import matplotlib
@@ -37,7 +38,7 @@ from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import CompressedImage, CameraInfo, JointState
 from std_msgs.msg import Empty as EmptyMsg
 from builtin_interfaces.msg import Time
-from mc_core_interface.msg import MechUnitCmd, MechUnitCmdArray
+from mc_core_interface.msg import MechUnitCmd, MechUnitCmdArray, MechUnitStateArray
 from nav_msgs.msg import Odometry
 from rcl_interfaces.msg import ParameterDescriptor
 
@@ -57,19 +58,26 @@ from pingpong_controller.fov_loss_compensator import (
 from pingpong_controller.ball_state_estimator import (
     BallStateEstimator,
     BallStateEstimatorConfig,
+    CONTROL_OUTPUT_CONTINUOUS,
+    CONTROL_OUTPUT_MODES,
+    CONTROL_OUTPUT_PREDICT_ON_FRAME_HOLD,
     gravity_for_base_link as estimator_gravity_for_base_link,
     gravity_for_camera_frame as estimator_gravity_for_camera_frame,
 )
 from pingpong_controller.mjx_rl_policy import (
     MjxRLPolicyController,
+    Simcode6Qvel67PolicyController,
     inspect_mjx_checkpoint_metadata,
 )
 from pingpong_controller.rl_policy import (
+    DEPLOYMENT_FK_WORLD_Z_CORRECTION_M,
     EXPECTED_OBS_DIM,
     EXPECTED_OBS_DIM_WITH_DELAY,
     HEAD_JOINTS,
     LEFT_ARM_JOINTS,
     LEG_WAIST_JOINTS,
+    OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+    OBSERVATION_PROFILE_SIMCODE6_QVEL67,
     RIGHT_ARM_JOINTS,
     RLPolicyController,
     TARGET_DEGREES,
@@ -79,7 +87,11 @@ from pingpong_controller.rl_policy import (
     target_right_arm_q_rad,
 )
 from pingpong_controller.safety_limiter import RightArmCommandSafetyLimiter
-from pingpong_controller.done_condition_monitor import DoneConditionMonitor
+from pingpong_controller.done_condition_monitor import (
+    DoneConditionMonitor,
+    _quat_to_euler_xyz_rad,
+    _wrap_angle_rad,
+)
 
 # Optional MuJoCo FK for the racket anchor (used by the viz done-condition
 # overlay independent of the RL policy, so it works with enable_rl_policy:=false).
@@ -110,6 +122,264 @@ class BallState:
     stamp: Time           # ROS timestamp
     valid: bool           # Whether detection is valid
     raw_measurement: dict = None  # Raw detector output
+
+
+class _PolicyWorkerLogger:
+    """Tiny logger shim for the subprocess policy controller."""
+
+    def _log(self, level: str, msg: str) -> None:
+        print(f'[policy-worker][{level}] {msg}', flush=True)
+
+    def info(self, msg: str, *args, **kwargs) -> None:
+        self._log('INFO', msg)
+
+    def warn(self, msg: str, *args, **kwargs) -> None:
+        self._log('WARN', msg)
+
+    def warning(self, msg: str, *args, **kwargs) -> None:
+        self.warn(msg, *args, **kwargs)
+
+    def error(self, msg: str, *args, **kwargs) -> None:
+        self._log('ERROR', msg)
+
+
+def _finite_array_or_none(value, shape=None, dtype=np.float32):
+    if value is None:
+        return None
+    try:
+        arr = np.asarray(value, dtype=dtype)
+        if shape is not None:
+            arr = arr.reshape(shape)
+        if not np.all(np.isfinite(arr)):
+            return None
+        return arr
+    except Exception:
+        return None
+
+
+def _queue_replace_latest(q, item) -> bool:
+    """Put item into a maxsize=1 multiprocessing queue, dropping stale data."""
+    try:
+        q.put_nowait(item)
+        return True
+    except Full:
+        try:
+            q.get_nowait()
+        except Empty:
+            pass
+        try:
+            q.put_nowait(item)
+            return True
+        except Full:
+            return False
+
+
+def _policy_worker_make_compensator(config: dict, controller, logger):
+    if bool(config.get('direct_physical_actuator_policy', False)):
+        logger.info(
+            'Actuator compensation disabled for checkpoint-authoritative '
+            'direct physical actuator policy')
+        return None
+    if not bool(config.get('enable_compensation', False)):
+        logger.info('Actuator compensation DISABLED in policy worker')
+        return None
+    if not _COMPENSATION_AVAILABLE or CommandCompensator is None:
+        logger.error(
+            'CommandCompensator not available in policy worker; '
+            'actuator compensation DISABLED')
+        return None
+    try:
+        comp = CommandCompensator(
+            n_joints=7,
+            dt=float(config['control_dt']),
+            mode=str(config.get('compensation_mode', 'none')),
+            delay_ms=float(config.get('comp_delay_ms', 72.0)),
+            actuator_tau_s=float(config.get('comp_actuator_tau_s', 0.074)),
+            actuator_gain=float(config.get('comp_actuator_gain', 1.0)),
+            command_buffer_extra_steps=int(
+                config.get('comp_buffer_extra_steps', 4)),
+            delay_conditioning=bool(
+                config.get('comp_delay_conditioning', True)),
+            mpc_beta=float(config.get('comp_mpc_beta', 1.2)),
+            mpc_delay_scale=float(config.get('comp_mpc_delay_scale', 1.05)),
+            mpc_tau_scale=float(config.get('comp_mpc_tau_scale', 0.75)),
+            mpc_horizon_steps=int(config.get('comp_mpc_horizon_steps', 6)),
+            mpc_tracking_weight=float(
+                config.get('comp_mpc_tracking_weight', 1.0)),
+            mpc_nominal_weight=float(
+                config.get('comp_mpc_nominal_weight', 0.25)),
+            mpc_delta_weight=float(config.get('comp_mpc_delta_weight', 0.05)),
+            mpc_max_delta_rad=float(
+                config.get('comp_mpc_max_delta_rad', 0.5235987755982988)),
+            q_low=controller.arm_q_low,
+            q_high=controller.arm_q_high,
+        )
+        logger.info(
+            f'Actuator compensation initialized in policy worker: '
+            f'mode={comp.mode}, delay={comp.delay_ms:.1f}ms, '
+            f'tau={comp.actuator_tau_s:.3f}s')
+        return comp
+    except Exception as exc:
+        logger.error(f'Failed to initialize worker compensator: {exc}')
+        logger.error(traceback.format_exc())
+        return None
+
+
+def _policy_worker_main(config: dict, request_q, result_q) -> None:
+    """Subprocess entry point: own the stateful RL controller and compensator."""
+    logger = _PolicyWorkerLogger()
+    controller = None
+    compensator = None
+    try:
+        if str(config['policy_backend']).lower() == 'mjx':
+            controller_cls = (
+                Simcode6Qvel67PolicyController
+                if config.get('policy_observation_profile')
+                == OBSERVATION_PROFILE_SIMCODE6_QVEL67
+                else MjxRLPolicyController
+            )
+            controller = controller_cls(
+                model_path=str(config['rl_model_path']),
+                dt=float(config['control_dt']),
+                ball_obs_age_clip_s=float(config['rl_ball_obs_age_clip']),
+                device=str(config['rl_policy_device']),
+                robot_xml_path=str(config['robot_xml_path']),
+                logger=logger,
+                align_with_checkpoint=True,
+                enable_delay_conditioning=bool(
+                    config['enable_delay_conditioning']),
+                use_valid_ball_obs_age=bool(
+                    config['rl_use_valid_ball_obs_age']),
+                **({
+                    'observation_profile': config["policy_observation_profile"],
+                } if controller_cls is MjxRLPolicyController else {}),
+            )
+        else:
+            controller = RLPolicyController(
+                model_path=str(config['rl_model_path']),
+                dt=float(config['control_dt']),
+                ball_obs_age_clip_s=float(config['rl_ball_obs_age_clip']),
+                device=str(config['rl_policy_device']),
+                robot_xml_path=str(config['robot_xml_path']),
+                logger=logger,
+                enable_delay_conditioning=bool(
+                    config['enable_delay_conditioning']),
+                use_valid_ball_obs_age=bool(
+                    config['rl_use_valid_ball_obs_age']),
+            )
+        compensator = _policy_worker_make_compensator(
+            config, controller, logger)
+        initial_cmd = controller.current_arm_cmd_q().astype(np.float64)
+        _queue_replace_latest(result_q, {
+            'kind': 'ready',
+            'initial_cmd': initial_cmd.tolist(),
+            'pid': os.getpid(),
+        })
+    except Exception as exc:
+        _queue_replace_latest(result_q, {
+            'kind': 'error',
+            'where': 'startup',
+            'error': str(exc),
+            'traceback': traceback.format_exc(),
+        })
+        return
+
+    while True:
+        try:
+            req = request_q.get()
+        except (EOFError, KeyboardInterrupt):
+            return
+        except Exception:
+            continue
+
+        kind = req.get('kind')
+        if kind == 'stop':
+            return
+
+        if kind in ('sync_integrator', 'reset_compensator'):
+            q = _finite_array_or_none(req.get('q'), shape=(7,))
+            if q is None:
+                continue
+            if kind == 'sync_integrator':
+                controller.arm_cmd_q = q.astype(np.float32).copy()
+                controller.arm_cmd_qvel = np.zeros(7, dtype=np.float32)
+                controller.last_cmd_q = controller.arm_cmd_q.copy()
+                controller.last_cmd_qvel = controller.arm_cmd_qvel.copy()
+                controller.last_cmd_qacc = np.zeros(7, dtype=np.float32)
+                controller.last_action = np.zeros(7, dtype=np.float32)
+            if compensator is not None:
+                try:
+                    compensator.reset(q.astype(np.float32))
+                except Exception as exc:
+                    _queue_replace_latest(result_q, {
+                        'kind': 'error',
+                        'where': kind,
+                        'error': str(exc),
+                        'traceback': traceback.format_exc(),
+                    })
+            continue
+
+        if kind != 'predict':
+            continue
+
+        seq = int(req.get('seq', -1))
+        start = time.perf_counter()
+        try:
+            ball_pos_m = np.asarray(
+                req.get('ball_pos_m', [0.0, 0.0, 0.0]),
+                dtype=np.float32).reshape(3)
+            ball_vel_m_s = np.asarray(
+                req.get('ball_vel_m_s', [0.0, 0.0, 0.0]),
+                dtype=np.float32).reshape(3)
+            arm_q = _finite_array_or_none(req.get('arm_q'), shape=(7,))
+            arm_dq = _finite_array_or_none(req.get('arm_dq'), shape=(7,))
+            joint_cmd = controller.predict(
+                ball_pos_m=ball_pos_m,
+                ball_vel_m_s=ball_vel_m_s,
+                ball_valid=bool(req.get('ball_valid', False)),
+                ball_obs_age_s=float(req.get('age_s', 0.0)),
+                dt=float(req.get('dt', config['control_dt'])),
+                arm_q=arm_q,
+                arm_dq=arm_dq,
+            )
+            cmd_state = controller.latest_command_state()
+            if compensator is not None and compensator.enabled:
+                applied_q = arm_q if arm_q is not None else joint_cmd
+                joint_cmd = compensator.step(
+                    q_cmd=np.asarray(joint_cmd, dtype=np.float32),
+                    qdot_cmd=cmd_state['velocity'],
+                    qdd_cmd=cmd_state['acceleration'],
+                    applied_q=np.asarray(applied_q, dtype=np.float32),
+                )
+            obs_action = controller.latest_obs_and_action()
+            elapsed_s = time.perf_counter() - start
+            _queue_replace_latest(result_q, {
+                'kind': 'result',
+                'seq': seq,
+                'stamp_wall': float(req.get('stamp_wall', 0.0)),
+                'elapsed_s': float(elapsed_s),
+                'joint_cmd': np.asarray(
+                    joint_cmd, dtype=np.float64).reshape(7).tolist(),
+                'nominal_position': np.asarray(
+                    cmd_state['position'], dtype=np.float64).reshape(7).tolist(),
+                'nominal_velocity': np.asarray(
+                    cmd_state['velocity'], dtype=np.float64).reshape(7).tolist(),
+                'nominal_acceleration': np.asarray(
+                    cmd_state['acceleration'], dtype=np.float64).reshape(7).tolist(),
+                'action': np.asarray(
+                    cmd_state['action'], dtype=np.float64).reshape(7).tolist(),
+                'obs': np.asarray(
+                    obs_action['obs'], dtype=np.float64).reshape(-1).tolist(),
+                'log': req.get('log', {}),
+            })
+        except Exception as exc:
+            _queue_replace_latest(result_q, {
+                'kind': 'error',
+                'where': 'predict',
+                'seq': seq,
+                'error': str(exc),
+                'traceback': traceback.format_exc(),
+            })
 
 
 class PingPongControllerNode(Node):
@@ -152,32 +422,35 @@ class PingPongControllerNode(Node):
         return selected
 
     def _configure_policy_observation_path(self) -> None:
-        """Select 50D or 67D policy observations before loading the controller."""
+        """Select the tensor shape and semantic profile from the checkpoint."""
+        self.policy_observation_profile = (
+            OBSERVATION_PROFILE_LEGACY_BUG_COMPAT)
+        self.direct_physical_actuator_policy = False
         requested_dim = int(self.get_parameter('policy_obs_dim').value)
+        forced_dim = None
         if requested_dim in (EXPECTED_OBS_DIM, EXPECTED_OBS_DIM_WITH_DELAY):
-            self.enable_delay_conditioning = (
-                requested_dim == EXPECTED_OBS_DIM_WITH_DELAY)
-            self.policy_obs_dim = requested_dim
-            self.get_logger().info(
-                f'Policy observation path forced by policy_obs_dim='
-                f'{requested_dim}: '
-                f'delay_conditioning={self.enable_delay_conditioning}')
-            return
-        if requested_dim not in (0,):
+            forced_dim = requested_dim
+        elif requested_dim != 0:
             self.get_logger().warn(
                 f'Invalid policy_obs_dim={requested_dim}; expected 0, '
                 f'{EXPECTED_OBS_DIM}, or {EXPECTED_OBS_DIM_WITH_DELAY}. '
                 'Falling back to enable_delay_conditioning.')
 
-        self.policy_obs_dim = (
-            EXPECTED_OBS_DIM_WITH_DELAY if self.enable_delay_conditioning
-            else EXPECTED_OBS_DIM)
+        if forced_dim is not None:
+            self.policy_obs_dim = forced_dim
+            self.enable_delay_conditioning = (
+                forced_dim == EXPECTED_OBS_DIM_WITH_DELAY)
+        else:
+            self.policy_obs_dim = (
+                EXPECTED_OBS_DIM_WITH_DELAY if self.enable_delay_conditioning
+                else EXPECTED_OBS_DIM)
         if self.policy_backend != 'mjx':
             return
 
         try:
             meta = inspect_mjx_checkpoint_metadata(self.rl_model_path)
             checkpoint_dim = int(meta.get('obs_dim', 0) or 0)
+            checkpoint_cfg = dict(meta.get('env_cfg') or {})
         except Exception as exc:  # noqa: BLE001 - keep old path usable
             self.get_logger().warn(
                 f'Could not inspect MJX checkpoint obs_dim from '
@@ -191,15 +464,35 @@ class PingPongControllerNode(Node):
                 f'using enable_delay_conditioning={self.enable_delay_conditioning}')
             return
 
+        if forced_dim is not None and forced_dim != checkpoint_dim:
+            raise RuntimeError(
+                f'policy_obs_dim={forced_dim} conflicts with checkpoint '
+                f'obs_dim={checkpoint_dim}')
         self.enable_delay_conditioning = (
             checkpoint_dim == EXPECTED_OBS_DIM_WITH_DELAY)
         self.policy_obs_dim = checkpoint_dim
+        action_mode = str(checkpoint_cfg.get(
+            'action_command_mode', 'acceleration')).strip().lower()
+        if action_mode == 'velocity':
+            if checkpoint_dim != EXPECTED_OBS_DIM_WITH_DELAY:
+                raise RuntimeError(
+                    'velocity-command checkpoint requires the supported '
+                    f'{EXPECTED_OBS_DIM_WITH_DELAY}D simcode6 contract, got '
+                    f'{checkpoint_dim}D')
+            self.policy_observation_profile = (
+                OBSERVATION_PROFILE_SIMCODE6_QVEL67)
+            self.direct_physical_actuator_policy = True
+            self.rl_use_valid_ball_obs_age = False
+        elif action_mode != 'acceleration':
+            raise RuntimeError(
+                f'Unsupported checkpoint action_command_mode={action_mode!r}')
         mode = (
             '67D delay-conditioned'
             if self.enable_delay_conditioning else '50D legacy')
         self.get_logger().info(
             f'MJX checkpoint obs_dim={checkpoint_dim}; using {mode} '
-            'policy observation path')
+            f'policy observation path; profile='
+            f'{self.policy_observation_profile}, action_mode={action_mode}')
 
     def __init__(self):
         super().__init__('pingpong_controller')
@@ -211,6 +504,7 @@ class PingPongControllerNode(Node):
             'camera_info_topic', '/camera/camera/color/camera_info')
         self.declare_parameter('command_topic', '/mx_mix_command')
         self.declare_parameter('joint_state_topic', '/joint_states')
+        self.declare_parameter('cart_state_topic', '/cart_states')
         self.declare_parameter('joint_names', list(RIGHT_ARM_JOINTS))
         default_right_arm_rad = [
             float(x) for x in target_right_arm_q_rad().tolist()]
@@ -285,6 +579,14 @@ class PingPongControllerNode(Node):
         self.declare_parameter('control_rate_hz', 200.0)
         self.declare_parameter('rl_policy_device', 'cpu')
         self.declare_parameter('rl_ball_obs_age_clip', 0.20)
+        self.declare_parameter('rl_use_valid_ball_obs_age', True)
+        # Optional hardening path for real hardware: run the stateful policy
+        # integrator/inference in a separate process. The 200 Hz ROS timer never
+        # waits for that process; it publishes the latest returned command (or
+        # holds the previous safe command) every tick.
+        self.declare_parameter('run_policy_in_separate_process', False)
+        self.declare_parameter('policy_process_start_timeout_s', 30.0)
+        self.declare_parameter('policy_process_warn_after_s', 0.025)
         # Enable delay conditioning features in observation (67-dim vs 50-dim).
         # Set to True for checkpoints trained with delay conditioning (e.g.,
         # 18_stage4g_strong_contact_dr_inverse_mpc.pkl); set to False for
@@ -343,11 +645,15 @@ class PingPongControllerNode(Node):
         self.declare_parameter('mocap_marker_id', 1)
         self.declare_parameter('mocap_position_unit', 'auto')
         self.declare_parameter('mocap_timestamp_unit', 's')
-        self.declare_parameter('mocap_velocity_alpha', 0.35)
+        self.declare_parameter('mocap_velocity_alpha', 1.0)
         self.declare_parameter('mocap_max_velocity_m_s', 20.0)
+        self.declare_parameter('mocap_velocity_window_frames', 3)
+        self.declare_parameter('mocap_velocity_window_max_span_s', 0.05)
 
         # Safety limiter: can be disabled for simulation/testing
-        self.declare_parameter('enable_safety_limiter', True)
+        self.declare_parameter('enable_safety_limiter', False)
+        self.declare_parameter('safety_parking_velocity_scale', 0.08)
+        self.declare_parameter('safety_parking_acceleration_scale', 0.06)
 
         # Done condition monitoring: replicate sim termination conditions
         self.declare_parameter('enable_done_monitoring', True)
@@ -367,6 +673,29 @@ class PingPongControllerNode(Node):
             'done_ee_y_limits_m', [], dynamic_array_param)
         self.declare_parameter(
             'done_ee_z_limits_m', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_psi_limits_rad', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_b_limits_rad', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_b_min_rad', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_b_max_rad', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_c_limits_rad', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_c_min_rad', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_c_max_rad', [], dynamic_array_param)
+        self.declare_parameter(
+            'done_ee_orientation_reference_xyzw', [], dynamic_array_param)
+        self.declare_parameter('done_ee_max_orientation_error_deg', 0.0)
+        self.declare_parameter('done_enable_predictive_stop', True)
+        self.declare_parameter('done_prediction_horizon_s', 0.12)
+        self.declare_parameter('done_prediction_dt_s', 0.01)
+        self.declare_parameter('done_prediction_margin_m', 0.02)
+        self.declare_parameter(
+            'done_prediction_orientation_margin_rad', 0.035)
         self.declare_parameter('done_log_period_s', 2.0)
 
         # Whole-body init pose publishing.
@@ -450,6 +779,7 @@ class PingPongControllerNode(Node):
         self.declare_parameter('ball_release_window_s', 0.12)
         self.declare_parameter('ball_release_required_consecutive_ticks', 3)
         self.declare_parameter('ball_release_max_obs_age_s', 0.08)
+        self.declare_parameter('ball_release_use_estimator_state', False)
         self.declare_parameter('ball_lost_failsafe_timeout_s', 0.4)
         self.declare_parameter(
             'safe_init_pose_csv_path', default_safe_init_pose_csv)
@@ -481,6 +811,8 @@ class PingPongControllerNode(Node):
         self.declare_parameter('use_hybrid_detector', False)
         self.declare_parameter('ir_params_json', '')  # IR参数JSON文件路径，优先级高于单独参数
         self.declare_parameter('depth_correction_model_path', 'depth_correction_model.pkl')  # 深度校正模型路径
+        self.declare_parameter(
+            'sensor_surface_to_center_depth_enabled', False)
         self.declare_parameter('yolo_interval', 1)  # YOLO每N帧运行一次，默认1（每帧）
         self.declare_parameter('ir_threshold', 170)
         self.declare_parameter('use_adaptive_ir', True)
@@ -569,10 +901,30 @@ class PingPongControllerNode(Node):
         # invalid timeout are set above that with margin (was 0.20 / 0.45 —
         # tuned for short frame drops, too tight for a full toss).
         self.declare_parameter('ball_estimator_max_extrapolation_s', 0.45)
+        # The estimator may extrapolate longer for logging/visualization and
+        # reacquisition, but the policy should only treat short de-latency
+        # extrapolations as a valid live ball. Set <0 to disable this control
+        # gate and pass every estimator-valid state to RL.
+        self.declare_parameter(
+            'ball_estimator_control_max_extrapolation_s', 0.08)
         self.declare_parameter('ball_estimator_trust_loss_s', 0.10)
         self.declare_parameter('ball_estimator_degrade_loss_s', 0.40)
         self.declare_parameter('ball_estimator_invalid_after_s', 0.60)
         self.declare_parameter('ball_estimator_prediction_horizon_s', 0.0)
+        # Policy-facing estimator output contract. ``continuous`` preserves the
+        # original per-control-tick propagation. ``predict_on_frame_hold``
+        # predicts once from the newest accepted measurement and zero-order
+        # holds a 50 Hz snapshot for the 200 Hz policy.
+        self.declare_parameter(
+            'ball_estimator_control_output_mode', CONTROL_OUTPUT_CONTINUOUS)
+        self.declare_parameter(
+            'ball_estimator_frame_hold_output_rate_hz', 50.0)
+        # Optional hybrid dynamics for the new frame-held path: use a
+        # constant-velocity model while the release gate says the ball is held,
+        # then switch to ballistic dynamics and reseed from measurement history.
+        # False preserves the original always-ballistic estimator.
+        self.declare_parameter(
+            'ball_estimator_release_gated_dynamics', False)
         # Master switch for the ballistic extrapolation in predict_to(). Default
         # True keeps the full behavior (60->200 Hz bridge + perception-latency
         # de-aging). Set False for "no prediction, just hold the latest fused
@@ -630,6 +982,7 @@ class PingPongControllerNode(Node):
         camera_info_topic = self.get_parameter('camera_info_topic').value
         command_topic = self.get_parameter('command_topic').value
         joint_state_topic = self.get_parameter('joint_state_topic').value
+        cart_state_topic = self.get_parameter('cart_state_topic').value
         self.joint_names = self.get_parameter('joint_names').value
         self.default_joint_positions = self.get_parameter(
             'default_joint_positions').value
@@ -704,6 +1057,9 @@ class PingPongControllerNode(Node):
             self.get_parameter('ir_params_json').value).strip()
         self.depth_correction_model_path = str(
             self.get_parameter('depth_correction_model_path').value).strip()
+        self.sensor_surface_to_center_depth_enabled = bool(
+            self.get_parameter(
+                'sensor_surface_to_center_depth_enabled').value)
         self.yolo_interval = int(
             self.get_parameter('yolo_interval').value)
         self.ir_threshold = int(
@@ -802,6 +1158,9 @@ class PingPongControllerNode(Node):
             self.enable_fov_loss_compensation = False
         self.ball_estimator_max_extrapolation_s = float(
             self.get_parameter('ball_estimator_max_extrapolation_s').value)
+        self.ball_estimator_control_max_extrapolation_s = float(
+            self.get_parameter(
+                'ball_estimator_control_max_extrapolation_s').value)
         self.ball_estimator_trust_loss_s = float(
             self.get_parameter('ball_estimator_trust_loss_s').value)
         self.ball_estimator_degrade_loss_s = float(
@@ -810,6 +1169,28 @@ class PingPongControllerNode(Node):
             self.get_parameter('ball_estimator_invalid_after_s').value)
         self.ball_estimator_prediction_horizon_s = float(
             self.get_parameter('ball_estimator_prediction_horizon_s').value)
+        requested_output_mode = str(self.get_parameter(
+            'ball_estimator_control_output_mode').value).strip().lower()
+        if requested_output_mode not in CONTROL_OUTPUT_MODES:
+            self.get_logger().warn(
+                f'Invalid ball_estimator_control_output_mode='
+                f'{requested_output_mode!r}; falling back to '
+                f'{CONTROL_OUTPUT_CONTINUOUS!r}')
+            requested_output_mode = CONTROL_OUTPUT_CONTINUOUS
+        self.ball_estimator_control_output_mode = requested_output_mode
+        self.ball_estimator_frame_hold_output_rate_hz = float(
+            self.get_parameter(
+                'ball_estimator_frame_hold_output_rate_hz').value)
+        if (not np.isfinite(self.ball_estimator_frame_hold_output_rate_hz)
+                or self.ball_estimator_frame_hold_output_rate_hz <= 0.0):
+            self.get_logger().warn(
+                'Invalid ball_estimator_frame_hold_output_rate_hz='
+                f'{self.ball_estimator_frame_hold_output_rate_hz}; '
+                'falling back to 50.0')
+            self.ball_estimator_frame_hold_output_rate_hz = 50.0
+        self.ball_estimator_release_gated_dynamics = bool(
+            self.get_parameter(
+                'ball_estimator_release_gated_dynamics').value)
         self.ball_estimator_enable_prediction = bool(
             self.get_parameter('ball_estimator_enable_prediction').value)
         self.ball_estimator_r_lateral_mm = float(
@@ -893,6 +1274,29 @@ class PingPongControllerNode(Node):
         self.rl_policy_device = self.get_parameter('rl_policy_device').value
         self.rl_ball_obs_age_clip = float(
             self.get_parameter('rl_ball_obs_age_clip').value)
+        self.rl_use_valid_ball_obs_age = bool(
+            self.get_parameter('rl_use_valid_ball_obs_age').value)
+        self.run_policy_in_separate_process = bool(
+            self.get_parameter('run_policy_in_separate_process').value)
+        self.policy_process_start_timeout_s = float(
+            self.get_parameter('policy_process_start_timeout_s').value)
+        if (not np.isfinite(self.policy_process_start_timeout_s)
+                or self.policy_process_start_timeout_s <= 0.0):
+            self.policy_process_start_timeout_s = 30.0
+        self.policy_process_warn_after_s = float(
+            self.get_parameter('policy_process_warn_after_s').value)
+        if (not np.isfinite(self.policy_process_warn_after_s)
+                or self.policy_process_warn_after_s <= 0.0):
+            self.policy_process_warn_after_s = 0.025
+        self._policy_process = None
+        self._policy_request_q = None
+        self._policy_result_q = None
+        self._policy_request_seq = 0
+        self._policy_latest_result_seq = -1
+        self._policy_last_result_wall = None
+        self._policy_last_submit_wall = None
+        self._policy_last_warn_wall = 0.0
+        self._policy_process_pid = None
         self.enable_delay_conditioning = bool(
             self.get_parameter('enable_delay_conditioning').value)
         self.policy_obs_dim = (
@@ -903,6 +1307,10 @@ class PingPongControllerNode(Node):
         # Safety limiter enable flag
         self.enable_safety_limiter = bool(
             self.get_parameter('enable_safety_limiter').value)
+        self.safety_parking_velocity_scale = float(
+            self.get_parameter('safety_parking_velocity_scale').value)
+        self.safety_parking_acceleration_scale = float(
+            self.get_parameter('safety_parking_acceleration_scale').value)
 
         # Done condition monitoring parameters
         self.enable_done_monitoring = bool(
@@ -928,6 +1336,52 @@ class PingPongControllerNode(Node):
         self.done_ee_x_limits_m = tuple(ee_x_raw) if len(ee_x_raw) == 2 else None
         self.done_ee_y_limits_m = tuple(ee_y_raw) if len(ee_y_raw) == 2 else None
         self.done_ee_z_limits_m = tuple(ee_z_raw) if len(ee_z_raw) == 2 else None
+        def _optional_scalar_param(name):
+            value = self.get_parameter(name).value
+            if isinstance(value, (list, tuple)):
+                if len(value) != 1:
+                    return None
+                value = value[0]
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                return None
+            return value if np.isfinite(value) else None
+
+        ee_psi_raw = self.get_parameter('done_ee_psi_limits_rad').value
+        ee_b_raw = self.get_parameter('done_ee_b_limits_rad').value
+        ee_c_raw = self.get_parameter('done_ee_c_limits_rad').value
+        ee_quat_raw = self.get_parameter(
+            'done_ee_orientation_reference_xyzw').value
+        self.done_ee_psi_limits_rad = (
+            tuple(float(v) for v in ee_psi_raw)
+            if len(ee_psi_raw) == 2 else None)
+        self.done_ee_b_limits_rad = (
+            tuple(float(v) for v in ee_b_raw)
+            if len(ee_b_raw) == 2 else None)
+        self.done_ee_b_min_rad = _optional_scalar_param('done_ee_b_min_rad')
+        self.done_ee_b_max_rad = _optional_scalar_param('done_ee_b_max_rad')
+        self.done_ee_c_limits_rad = (
+            tuple(float(v) for v in ee_c_raw)
+            if len(ee_c_raw) == 2 else None)
+        self.done_ee_c_min_rad = _optional_scalar_param('done_ee_c_min_rad')
+        self.done_ee_c_max_rad = _optional_scalar_param('done_ee_c_max_rad')
+        self.done_ee_orientation_reference_xyzw = (
+            tuple(float(v) for v in ee_quat_raw)
+            if len(ee_quat_raw) == 4 else None)
+        self.done_ee_max_orientation_error_deg = float(
+            self.get_parameter('done_ee_max_orientation_error_deg').value)
+        self.done_enable_predictive_stop = bool(
+            self.get_parameter('done_enable_predictive_stop').value)
+        self.done_prediction_horizon_s = float(
+            self.get_parameter('done_prediction_horizon_s').value)
+        self.done_prediction_dt_s = float(
+            self.get_parameter('done_prediction_dt_s').value)
+        self.done_prediction_margin_m = float(
+            self.get_parameter('done_prediction_margin_m').value)
+        self.done_prediction_orientation_margin_rad = float(
+            self.get_parameter(
+                'done_prediction_orientation_margin_rad').value)
         self.done_log_period_s = float(
             self.get_parameter('done_log_period_s').value)
 
@@ -972,6 +1426,10 @@ class PingPongControllerNode(Node):
             self.get_parameter('mocap_velocity_alpha').value)
         self.mocap_max_velocity_m_s = float(
             self.get_parameter('mocap_max_velocity_m_s').value)
+        self.mocap_velocity_window_frames = int(
+            self.get_parameter('mocap_velocity_window_frames').value)
+        self.mocap_velocity_window_max_span_s = float(
+            self.get_parameter('mocap_velocity_window_max_span_s').value)
         self._mocap_detector = None
         self._mocap_ball_state = None
         self._mocap_ball_lock = threading.Lock()
@@ -998,6 +1456,8 @@ class PingPongControllerNode(Node):
         self.ball_release_max_obs_age_s = max(
             0.0, float(self.get_parameter(
                 'ball_release_max_obs_age_s').value))
+        self.ball_release_use_estimator_state = bool(
+            self.get_parameter('ball_release_use_estimator_state').value)
         self.ball_lost_failsafe_timeout_s = float(
             self.get_parameter('ball_lost_failsafe_timeout_s').value)
         self.safe_init_pose_csv_path = self.get_parameter(
@@ -1052,7 +1512,13 @@ class PingPongControllerNode(Node):
                     if self.policy_backend == 'mjx':
                         self.get_logger().info(
                             f'Loading MJX policy from: {self.rl_model_path}')
-                        self.rl_controller = MjxRLPolicyController(
+                        controller_cls = (
+                            Simcode6Qvel67PolicyController
+                            if self.policy_observation_profile
+                            == OBSERVATION_PROFILE_SIMCODE6_QVEL67
+                            else MjxRLPolicyController
+                        )
+                        self.rl_controller = controller_cls(
                             model_path=self.rl_model_path,
                             dt=self.control_dt,
                             ball_obs_age_clip_s=self.rl_ball_obs_age_clip,
@@ -1061,6 +1527,11 @@ class PingPongControllerNode(Node):
                             logger=self.get_logger(),
                             align_with_checkpoint=True,
                             enable_delay_conditioning=self.enable_delay_conditioning,
+                            use_valid_ball_obs_age=self.rl_use_valid_ball_obs_age,
+                            **({
+                                'observation_profile':
+                                    self.policy_observation_profile,
+                            } if controller_cls is MjxRLPolicyController else {}),
                         )
                     else:  # sb3
                         self.get_logger().info(
@@ -1073,6 +1544,7 @@ class PingPongControllerNode(Node):
                             robot_xml_path=self.robot_xml_path,
                             logger=self.get_logger(),
                             enable_delay_conditioning=self.enable_delay_conditioning,
+                            use_valid_ball_obs_age=self.rl_use_valid_ball_obs_age,
                         )
                     self._last_safe_joint_positions = \
                         self.rl_controller.current_arm_cmd_q().astype(
@@ -1084,8 +1556,13 @@ class PingPongControllerNode(Node):
                         f'(backend={self.policy_backend}, '
                         f'model={self.rl_model_path})')
 
-                    # Initialize actuator delay compensator if enabled
-                    self._init_compensator()
+                    # Initialize actuator delay compensator. In async mode the
+                    # subprocess owns both the stateful policy integrator and
+                    # compensator so the 200 Hz publisher never blocks on them.
+                    if self._start_policy_process():
+                        self.compensator = None
+                    else:
+                        self._init_compensator()
 
                 except Exception as exc:
                     self.get_logger().error(
@@ -1107,11 +1584,17 @@ class PingPongControllerNode(Node):
             else np.asarray(target_right_arm_q_rad(), dtype=np.float64)
         )
         self.safety_limiter = RightArmCommandSafetyLimiter(
-            initial_safe_cmd, dt=self.control_dt)
+            initial_safe_cmd, dt=self.control_dt,
+            parking_velocity_scale=self.safety_parking_velocity_scale,
+            parking_acceleration_scale=self.safety_parking_acceleration_scale)
         if self.enable_safety_limiter:
             self.get_logger().info(
                 f'Safety limiter ENABLED: dt={self.control_dt:.4f}s '
-                f'(control_rate_hz={self.control_rate_hz:.1f})')
+                f'(control_rate_hz={self.control_rate_hz:.1f}, '
+                f'parking_vel_scale='
+                f'{self.safety_limiter.parking_velocity_scale:.3f}, '
+                f'parking_acc_scale='
+                f'{self.safety_limiter.parking_acceleration_scale:.3f})')
         else:
             self.get_logger().warn(
                 f'Safety limiter DISABLED: raw RL commands will be published directly! '
@@ -1121,35 +1604,41 @@ class PingPongControllerNode(Node):
 
         # Coordinate frame transform: real Cartesian frame -> simulation frame.
         #
-        # Transform formula (from code analysis):
+        # Transform formula (from sim code analysis):
         #   Simulation (mjx_juggle_env._point_to_base):
-        #     Returns [x_rel, y_rel, z_world] - z is world absolute height
+        #     Returns [x_rel, y_rel, z_world] - x/y are in the base-yaw
+        #     frame, while z keeps the simulator observation convention.
         #   Real system (via T_base_camera):
         #     Returns [x_rel, y_rel, z_rel] relative to the robot Cartesian
         #     frame; on this robot that frame corresponds to moz1_pd.xml's
-        #     waist02 body.
-        #   Therefore: p_sim = p_waist02 + waist02_origin_in_sim_base
+        #     waist03 body, which is the same point as moz_v2.urdf's
+        #     torso_flange link.
+        #   Therefore:
+        #     p_base = p_waist03 + waist03_origin_in_real_base
+        #     p_sim.xy = p_base.xy
+        #     p_sim.z = p_base.z + 0.100 m
         #
         # Cartesian-frame origin parameters:
-        #   waist02 origin in the simulation base-yaw frame when the robot is in
+        #   waist03 origin in the simulation base-yaw frame when the robot is in
         #   TARGET_DEGREES posture [0, 60, -90, 30, 0, 0].
         #
         #   Computed via forward kinematics from moz1_pd.xml + TARGET_DEGREES:
-        #   - The real Cartesian frame is the waist02 body.
+        #   - The real Cartesian frame is moz1_pd.xml body waist03
+        #     (moz_v2.urdf link torso_flange).
         #   - In TARGET_DEGREES posture:
-        #       waist02 relative to sim base = [0.0, 23.583, 847.396] mm
-        #       waist02 world height       = 0.947396 m (base z is 0.1 m)
+        #       waist03 relative to real/XML base = [0.0, 23.583, 1202.396] mm
+        #       waist03 MuJoCo world height       = 1.302396 m
         #
         #   Coordinate transformation:
         #     x_sim = x_real + 0.0 m
         #     y_sim = y_real + 0.023583 m
-        #     z_sim = z_real + 0.947396 m
+        #     z_sim = z_real + 1.302396 m
         #
         #   IMPORTANT: This value is posture-dependent. If robot posture changes
         #   from TARGET_DEGREES, this parameter must be recalibrated.
         self.declare_parameter('sim_cartesian_x_offset_m', 0.0)
         self.declare_parameter('sim_cartesian_y_offset_m', 0.023583)
-        self.declare_parameter('sim_base_height_m', 0.947396)
+        self.declare_parameter('sim_base_height_m', 1.302396)
         self._sim_cartesian_x_offset_m = float(
             self.get_parameter('sim_cartesian_x_offset_m').value)
         self._sim_cartesian_y_offset_m = float(
@@ -1181,7 +1670,8 @@ class PingPongControllerNode(Node):
                 f'z_drop>{self.ball_release_min_z_drop_m:.3f}m over '
                 f'{self.ball_release_window_s:.2f}s, '
                 f'{self.ball_release_required_consecutive_ticks} ticks, '
-                f'age<={self.ball_release_max_obs_age_s:.3f}s)')
+                f'age<={self.ball_release_max_obs_age_s:.3f}s, '
+                f'source={"estimator" if self.ball_release_use_estimator_state else "measurement"})')
         else:
             self.get_logger().info(
                 'Ball-release gate disabled (enable_ball_release_gate=False)')
@@ -1202,6 +1692,23 @@ class PingPongControllerNode(Node):
                 ee_x_limits=self.done_ee_x_limits_m,
                 ee_y_limits=self.done_ee_y_limits_m,
                 ee_z_limits=self.done_ee_z_limits_m,
+                ee_psi_limits_rad=self.done_ee_psi_limits_rad,
+                ee_b_limits_rad=self.done_ee_b_limits_rad,
+                ee_b_min_rad=self.done_ee_b_min_rad,
+                ee_b_max_rad=self.done_ee_b_max_rad,
+                ee_c_limits_rad=self.done_ee_c_limits_rad,
+                ee_c_min_rad=self.done_ee_c_min_rad,
+                ee_c_max_rad=self.done_ee_c_max_rad,
+                ee_orientation_reference_xyzw=(
+                    self.done_ee_orientation_reference_xyzw),
+                ee_max_orientation_error_deg=(
+                    self.done_ee_max_orientation_error_deg),
+                enable_predictive_stop=self.done_enable_predictive_stop,
+                prediction_horizon_s=self.done_prediction_horizon_s,
+                prediction_dt_s=self.done_prediction_dt_s,
+                prediction_margin_m=self.done_prediction_margin_m,
+                prediction_orientation_margin_rad=(
+                    self.done_prediction_orientation_margin_rad),
             )
             ee_limits_msg = []
             if self.done_ee_x_limits_m:
@@ -1211,12 +1718,46 @@ class PingPongControllerNode(Node):
             if self.done_ee_z_limits_m:
                 ee_limits_msg.append(f'z={self.done_ee_z_limits_m}m')
             ee_limits_str = ', '.join(ee_limits_msg) if ee_limits_msg else 'none'
+            ee_orientation_msg = []
+            if self.done_ee_psi_limits_rad:
+                ee_orientation_msg.append(
+                    f'psi={self.done_ee_psi_limits_rad}rad')
+            if self.done_ee_b_limits_rad:
+                ee_orientation_msg.append(
+                    f'B={self.done_ee_b_limits_rad}rad')
+            if self.done_ee_b_min_rad is not None:
+                ee_orientation_msg.append(
+                    f'B>={self.done_ee_b_min_rad:.3f}rad')
+            if self.done_ee_b_max_rad is not None:
+                ee_orientation_msg.append(
+                    f'B<={self.done_ee_b_max_rad:.3f}rad')
+            if self.done_ee_c_limits_rad:
+                ee_orientation_msg.append(
+                    f'C={self.done_ee_c_limits_rad}rad')
+            if self.done_ee_c_min_rad is not None:
+                ee_orientation_msg.append(
+                    f'C>={self.done_ee_c_min_rad:.3f}rad')
+            if self.done_ee_c_max_rad is not None:
+                ee_orientation_msg.append(
+                    f'C<={self.done_ee_c_max_rad:.3f}rad')
+            if (self.done_ee_orientation_reference_xyzw is not None
+                    and self.done_ee_max_orientation_error_deg > 0.0):
+                ee_orientation_msg.append(
+                    'quat_ref='
+                    f'{np.round(self.done_ee_orientation_reference_xyzw, 3).tolist()} '
+                    f'max_err={self.done_ee_max_orientation_error_deg:.1f}deg')
+            ee_orientation_str = (
+                ', '.join(ee_orientation_msg) if ee_orientation_msg else 'none')
             self.get_logger().info(
                 'Done-condition monitoring ENABLED: '
                 f'ball_z=[{self.done_ball_z_floor_m}, {self.done_ball_z_ceiling_m}]m, '
                 f'ball_xy_range={self.done_ball_x_range_m}m, '
                 f'racket_anchor_dist<{self.done_racket_anchor_distance_m}m, '
-                f'EE workspace limits: {ee_limits_str}')
+                f'EE workspace limits: {ee_limits_str}, '
+                f'EE orientation limits: {ee_orientation_str}, '
+                f'predictive_stop={self.done_enable_predictive_stop} '
+                f'horizon={self.done_prediction_horizon_s:.3f}s '
+                f'margin={self.done_prediction_margin_m:.3f}m')
         else:
             self.get_logger().info(
                 'Done-condition monitoring DISABLED (enable_done_monitoring=False)')
@@ -1288,6 +1829,11 @@ class PingPongControllerNode(Node):
         self._run_duration_elapsed = False
         self._run_duration_shutdown_started = False
         self._last_done_debug = {}
+        self._done_motion_prev_t_s: Optional[float] = None
+        self._done_motion_prev_pos_m: Optional[np.ndarray] = None
+        self._done_motion_prev_vel_m_s: Optional[np.ndarray] = None
+        self._done_motion_prev_psi_rad: Optional[float] = None
+        self._done_motion_prev_abc_rad: Optional[np.ndarray] = None
         if self._init_pose_active:
             self.get_logger().info(
                 f'Init-pose phase enabled: smoothly driving right arm to TARGET for '
@@ -1335,6 +1881,12 @@ class PingPongControllerNode(Node):
         self._joint_state_received = False
         self._safety_synced_to_joint_state = False
         self._joint_state_log_warned_missing = False
+        self._cart_state_lock = threading.Lock()
+        self._latest_cart_pos_m: Optional[np.ndarray] = None
+        self._latest_cart_quat_xyzw: Optional[np.ndarray] = None
+        self._latest_cart_psi_rad: Optional[float] = None
+        self._latest_cart_state_stamp_sec: Optional[float] = None
+        self._cart_state_received = False
         # Right-arm dq estimate from position differentiation: used when
         # JointState.velocity is empty or stuck at zero (seen on some
         # hardware bringups).
@@ -1364,8 +1916,14 @@ class PingPongControllerNode(Node):
             JointState, joint_state_topic,
             self._joint_state_callback, 10,
             callback_group=self.state_callback_group)
+        self.cart_state_sub = self.create_subscription(
+            MechUnitStateArray, cart_state_topic,
+            self._cart_state_callback, 10,
+            callback_group=self.state_callback_group)
         self.get_logger().info(
             f'Subscribed to joint states: "{joint_state_topic}"')
+        self.get_logger().info(
+            f'Subscribed to cart states: "{cart_state_topic}"')
         self.start_confirm_sub = None
         if self._await_enter:
             self.start_confirm_sub = self.create_subscription(
@@ -1667,10 +2225,23 @@ class PingPongControllerNode(Node):
         Reads the right-arm ``arm_cmd_q/RightArm-{0..6}`` columns from frame 0
         (first data row) of the action-trace CSV. Falls back to the RL policy's
         training initial posture if the CSV is missing, malformed, or lacks the
-        expected columns, so the failsafe always has a usable target.
+        expected columns, so the failsafe always has a usable target. Simcode6
+        always uses its checkpoint reset posture: the legacy stage4g CSV is a
+        different policy state and would corrupt the first 67D observation.
         """
+        controller_initial_q = getattr(
+            getattr(self, 'rl_controller', None),
+            'initial_arm_q_rad',
+            target_right_arm_q_rad(),
+        )
         fallback = np.asarray(
-            target_right_arm_q_rad(), dtype=np.float64).reshape(-1)
+            controller_initial_q, dtype=np.float64).reshape(-1)
+        if (getattr(self, 'policy_observation_profile', None)
+                == OBSERVATION_PROFILE_SIMCODE6_QVEL67):
+            self.get_logger().info(
+                'Safe init pose uses the simcode6 checkpoint reset posture; '
+                'legacy stage4g action-trace pose is ignored')
+            return fallback
         path = self.safe_init_pose_csv_path
         if not path or not os.path.exists(path):
             self.get_logger().warn(
@@ -1806,6 +2377,8 @@ class PingPongControllerNode(Node):
                     depth_scale=self._depth_scale,
                     depth_correction_model_path=self.depth_correction_model_path,  # 新增
                     depth_neighborhood_px=self.depth_neighborhood_px,
+                    sensor_surface_to_center_depth_enabled=(
+                        self.sensor_surface_to_center_depth_enabled),
                     # 灰色球禁用颜色筛选
                     color_match_threshold=0.0,
                     color_circularity_min=0.0,
@@ -1888,6 +2461,8 @@ class PingPongControllerNode(Node):
                     depth_scale=self._depth_scale,
                     depth_correction_model_path=self.depth_correction_model_path,
                     depth_neighborhood_px=self.depth_neighborhood_px,
+                    sensor_surface_to_center_depth_enabled=(
+                        self.sensor_surface_to_center_depth_enabled),
                     # 灰色球禁用颜色筛选
                     color_match_threshold=0.0,
                     color_circularity_min=0.0,
@@ -2609,6 +3184,13 @@ class PingPongControllerNode(Node):
             invalid_after_s=self.ball_estimator_invalid_after_s,
             prediction_horizon_s=self.ball_estimator_prediction_horizon_s,
             enable_prediction=self.ball_estimator_enable_prediction,
+            control_output_mode=self.ball_estimator_control_output_mode,
+            frame_hold_output_rate_hz=(
+                self.ball_estimator_frame_hold_output_rate_hz),
+            enable_ballistic_dynamics=not (
+                self.ball_estimator_release_gated_dynamics
+                and self.enable_ball_release_gate
+                and not self._has_released_ball),
             enable_aero_drag=self.ball_estimator_enable_aero_drag,
             drag_k_per_mm=self.ball_estimator_drag_k_per_mm,
             enable_magnus=self.ball_estimator_enable_magnus,
@@ -2621,6 +3203,13 @@ class PingPongControllerNode(Node):
             'Ball-state estimator enabled: '
             f'frame={output_frame}, gravity_mm_s2={gravity}, '
             f'max_extrap={self.ball_estimator_max_extrapolation_s:.3f}s, '
+            f'control_max_extrap='
+            f'{self.ball_estimator_control_max_extrapolation_s:.3f}s, '
+            f'control_output={self.ball_estimator_control_output_mode}, '
+            f'frame_hold_rate='
+            f'{self.ball_estimator_frame_hold_output_rate_hz:.1f}Hz, '
+            f'release_gated_dynamics='
+            f'{self.ball_estimator_release_gated_dynamics}, '
             f'loss(trust/degrade/invalid)='
             f'{self.ball_estimator_trust_loss_s:.2f}/'
             f'{self.ball_estimator_degrade_loss_s:.2f}/'
@@ -3137,6 +3726,7 @@ class PingPongControllerNode(Node):
             ball_state = BallState(
                 position=np.zeros(3), velocity=np.zeros(3),
                 stamp=self.get_clock().now().to_msg(), valid=False)
+        measured_ball_state = ball_state
 
         # Phase 2: always run RL, even on invalid detections. The RL
         # policy's hold-last/dropout logic (see RLPolicyController.predict)
@@ -3168,10 +3758,21 @@ class PingPongControllerNode(Node):
             return
 
         # Release gate: the first valid ball may still be in the operator's
-        # hand. Keep parking until the ball is freshly observed moving
-        # downward over a short window, then start the formal policy run.
-        if self._should_hold_for_ball_release(ball_state, ball_age_override):
-            self._run_ball_release_gate(ball_state, ball_age_override)
+        # hand. By default, evaluate release from the real measurement, not a
+        # ballistic estimator prediction, so gravity extrapolation cannot clear
+        # the gate while a static ball is still being held. The compatibility
+        # flag restores the old post-estimator release path.
+        release_ball_state = ball_state
+        release_age_override = ball_age_override
+        if (self.enable_ball_state_estimator
+                and not self.ball_release_use_estimator_state):
+            release_ball_state = measured_ball_state
+            release_age_override = self._ball_state_stamp_age_s(
+                measured_ball_state)
+        if self._should_hold_for_ball_release(
+                release_ball_state, release_age_override):
+            self._run_ball_release_gate(
+                release_ball_state, release_age_override)
             return
 
         # Ball-lost failsafe: if the ball has been undetected for longer than
@@ -3258,6 +3859,11 @@ class PingPongControllerNode(Node):
         if self.save_estimator_log:
             self._record_estimator_log(t_now_sec, out)
 
+        age_s = float(out.get('age_s', 0.0))
+        if not np.isfinite(age_s):
+            age_s = 0.0
+        age_s = max(0.0, age_s)
+
         if not bool(out.get('valid', False)):
             # Estimator gave up (loss past invalid_after_s) or never tracked:
             # report an invalid BallState so the failsafe path takes over.
@@ -3265,14 +3871,46 @@ class PingPongControllerNode(Node):
                 position=np.zeros(3), velocity=np.zeros(3),
                 stamp=now_time.to_msg(), valid=False,
                 raw_measurement={'ball_estimator': out})
-            return invalid, None
+            return invalid, age_s
+
+        control_cap = float(self.ball_estimator_control_max_extrapolation_s)
+        if control_cap >= 0.0:
+            extrap_s = float(out.get('extrapolation_s', 0.0))
+            if not np.isfinite(extrap_s):
+                extrap_s = 0.0
+            control_span_s = extrap_s
+            if (out.get('output_mode')
+                    == CONTROL_OUTPUT_PREDICT_ON_FRAME_HOLD):
+                control_span_s = float(out.get('control_age_s', extrap_s))
+                if not np.isfinite(control_span_s):
+                    control_span_s = extrap_s
+            reject_reason = None
+            if bool(out.get('clamped', False)):
+                reject_reason = 'estimator_clamped'
+            elif control_span_s > control_cap + 1e-9:
+                reject_reason = (
+                    'control_frame_hold_timeout'
+                    if out.get('output_mode')
+                    == CONTROL_OUTPUT_PREDICT_ON_FRAME_HOLD
+                    else 'control_extrapolation_timeout')
+            if reject_reason is not None:
+                gated_out = dict(out)
+                gated_out['control_valid'] = False
+                gated_out['control_reject_reason'] = reject_reason
+                gated_out['control_max_extrapolation_s'] = control_cap
+                gated_out['control_gate_span_s'] = float(control_span_s)
+                invalid = BallState(
+                    position=np.zeros(3), velocity=np.zeros(3),
+                    stamp=now_time.to_msg(), valid=False,
+                    raw_measurement={'ball_estimator': gated_out})
+                return invalid, age_s
 
         est_state = BallState(
             position=np.array(out['position'], dtype=float),
             velocity=np.array(out['velocity'], dtype=float),
             stamp=now_time.to_msg(), valid=True,
             raw_measurement={'ball_estimator': out})
-        return est_state, float(out.get('age_s', 0.0))
+        return est_state, age_s
 
     def _maybe_log_ball_estimator_status(self, est: BallStateEstimator,
                                          out: dict) -> None:
@@ -3324,6 +3962,11 @@ class PingPongControllerNode(Node):
             'loss_s': float(out.get('loss_s', 0.0)),
             'extrapolation_s': float(out.get('extrapolation_s', 0.0)),
             'clamped': int(bool(out.get('clamped', False))),
+            'output_mode': str(out.get('output_mode', '')),
+            'snapshot_sequence': int(out.get('snapshot_sequence', 0)),
+            'snapshot_new': int(bool(out.get('snapshot_new', False))),
+            'snapshot_hold_s': float(out.get('snapshot_hold_s', 0.0)),
+            'control_age_s': float(out.get('control_age_s', 0.0)),
             # Latest raw 60 Hz detection (image-stamped) for side-by-side cmp.
             'raw_t_img': float(raw_t),
             'raw_x_mm': float(raw_p[0]), 'raw_y_mm': float(raw_p[1]),
@@ -3493,6 +4136,25 @@ class PingPongControllerNode(Node):
         except Exception:  # noqa: BLE001
             pass
 
+    def _ball_state_stamp_age_s(
+            self, ball_state: Optional[BallState]) -> Optional[float]:
+        """Return ball-state stamp age in seconds, or None if unavailable."""
+        if ball_state is None or not bool(ball_state.valid):
+            return None
+        stamp = getattr(ball_state, 'stamp', None)
+        if stamp is None:
+            return None
+        try:
+            stamp_s = float(stamp.sec) + float(stamp.nanosec) * 1e-9
+        except Exception:  # noqa: BLE001 - diagnostic age only.
+            return None
+        if not np.isfinite(stamp_s) or stamp_s <= 0.0:
+            return None
+        now_s = self.get_clock().now().nanoseconds * 1e-9
+        age_s = now_s - stamp_s
+        if not np.isfinite(age_s):
+            return None
+        return max(0.0, float(age_s))
 
     def _should_engage_ball_lost_failsafe(
             self, ball_state: BallState, now_wall: float) -> bool:
@@ -3621,6 +4283,7 @@ class PingPongControllerNode(Node):
             self._has_released_ball = True
             self._ball_release_gate_active = False
             self._last_valid_ball_wall_time = now_wall
+            self._activate_ballistic_estimator_after_release()
             self._ball_release_samples.clear()
             self._ball_release_candidate_ticks = 0
             self.get_logger().info(
@@ -3633,8 +4296,31 @@ class PingPongControllerNode(Node):
 
         return True
 
+    def _activate_ballistic_estimator_after_release(self) -> None:
+        """Switch the optional held-ball CV filter to free-flight dynamics."""
+        if (not self.ball_estimator_release_gated_dynamics
+                or not self.enable_ball_state_estimator):
+            return
+        est = self._ball_estimator
+        if est is None:
+            return
+        try:
+            with self._ball_estimator_lock:
+                est.set_ballistic_dynamics(
+                    True, reinitialize_from_history=True)
+            self.get_logger().info(
+                'Ball estimator switched from held/static CV to ballistic '
+                'dynamics and reseeded from recent real measurements')
+        except Exception as exc:  # noqa: BLE001 - release safety must survive.
+            self.get_logger().error(
+                f'Failed to activate ballistic estimator after release: {exc}')
+
     def _sync_rl_integrator_to_last_safe_command(self) -> None:
         """Pin the RL command integrator to the last published safe command."""
+        if self.run_policy_in_separate_process:
+            self._send_policy_worker_command(
+                'sync_integrator',
+                self._last_safe_joint_positions.astype(np.float64))
         if self.rl_controller is None:
             return
         self.rl_controller.arm_cmd_q = \
@@ -3644,13 +4330,16 @@ class PingPongControllerNode(Node):
 
     def _reset_compensator_to_current_arm(self) -> None:
         """Reset actuator compensation from the latest right-arm feedback."""
-        if self.compensator is None:
-            return
         try:
             current_q, _ = self._get_right_arm_feedback()
             if current_q is None and self.rl_controller is not None:
                 current_q = self.rl_controller.current_arm_cmd_q()
             if current_q is not None:
+                if self.run_policy_in_separate_process:
+                    self._send_policy_worker_command(
+                        'reset_compensator', current_q.astype(np.float32))
+                if self.compensator is None:
+                    return
                 self.compensator.reset(current_q.astype(np.float32))
                 self.get_logger().info(
                     'Compensator reset with current arm position')
@@ -3693,7 +4382,8 @@ class PingPongControllerNode(Node):
                 'skipping RL inference')
         target = self.safe_init_pose_q
         self._last_raw_joint_positions = target.copy()
-        self._publish_right_arm_command(target, ball_state.stamp)
+        self._publish_right_arm_command(
+            target, ball_state.stamp, profile='parking')
         self._sync_rl_integrator_to_last_safe_command()
         right_arm_q, right_arm_dq = self._get_right_arm_feedback()
         self._record_policy_hold_log(
@@ -3726,7 +4416,8 @@ class PingPongControllerNode(Node):
 
         target = self.safe_init_pose_q
         self._last_raw_joint_positions = target.copy()
-        self._publish_right_arm_command(target, ball_state.stamp)
+        self._publish_right_arm_command(
+            target, ball_state.stamp, profile='parking')
         self._sync_rl_integrator_to_last_safe_command()
         right_arm_q, right_arm_dq = self._get_right_arm_feedback()
         self._record_policy_hold_log(
@@ -3753,10 +4444,76 @@ class PingPongControllerNode(Node):
                 'moving right arm to safe init posture')
         target = self.safe_init_pose_q
         self._last_raw_joint_positions = target.copy()
-        self._publish_right_arm_command(target, stamp)
+        self._publish_right_arm_command(target, stamp, profile='parking')
         # Sync the policy integrator to what was actually commanded this tick
         # (the ramp position) with zero velocity, so a resume does not snap.
         self._sync_rl_integrator_to_last_safe_command()
+
+    def _done_motion_estimate(
+            self, racket_pos_m: Optional[np.ndarray],
+            ee_quat_xyzw: Optional[np.ndarray],
+            ee_psi_rad: Optional[float]) -> dict:
+        """Estimate EE velocity/acceleration for predictive done checks."""
+        out = {
+            'racket_vel_m_s': None,
+            'racket_acc_m_s2': None,
+            'ee_psi_vel_rad_s': None,
+            'ee_abc_vel_rad_s': None,
+        }
+        if racket_pos_m is None:
+            return out
+        pos = np.asarray(racket_pos_m, dtype=np.float64).reshape(-1)
+        if pos.shape[0] != 3 or not np.all(np.isfinite(pos)):
+            return out
+
+        now_s = float(self.get_clock().now().nanoseconds) * 1e-9
+        prev_t = self._done_motion_prev_t_s
+        prev_pos = self._done_motion_prev_pos_m
+        prev_vel = self._done_motion_prev_vel_m_s
+        prev_psi = self._done_motion_prev_psi_rad
+        prev_abc = self._done_motion_prev_abc_rad
+
+        abc = _quat_to_euler_xyz_rad(ee_quat_xyzw)
+        psi = (
+            float(ee_psi_rad)
+            if ee_psi_rad is not None and np.isfinite(float(ee_psi_rad))
+            else None)
+
+        if prev_t is None or prev_pos is None:
+            vel = np.zeros(3, dtype=np.float64)
+            acc = np.zeros(3, dtype=np.float64)
+            psi_vel = 0.0 if psi is not None else None
+            abc_vel = (
+                np.zeros(3, dtype=np.float64) if abc is not None else None)
+        else:
+            dt = max(1e-4, min(0.1, now_s - float(prev_t)))
+            vel = (pos - prev_pos) / dt
+            if prev_vel is None:
+                acc = np.zeros(3, dtype=np.float64)
+            else:
+                acc = (vel - prev_vel) / dt
+            psi_vel = None
+            if psi is not None and prev_psi is not None:
+                psi_vel = _wrap_angle_rad(psi - float(prev_psi)) / dt
+            abc_vel = None
+            if abc is not None and prev_abc is not None:
+                abc_vel = np.asarray([
+                    _wrap_angle_rad(float(abc[i]) - float(prev_abc[i])) / dt
+                    for i in range(3)
+                ], dtype=np.float64)
+
+        self._done_motion_prev_t_s = now_s
+        self._done_motion_prev_pos_m = pos.copy()
+        self._done_motion_prev_vel_m_s = vel.copy()
+        self._done_motion_prev_psi_rad = psi
+        self._done_motion_prev_abc_rad = (
+            None if abc is None else abc.copy())
+
+        out['racket_vel_m_s'] = vel
+        out['racket_acc_m_s2'] = acc
+        out['ee_psi_vel_rad_s'] = psi_vel
+        out['ee_abc_vel_rad_s'] = abc_vel
+        return out
 
     def _should_engage_done_failsafe(
             self, ball_state: BallState, ball_pos_m: np.ndarray,
@@ -3764,13 +4521,11 @@ class PingPongControllerNode(Node):
         """Check done conditions and return (should_engage, reason, conditions).
 
         Returns (False, "", {}) if done monitoring is disabled or if the policy
-        FK is unavailable. Otherwise evaluates all conditions and returns True
-        if ANY fires.
+        FK is unavailable. Ball-state conditions are evaluated only for valid
+        ball states; racket/EE workspace constraints remain active regardless
+        of ball validity.
         """
         if not self.enable_done_monitoring or self.done_monitor is None:
-            return False, "", {}
-        if not ball_state.valid:
-            # No ball => cannot evaluate ball-state conditions, skip check.
             return False, "", {}
         if self.rl_controller is None:
             return False, "", {}
@@ -3781,11 +4536,12 @@ class PingPongControllerNode(Node):
         racket_q = (
             right_arm_q if right_arm_q is not None
             else self.rl_controller.arm_cmd_q)
-        racket_pos_m, fk_ok = self.rl_controller._compute_racket_pose_base(
-            racket_q)
+        racket_pos_m, racket_quat_xyzw, fk_ok = (
+            self.rl_controller._compute_racket_pose_quat_base(racket_q))
         if not fk_ok:
             # FK unavailable => cannot check racket conditions
             racket_pos_m = None
+            racket_quat_xyzw = None
         racket_anchor_m = getattr(
             self.rl_controller, '_racket_anchor_pos_base', None)
         if racket_anchor_m is None:
@@ -3793,15 +4549,20 @@ class PingPongControllerNode(Node):
         if racket_anchor_m is None:
             return False, "", {}
 
-        # RLPolicyController FK already uses the MJX base-yaw convention:
-        # x/y are base-relative and z is world/sim height. Do not apply
+        # RLPolicyController FK already uses the MJX deployment convention:
+        # x/y are base-relative and z is MuJoCo world height. Do not apply
         # _transform_ball_pos_to_sim_frame(), which is only for real ball
-        # measurements whose z is base_link-relative.
+        # measurements in the Cartesian/waist03 frame.
         if racket_pos_m is not None:
             racket_pos_sim = np.asarray(racket_pos_m, dtype=np.float64).reshape(3)
         else:
             racket_pos_sim = None
         racket_anchor_sim = np.asarray(racket_anchor_m, dtype=np.float64).reshape(3)
+        _cart_pos_m, cart_quat_xyzw, cart_psi_rad = self._get_right_arm_cart_pose()
+        ee_quat_xyzw = (
+            cart_quat_xyzw if cart_quat_xyzw is not None else racket_quat_xyzw)
+        motion = self._done_motion_estimate(
+            racket_pos_sim, ee_quat_xyzw, cart_psi_rad)
 
         # Check done conditions
         is_done, reason, conditions = self.done_monitor.check_done(
@@ -3810,6 +4571,13 @@ class PingPongControllerNode(Node):
             racket_pos_m=racket_pos_sim,
             racket_anchor_m=racket_anchor_sim,
             base_pos_m=None,  # Stationary base => [0, 0, z]
+            ee_quat_xyzw=ee_quat_xyzw,
+            ee_psi_rad=cart_psi_rad,
+            racket_vel_m_s=motion.get('racket_vel_m_s'),
+            racket_acc_m_s2=motion.get('racket_acc_m_s2'),
+            ee_psi_vel_rad_s=motion.get('ee_psi_vel_rad_s'),
+            ee_abc_vel_rad_s=motion.get('ee_abc_vel_rad_s'),
+            check_ball_conditions=bool(ball_state.valid),
         )
         if is_done:
             raw_sim_pos = None
@@ -3843,6 +4611,16 @@ class PingPongControllerNode(Node):
                     None if racket_pos_sim is None
                     else np.asarray(racket_pos_sim, dtype=np.float64).reshape(3)),
                 'racket_anchor_m': racket_anchor_sim,
+                'ee_quat_xyzw': (
+                    None if ee_quat_xyzw is None else np.asarray(
+                        ee_quat_xyzw, dtype=np.float64).reshape(4)),
+                'ee_psi_rad': cart_psi_rad,
+                'ee_vel_m_s': motion.get('racket_vel_m_s'),
+                'ee_acc_m_s2': motion.get('racket_acc_m_s2'),
+                'ee_psi_vel_rad_s': motion.get('ee_psi_vel_rad_s'),
+                'done_prediction': dict(
+                    self.done_monitor.diagnostics().get(
+                        'last_prediction', {})),
                 'conditions': dict(conditions),
             }
 
@@ -3863,6 +4641,11 @@ class PingPongControllerNode(Node):
             raw_age_s = debug.get('raw_ball_age_s')
             racket = debug.get('racket_pos_m')
             anchor = debug.get('racket_anchor_m')
+            ee_quat = debug.get('ee_quat_xyzw')
+            ee_psi = debug.get('ee_psi_rad')
+            ee_vel = debug.get('ee_vel_m_s')
+            ee_acc = debug.get('ee_acc_m_s2')
+            prediction = debug.get('done_prediction') or {}
             detail = ''
             if ball is not None:
                 detail += f' control_ball={np.round(ball, 3).tolist()}m'
@@ -3877,12 +4660,24 @@ class PingPongControllerNode(Node):
                 detail += f' racket={np.round(racket, 3).tolist()}m'
             if anchor is not None:
                 detail += f' anchor={np.round(anchor, 3).tolist()}m'
+            if ee_quat is not None:
+                detail += f' ee_quat={np.round(ee_quat, 3).tolist()}'
+            if ee_psi is not None:
+                detail += f' ee_psi={float(ee_psi):+.3f}rad'
+            if ee_vel is not None:
+                detail += f' ee_vel={np.round(ee_vel, 3).tolist()}m/s'
+            if ee_acc is not None:
+                detail += f' ee_acc={np.round(ee_acc, 2).tolist()}m/s2'
+            if prediction:
+                detail += (
+                    f" predicted={prediction.get('condition')}@"
+                    f"{float(prediction.get('time_s', 0.0)):.3f}s")
             self.get_logger().warn(
                 f'Done condition triggered: {reason} - '
                 f'Pausing RL and moving to safe pose.{detail}')
         target = self.safe_init_pose_q
         self._last_raw_joint_positions = target.copy()
-        self._publish_right_arm_command(target, stamp)
+        self._publish_right_arm_command(target, stamp, profile='parking')
         self._sync_rl_integrator_to_last_safe_command()
 
     def _run_duration_failsafe(self, stamp: Time) -> None:
@@ -3906,7 +4701,7 @@ class PingPongControllerNode(Node):
                     daemon=True).start()
         target = self.safe_init_pose_q
         self._last_raw_joint_positions = target.copy()
-        self._publish_right_arm_command(target, stamp)
+        self._publish_right_arm_command(target, stamp, profile='parking')
         self._sync_rl_integrator_to_last_safe_command()
 
     def _maybe_log_done_status(self, conditions: dict) -> None:
@@ -3980,6 +4775,52 @@ class PingPongControllerNode(Node):
                 self._prev_right_arm_q_for_dq = cur_q.copy()
                 self._prev_right_arm_stamp_for_dq = stamp_sec
 
+    def _cart_state_callback(self, msg: MechUnitStateArray):
+        """Cache the latest right-arm Cartesian end-effector pose."""
+        stamp_sec = (
+            float(msg.header.stamp.sec)
+            + float(msg.header.stamp.nanosec) * 1e-9
+            if hasattr(msg, 'header') else self.get_clock().now().nanoseconds * 1e-9)
+        for state in msg.states:
+            if int(state.mu_idx) != int(self.right_arm_mu_idx):
+                continue
+            pose = state.end_pose
+            pos = np.asarray([
+                float(pose.position.x),
+                float(pose.position.y),
+                float(pose.position.z),
+            ], dtype=np.float32)
+            quat = np.asarray([
+                float(pose.orientation.x),
+                float(pose.orientation.y),
+                float(pose.orientation.z),
+                float(pose.orientation.w),
+            ], dtype=np.float32)
+            psi = float(state.psi)
+            if not np.all(np.isfinite(pos)) or not np.all(np.isfinite(quat)):
+                return
+            with self._cart_state_lock:
+                self._latest_cart_pos_m = pos
+                self._latest_cart_quat_xyzw = quat
+                self._latest_cart_psi_rad = psi if np.isfinite(psi) else None
+                self._latest_cart_state_stamp_sec = stamp_sec
+                self._cart_state_received = True
+            return
+
+    def _get_right_arm_cart_pose(self):
+        """Return cached Cartesian EE pose or (None, None, None)."""
+        with self._cart_state_lock:
+            if not self._cart_state_received:
+                return None, None, None
+            pos = (
+                None if self._latest_cart_pos_m is None
+                else self._latest_cart_pos_m.copy())
+            quat = (
+                None if self._latest_cart_quat_xyzw is None
+                else self._latest_cart_quat_xyzw.copy())
+            psi = self._latest_cart_psi_rad
+        return pos, quat, psi
+
     def _get_right_arm_feedback(self):
         """Return (q, dq) as float32 arrays of shape (7,) or (None, None).
 
@@ -4034,6 +4875,12 @@ class PingPongControllerNode(Node):
         self.compensator = None
 
         enable_comp = bool(self.get_parameter('enable_compensation').value)
+
+        if bool(getattr(self, 'direct_physical_actuator_policy', False)):
+            self.get_logger().info(
+                'Actuator compensation DISABLED: checkpoint models the '
+                'physical actuator plant directly')
+            return
 
         if not enable_comp:
             self.get_logger().info('Actuator compensation DISABLED')
@@ -4097,6 +4944,325 @@ class PingPongControllerNode(Node):
             import traceback
             self.get_logger().error(traceback.format_exc())
             self.compensator = None
+
+    def _make_policy_worker_config(self) -> dict:
+        return {
+            'policy_backend': self.policy_backend,
+            'rl_model_path': self.rl_model_path,
+            'control_dt': self.control_dt,
+            'rl_ball_obs_age_clip': self.rl_ball_obs_age_clip,
+            'rl_policy_device': self.rl_policy_device,
+            'robot_xml_path': self.robot_xml_path,
+            'enable_delay_conditioning': self.enable_delay_conditioning,
+            'rl_use_valid_ball_obs_age': self.rl_use_valid_ball_obs_age,
+            'policy_observation_profile': self.policy_observation_profile,
+            'direct_physical_actuator_policy': bool(
+                self.direct_physical_actuator_policy),
+            'enable_compensation': bool(
+                self.get_parameter('enable_compensation').value),
+            'compensation_mode': str(
+                self.get_parameter('compensation_mode').value),
+            'comp_delay_ms': float(self.get_parameter('comp_delay_ms').value),
+            'comp_actuator_tau_s': float(
+                self.get_parameter('comp_actuator_tau_s').value),
+            'comp_actuator_gain': float(
+                self.get_parameter('comp_actuator_gain').value),
+            'comp_buffer_extra_steps': int(
+                self.get_parameter('comp_buffer_extra_steps').value),
+            'comp_delay_conditioning': bool(
+                self.get_parameter('comp_delay_conditioning').value),
+            'comp_mpc_beta': float(
+                self.get_parameter('comp_mpc_beta').value),
+            'comp_mpc_delay_scale': float(
+                self.get_parameter('comp_mpc_delay_scale').value),
+            'comp_mpc_tau_scale': float(
+                self.get_parameter('comp_mpc_tau_scale').value),
+            'comp_mpc_horizon_steps': int(
+                self.get_parameter('comp_mpc_horizon_steps').value),
+            'comp_mpc_tracking_weight': float(
+                self.get_parameter('comp_mpc_tracking_weight').value),
+            'comp_mpc_nominal_weight': float(
+                self.get_parameter('comp_mpc_nominal_weight').value),
+            'comp_mpc_delta_weight': float(
+                self.get_parameter('comp_mpc_delta_weight').value),
+            'comp_mpc_max_delta_rad': float(
+                self.get_parameter('comp_mpc_max_delta_rad').value),
+        }
+
+    def _start_policy_process(self) -> bool:
+        """Start the optional subprocess policy worker.
+
+        The main node keeps publishing at the timer rate even if the worker is
+        late. The worker owns the stateful RL integrator and actuator
+        compensator; main only safety-limits and publishes the latest result.
+        """
+        if not self.run_policy_in_separate_process:
+            return False
+        if self._policy_process is not None:
+            return True
+
+        try:
+            ctx = mp.get_context('spawn')
+            self._policy_request_q = ctx.Queue(maxsize=1)
+            self._policy_result_q = ctx.Queue(maxsize=4)
+            proc = ctx.Process(
+                target=_policy_worker_main,
+                args=(
+                    self._make_policy_worker_config(),
+                    self._policy_request_q,
+                    self._policy_result_q,
+                ),
+                name='pingpong_policy_worker',
+                daemon=True,
+            )
+            proc.start()
+            self._policy_process = proc
+            ready = self._policy_result_q.get(
+                timeout=self.policy_process_start_timeout_s)
+        except Exception as exc:
+            self.get_logger().error(
+                f'Failed to start policy subprocess: {exc}; '
+                'falling back to in-process policy inference')
+            self._stop_policy_process()
+            self.run_policy_in_separate_process = False
+            return False
+
+        if ready.get('kind') != 'ready':
+            self.get_logger().error(
+                'Policy subprocess failed during startup: '
+                f'{ready.get("error", ready)}')
+            tb = ready.get('traceback')
+            if tb:
+                self.get_logger().error(tb)
+            self._stop_policy_process()
+            self.run_policy_in_separate_process = False
+            return False
+
+        self._policy_process_pid = ready.get('pid')
+        initial = _finite_array_or_none(
+            ready.get('initial_cmd'), shape=(self._rl_expected_joint_count,),
+            dtype=np.float64)
+        if initial is not None:
+            self._last_raw_joint_positions = initial.copy()
+            self._last_safe_joint_positions = initial.copy()
+        self._policy_last_result_wall = time.time()
+        self.get_logger().info(
+            'Policy subprocess ready: '
+            f'pid={self._policy_process_pid}, '
+            f'publish timer remains {self.control_rate_hz:.1f}Hz and will '
+            'hold the latest safe command if policy results are late')
+        return True
+
+    def _stop_policy_process(self) -> None:
+        proc = self._policy_process
+        req_q = self._policy_request_q
+        if req_q is not None:
+            try:
+                _queue_replace_latest(req_q, {'kind': 'stop'})
+            except Exception:
+                pass
+        if proc is not None:
+            try:
+                proc.join(timeout=1.0)
+                if proc.is_alive():
+                    proc.terminate()
+                    proc.join(timeout=1.0)
+            except Exception:
+                pass
+        self._policy_process = None
+        self._policy_request_q = None
+        self._policy_result_q = None
+        self._policy_process_pid = None
+
+    def _send_policy_worker_command(self, kind: str, q: np.ndarray) -> None:
+        if not self.run_policy_in_separate_process:
+            return
+        if self._policy_request_q is None:
+            return
+        arr = _finite_array_or_none(q, shape=(self._rl_expected_joint_count,),
+                                    dtype=np.float64)
+        if arr is None:
+            return
+        _queue_replace_latest(
+            self._policy_request_q,
+            {'kind': kind, 'q': arr.tolist()})
+
+    def _sync_main_policy_debug_state(self, result: dict) -> None:
+        """Mirror worker state into the local controller for debug/log APIs."""
+        if self.rl_controller is None:
+            return
+        try:
+            obs = np.asarray(result.get('obs', []), dtype=np.float32)
+            action = np.asarray(result.get('action', []), dtype=np.float32)
+            pos = np.asarray(
+                result.get('nominal_position', []), dtype=np.float32)
+            vel = np.asarray(
+                result.get('nominal_velocity', []), dtype=np.float32)
+            acc = np.asarray(
+                result.get('nominal_acceleration', []), dtype=np.float32)
+            if obs.size:
+                self.rl_controller.last_obs = obs.copy()
+            if action.shape == (self._rl_expected_joint_count,):
+                self.rl_controller.last_action = action.copy()
+            if pos.shape == (self._rl_expected_joint_count,):
+                self.rl_controller.last_cmd_q = pos.copy()
+                self.rl_controller.arm_cmd_q = pos.copy()
+            if vel.shape == (self._rl_expected_joint_count,):
+                self.rl_controller.last_cmd_qvel = vel.copy()
+                self.rl_controller.arm_cmd_qvel = vel.copy()
+            if acc.shape == (self._rl_expected_joint_count,):
+                self.rl_controller.last_cmd_qacc = acc.copy()
+        except Exception:
+            pass
+
+    def _handle_policy_worker_result(self, result: dict) -> None:
+        if result.get('kind') == 'error':
+            now_wall = time.time()
+            if now_wall - self._policy_last_warn_wall >= 1.0:
+                self._policy_last_warn_wall = now_wall
+                self.get_logger().error(
+                    f'Policy subprocess error at {result.get("where")}: '
+                    f'{result.get("error")}')
+            return
+        if result.get('kind') != 'result':
+            return
+
+        cmd = _finite_array_or_none(
+            result.get('joint_cmd'), shape=(self._rl_expected_joint_count,),
+            dtype=np.float64)
+        if cmd is None:
+            return
+        self._policy_latest_result_seq = int(result.get('seq', -1))
+        self._policy_last_result_wall = time.time()
+        self._last_raw_joint_positions = cmd.copy()
+        self._sync_main_policy_debug_state(result)
+
+        if self.save_policy_log:
+            log = result.get('log') or {}
+            try:
+                self._record_policy_log(
+                    np.asarray(log.get('ball_pos_m'), dtype=np.float32),
+                    np.asarray(log.get('ball_vel_m_s'), dtype=np.float32),
+                    bool(log.get('ball_valid', False)),
+                    float(log.get('age_s', 0.0)),
+                    _finite_array_or_none(log.get('arm_q'), shape=(7,)),
+                    _finite_array_or_none(log.get('arm_dq'), shape=(7,)),
+                    control_mode='policy_async')
+            except Exception:
+                pass
+
+    def _poll_policy_worker_results(self) -> None:
+        q = self._policy_result_q
+        if q is None:
+            return
+        while True:
+            try:
+                result = q.get_nowait()
+            except Empty:
+                break
+            except Exception:
+                break
+            self._handle_policy_worker_result(result)
+
+    def _submit_policy_worker_request(
+            self, ball_pos_m: np.ndarray, ball_vel_m_s: np.ndarray,
+            ball_valid: bool, age_s: float,
+            right_arm_q: Optional[np.ndarray],
+            right_arm_dq: Optional[np.ndarray]) -> None:
+        q = self._policy_request_q
+        if q is None:
+            return
+        self._policy_request_seq += 1
+        req = {
+            'kind': 'predict',
+            'seq': int(self._policy_request_seq),
+            'stamp_wall': float(time.time()),
+            'ball_pos_m': np.asarray(
+                ball_pos_m, dtype=np.float32).reshape(3).tolist(),
+            'ball_vel_m_s': np.asarray(
+                ball_vel_m_s, dtype=np.float32).reshape(3).tolist(),
+            'ball_valid': bool(ball_valid),
+            'age_s': float(age_s),
+            'dt': float(self.control_dt),
+            'arm_q': (
+                None if right_arm_q is None
+                else np.asarray(right_arm_q, dtype=np.float32).reshape(7).tolist()),
+            'arm_dq': (
+                None if right_arm_dq is None
+                else np.asarray(right_arm_dq, dtype=np.float32).reshape(7).tolist()),
+            'log': {
+                'ball_pos_m': np.asarray(
+                    ball_pos_m, dtype=np.float32).reshape(3).tolist(),
+                'ball_vel_m_s': np.asarray(
+                    ball_vel_m_s, dtype=np.float32).reshape(3).tolist(),
+                'ball_valid': bool(ball_valid),
+                'age_s': float(age_s),
+                'arm_q': (
+                    None if right_arm_q is None
+                    else np.asarray(
+                        right_arm_q, dtype=np.float32).reshape(7).tolist()),
+                'arm_dq': (
+                    None if right_arm_dq is None
+                    else np.asarray(
+                        right_arm_dq, dtype=np.float32).reshape(7).tolist()),
+            },
+        }
+        if _queue_replace_latest(q, req):
+            self._policy_last_submit_wall = time.time()
+
+    def _compute_action_async(
+            self, ball_state: BallState,
+            age_override: Optional[float] = None) -> np.ndarray:
+        now_wall = time.time()
+        self._poll_policy_worker_results()
+
+        if (self._policy_process is not None
+                and not self._policy_process.is_alive()):
+            if now_wall - self._policy_last_warn_wall >= 1.0:
+                self._policy_last_warn_wall = now_wall
+                self.get_logger().error(
+                    'Policy subprocess is not alive; holding last command')
+            return self._last_raw_joint_positions.astype(np.float64)
+
+        if ball_state.valid:
+            self._last_valid_ball_wall_time = now_wall
+            age_s = age_override if age_override is not None else 0.0
+        elif age_override is not None:
+            age_s = age_override
+        elif self._last_valid_ball_wall_time is not None:
+            age_s = max(0.0, now_wall - self._last_valid_ball_wall_time)
+        else:
+            age_s = self.rl_ball_obs_age_clip
+        age_s = float(max(0.0, age_s))
+
+        ball_pos_m, ball_vel_m_s = self._ball_state_to_policy_sim_frame(
+            ball_state)
+        right_arm_q, right_arm_dq = self._get_right_arm_feedback()
+        if right_arm_q is None and not self._joint_state_log_warned_missing:
+            self.get_logger().warn(
+                'No right-arm /joint_states yet; async policy obs uses '
+                'command estimate in worker until feedback arrives',
+                throttle_duration_sec=5.0)
+            self._joint_state_log_warned_missing = True
+
+        self._last_sim_ball_pos_m = ball_pos_m.copy()
+        self._last_sim_ball_vel_m_s = ball_vel_m_s.copy()
+        self._last_sim_ball_valid = bool(ball_state.valid)
+
+        self._submit_policy_worker_request(
+            ball_pos_m, ball_vel_m_s, bool(ball_state.valid), age_s,
+            right_arm_q, right_arm_dq)
+
+        if self._policy_last_result_wall is not None:
+            stale_s = now_wall - self._policy_last_result_wall
+            if (stale_s > self.policy_process_warn_after_s
+                    and now_wall - self._policy_last_warn_wall >= 1.0):
+                self._policy_last_warn_wall = now_wall
+                self.get_logger().warn(
+                    f'Policy subprocess result stale for '
+                    f'{stale_s * 1e3:.1f}ms; publishing held command')
+
+        return self._last_raw_joint_positions.astype(np.float64)
 
     def _init_replay_mode(self):
         """Initialize replay mode: load CSV data."""
@@ -4235,9 +5401,15 @@ class PingPongControllerNode(Node):
                 position_unit=self.mocap_position_unit,
                 timestamp_unit=self.mocap_timestamp_unit,
                 velocity_alpha=self.mocap_velocity_alpha,
-                max_velocity_m_s=self.mocap_max_velocity_m_s
+                max_velocity_m_s=self.mocap_max_velocity_m_s,
+                velocity_window_frames=self.mocap_velocity_window_frames,
+                velocity_window_max_span_s=(
+                    self.mocap_velocity_window_max_span_s),
             )
-            self._mocap_detector.start()
+            if not self._mocap_detector.start():
+                raise RuntimeError(
+                    f'failed to bind UDP socket at '
+                    f'{self.mocap_bind_host}:{self.mocap_udp_port}')
             self.get_logger().info(
                 f'✅ Motion capture input enabled: '
                 f'{self.mocap_bind_host}:{self.mocap_udp_port}, '
@@ -4400,12 +5572,13 @@ class PingPongControllerNode(Node):
         return state
 
     def _init_pose_reached(self) -> bool:
-        """True when every non-base joint is within tolerance of TARGET.
+        """True when every non-base joint is within tolerance of its target.
 
         We compare JointState positions against TARGET_DEGREES for every
-        joint we have a target for — left arm, right arm, leg+waist, head.
-        Base-0..Base-3 are ignored. Missing joints fall back to returning
-        False so we keep publishing init pose until the full body catches up.
+        non-right-arm joint. Simcode6's right arm instead uses the reset pose
+        embedded in its checkpoint. Base-0..Base-3 are ignored. Missing joints
+        return False so we keep publishing init pose until the full body
+        catches up.
         """
         tol = float(
             self.get_parameter('init_pose_tolerance_rad').value)
@@ -4413,10 +5586,21 @@ class PingPongControllerNode(Node):
             if not self._joint_state_received:
                 return False
             snapshot = dict(self._latest_joint_positions)
-        for name, deg in TARGET_DEGREES.items():
+        targets_rad = {
+            name: float(np.deg2rad(deg))
+            for name, deg in TARGET_DEGREES.items()
+        }
+        if (getattr(self, 'policy_observation_profile', None)
+                == OBSERVATION_PROFILE_SIMCODE6_QVEL67
+                and self.rl_controller is not None):
+            checkpoint_q = np.asarray(
+                self.rl_controller.initial_arm_q_rad,
+                dtype=np.float64,
+            ).reshape(len(RIGHT_ARM_JOINTS))
+            targets_rad.update(dict(zip(RIGHT_ARM_JOINTS, checkpoint_q)))
+        for name, target_rad in targets_rad.items():
             if name not in snapshot:
                 return False
-            target_rad = float(np.deg2rad(deg))
             if abs(snapshot[name] - target_rad) > tol:
                 return False
         return True
@@ -4489,19 +5673,22 @@ class PingPongControllerNode(Node):
             ball_state.velocity, dtype=np.float32) * 1e-3
 
         # CRITICAL: Transform ball coordinates from the real Cartesian frame
-        # (waist02) to the simulation frame to match training observations.
+        # (waist03 / URDF torso_flange) to the simulation frame to match
+        # training observations.
         #
         # Simulation coordinate system (MJX):
-        #   - Uses _point_to_base() which returns [x_rel, y_rel, z_world]
+        #   - Uses _point_to_base() which returns [x_rel, y_rel, point_z]
         #   - x, y: relative to base, rotated by yaw
-        #   - z: ABSOLUTE world frame z (NOT relative to base!)
+        #   - z: kept from the incoming point and aligned here to the
+        #     deployment height convention.
         #
         # Real system coordinate system:
         #   - Ball position is in the robot Cartesian frame via T_base_camera
-        #   - That Cartesian frame corresponds to moz1_pd.xml body waist02
-        #   - x, y, z: ALL relative to waist02 origin
+        #   - That Cartesian frame corresponds to moz1_pd.xml body waist03
+        #     (moz_v2.urdf link torso_flange)
+        #   - x, y, z: ALL relative to waist03 origin
         #
-        # Transform: p_sim = p_waist02 + waist02_origin_in_sim_base.
+        # Transform: p_sim = p_waist03 + waist03_origin_in_real_xml_base.
         #
         # IMPORTANT: Skip transformation if replay data is already in sim frame
         # (e.g., mjx_ball_replay.csv from simulation).
@@ -4527,6 +5714,9 @@ class PingPongControllerNode(Node):
         """
         if not self.enable_rl_policy or self.rl_controller is None:
             return self._last_raw_joint_positions.astype(np.float64)
+        if (self.run_policy_in_separate_process
+                and self._policy_process is not None):
+            return self._compute_action_async(ball_state, age_override)
 
         now_wall = time.time()
         if ball_state.valid:
@@ -4663,7 +5853,8 @@ class PingPongControllerNode(Node):
         self.cmd_pub.publish(msg)
 
     def _publish_right_arm_command(
-            self, joint_positions: np.ndarray, stamp: Time):
+            self, joint_positions: np.ndarray, stamp: Time,
+            *, profile: str = 'normal'):
         """Safety-limit + publish a right-arm command on command_topic.
 
         This is the ONLY path that may send right-arm joint commands: every
@@ -4681,13 +5872,18 @@ class PingPongControllerNode(Node):
 
         raw = np.asarray(joint_positions, dtype=np.float64).reshape(-1)
 
-        # Apply safety limiter if enabled
-        if self.enable_safety_limiter:
-            safe_cmd = self.safety_limiter.filter(raw)
+        # Apply the normal safety limiter only when enabled, but always keep the
+        # low-speed parking profile active for reset/failsafe return-to-init.
+        use_limiter = (
+            self.enable_safety_limiter
+            or str(profile).strip().lower() != 'normal')
+        if use_limiter:
+            safe_cmd = self.safety_limiter.filter(raw, profile=profile)
             self._maybe_log_safety_counts()
         else:
             # Bypass safety limiter - use raw command directly
             safe_cmd = raw.copy()
+            self.safety_limiter.observe(safe_cmd)
 
         self._last_safe_joint_positions = safe_cmd.copy()
 
@@ -4738,13 +5934,14 @@ class PingPongControllerNode(Node):
 
         raw = np.asarray(right_arm_raw_q, dtype=np.float64).reshape(-1)
 
-        # Apply safety limiter if enabled
+        # Whole-body init uses its own smooth ramp; obey the global limiter flag.
         if self.enable_safety_limiter:
             safe_cmd = self.safety_limiter.filter(raw)
             self._maybe_log_safety_counts()
         else:
             # Bypass safety limiter - use raw command directly
             safe_cmd = raw.copy()
+            self.safety_limiter.observe(safe_cmd)
 
         self._last_safe_joint_positions = safe_cmd.copy()
 
@@ -5470,8 +6667,8 @@ class PingPongControllerNode(Node):
             vel_m_s = np.asarray(vel, dtype=np.float64).reshape(3) * 1e-3
         except (TypeError, ValueError):
             return None, None, False, "[SIM raw frame]"
-        # Real Cartesian/waist02 frame -> sim frame, matching the transform used
-        # to feed the policy.
+        # Real Cartesian/waist03 frame -> sim frame, matching the transform
+        # used to feed the policy.
         pos_sim = self._transform_ball_pos_to_sim_frame(pos_m)
         return pos_sim, vel_m_s, True, "[SIM raw frame]"
 
@@ -5531,7 +6728,7 @@ class PingPongControllerNode(Node):
         self.rl_joint_cmd_state_pub.publish(msg)
 
     def _transform_ball_pos_to_sim_frame(self, ball_pos_m: np.ndarray) -> np.ndarray:
-        """Transform ball position from real Cartesian/waist02 frame to sim frame.
+        """Transform ball position from real Cartesian/waist03 frame to sim frame.
 
         Coordinate system difference (from code analysis):
 
@@ -5541,21 +6738,26 @@ class PingPongControllerNode(Node):
                 return jnp.stack([x_rot, y_rot, point[:, 2]], axis=-1)
                                                   ^^^^^^^^^^
             Key: z directly returns point[:, 2] WITHOUT subtracting base_q's z!
-            Result: [x_rel, y_rel, z_world_absolute]
+            Result: [x_rel, y_rel, point_z]
 
         Real system (via T_base_camera transformation):
             All coordinates relative to the robot Cartesian frame, which
-            corresponds to moz1_pd.xml's waist02 body.
-            Result: [x_waist02, y_waist02, z_waist02]
+            corresponds to moz1_pd.xml's waist03 body
+            (moz_v2.urdf's torso_flange link).
+            Result: [x_waist03, y_waist03, z_waist03]
 
         Transform:
-            p_sim = p_waist02 + waist02_origin_in_sim_base
+            p_base = p_waist03 + waist03_origin_in_real_base
+            p_sim.xy = p_base.xy
+            p_sim.z = p_base.z + 0.100 m
 
-        where waist02_origin_in_sim_base is computed from moz1_pd.xml at the
-        TARGET_DEGREES posture. Default [0.0, 0.023583, 0.947396] m.
+        The waist03/torso_flange origin is computed from moz1_pd.xml at the
+        TARGET_DEGREES posture. The default sim offset is
+        [0.0, 0.023583, 1.302396] m, i.e. the real/XML base height plus the
+        XML body's 0.100 m world offset.
 
         Args:
-            ball_pos_m: Ball position in waist02 frame [x, y, z] in meters
+            ball_pos_m: Ball position in waist03 frame [x, y, z] in meters
 
         Returns:
             Ball position in simulation frame [x, y, z_world] in meters
@@ -5632,8 +6834,8 @@ class PingPongControllerNode(Node):
             anchor_base = self._viz_racket_pose_base(
                 np.asarray(target_right_arm_q_rad(), dtype=np.float64))
             if anchor_base is not None:
-                # _viz_racket_pose_base follows the MJX base-yaw convention:
-                # x/y are base-relative, z is already world/sim height.
+                # _viz_racket_pose_base follows the MJX deployment convention:
+                # x/y are base-relative, z is MuJoCo world height.
                 self._viz_racket_anchor_sim = anchor_base
                 self.get_logger().info(
                     'Viz FK: racket anchor (sim frame) = '
@@ -5672,8 +6874,11 @@ class PingPongControllerNode(Node):
         dx = rpos_world[0] - base_pos[0]
         dy = rpos_world[1] - base_pos[1]
         c, s = np.cos(yaw), np.sin(yaw)
-        return np.array([c * dx + s * dy, -s * dx + c * dy, rpos_world[2]],
-                        dtype=np.float64)
+        return np.array([
+            c * dx + s * dy,
+            -s * dx + c * dy,
+            rpos_world[2] + DEPLOYMENT_FK_WORLD_Z_CORRECTION_M,
+        ], dtype=np.float64)
 
     def _get_racket_anchor_sim(self):
         """Return the racket anchor in sim frame (m), or None.
@@ -5684,8 +6889,8 @@ class PingPongControllerNode(Node):
         if self.rl_controller is not None:
             anchor = getattr(self.rl_controller, '_racket_anchor_pos_base', None)
             if anchor is not None:
-                # RLPolicyController stores the racket anchor in the same MJX
-                # base-yaw convention: z is already world/sim height.
+                # RLPolicyController stores the racket anchor in the same
+                # deployment base-yaw/z convention.
                 return np.asarray(anchor, dtype=np.float64).reshape(3)
         return self._viz_racket_anchor_sim
 
@@ -5701,7 +6906,7 @@ class PingPongControllerNode(Node):
         rpos_base = self._viz_racket_pose_base(q)
         if rpos_base is None:
             return None
-        # _viz_racket_pose_base already returns sim-frame z (world height).
+        # _viz_racket_pose_base already returns the deployment z convention.
         return rpos_base
 
     def _maybe_log_safety_counts(self):
@@ -5757,6 +6962,7 @@ def main(args=None):
             node.get_logger().info('=' * 60)
 
         if node:
+            node._stop_policy_process()
             node._shutdown_realsense()
             node._stop_raw_video_recording()
             node._shutdown_visualization()

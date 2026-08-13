@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -39,6 +40,428 @@ class PolicyObservationAgeContractTest(unittest.TestCase):
         self.assertTrue(PROBE._policy_uses_valid_ball_obs_age(
             PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67, False))
 
+    def test_simcode6_keeps_held_valid_ball_observation_age_at_zero(self):
+        self.assertFalse(PROBE._policy_uses_valid_ball_obs_age(
+            PROBE.OBSERVATION_PROFILE_SIMCODE6_QVEL67, True))
+
+
+class CameraImpactRacketFrameContractTest(unittest.TestCase):
+
+    class _Core:
+        def __init__(self):
+            self.racket_updates = []
+            self.clear_count = 0
+
+        def set_racket_state(self, position, timestamp):
+            self.racket_updates.append((
+                PROBE.np.asarray(position, dtype=PROBE.np.float64),
+                float(timestamp),
+            ))
+
+        def clear_racket_state(self):
+            self.clear_count += 1
+
+    @staticmethod
+    def _node(output_frame):
+        node = PROBE.RosBridgeNode.__new__(PROBE.RosBridgeNode)
+        node.cfg = SimpleNamespace(
+            sim_cartesian_x_offset_m=0.0,
+            sim_cartesian_y_offset_m=0.023583,
+            sim_base_height_m=1.302396,
+        )
+        node.camera_lock = threading.Lock()
+        node.camera_output_frame = output_frame
+        node.camera_detector = SimpleNamespace(
+            detector=CameraImpactRacketFrameContractTest._Core())
+        node.latest_policy_viz_state = {}
+        return node
+
+    def test_base_link_detector_receives_inverse_policy_frame_translation(self):
+        node = self._node("base_link")
+        racket_sim = PROBE.np.array(
+            [-0.114089, -0.466326, 1.048674], dtype=PROBE.np.float32)
+
+        with mock.patch.object(PROBE.time, "time", return_value=123.0):
+            node.set_policy_viz_state(
+                PROBE.np.zeros(3), PROBE.np.zeros(3), True,
+                PROBE.np.zeros(3), racket_sim, True)
+
+        core = node.camera_detector.detector
+        self.assertEqual(len(core.racket_updates), 1)
+        position, timestamp = core.racket_updates[0]
+        PROBE.np.testing.assert_allclose(
+            position,
+            [-0.114089, -0.489909, -0.253722],
+            rtol=0.0,
+            atol=2.0e-7,
+        )
+        self.assertEqual(timestamp, 123.0)
+        # Visualization remains in the policy/sim frame.
+        PROBE.np.testing.assert_allclose(
+            node.latest_policy_viz_state["racket_pos_m"], racket_sim)
+        # Regression fixture from fixed-ball recording 20260812_165718: the
+        # old mixed-frame path reported about 1269 mm instead of 32 mm.
+        ball_sim = PROBE.np.array(
+            [-0.108706, -0.464246, 1.080593], dtype=PROBE.np.float64)
+        frame_offset = PROBE.np.array(
+            [0.0, 0.023583, 1.302396], dtype=PROBE.np.float64)
+        distance_mm = 1000.0 * PROBE.np.linalg.norm(
+            (ball_sim - frame_offset) - position)
+        self.assertAlmostEqual(distance_mm, 32.436, delta=0.01)
+
+    def test_unrelated_camera_frame_clears_incomparable_racket_context(self):
+        node = self._node("camera")
+
+        node.set_policy_viz_state(
+            PROBE.np.zeros(3), PROBE.np.zeros(3), True,
+            PROBE.np.zeros(3), PROBE.np.ones(3), True)
+
+        core = node.camera_detector.detector
+        self.assertEqual(core.racket_updates, [])
+        self.assertEqual(core.clear_count, 1)
+
+
+class SensorDepthAnomalyPredictionContractTest(unittest.TestCase):
+
+    @staticmethod
+    def _options(*, takeover=True):
+        return SimpleNamespace(
+            high_ball_occlusion_prediction=False,
+            sensor_depth_anomaly_prediction=bool(takeover),
+            ball_source="camera",
+            use_ball_estimator=False,
+            high_ball_prediction_history_frames=10,
+            high_ball_prediction_activation_z_m=1.42,
+            high_ball_prediction_min_upward_velocity_m_s=0.20,
+            high_ball_prediction_max_prediction_s=0.45,
+            high_ball_prediction_stop_z_m=1.24,
+            high_ball_prediction_drag_coefficient_per_m=0.13545,
+            high_ball_prediction_integration_step_s=0.005,
+            high_ball_prediction_reacquisition_gate_m=0.18,
+            high_ball_reacquisition_velocity_handover=False,
+            high_ball_reacquisition_velocity_frames=3,
+            high_ball_reacquisition_velocity_blend_s=0.04,
+        )
+
+    @staticmethod
+    def _probe():
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.high_ball_occlusion_predictor = None
+        probe.high_ball_occlusion_predictor_key = None
+        probe.now_s = 0.0
+        probe.cfg = SimpleNamespace(control_dt=0.005)
+        probe.ros_bridge = None
+        return probe
+
+    def test_independent_switch_routes_adaptive_depth_fault_to_3d_model(self):
+        probe = self._probe()
+        options = self._options(takeover=True)
+        good_measurement = {
+            "depth_mode": "adaptive",
+            "depth_sensor_rejected": False,
+        }
+        for index in range(10):
+            stamp = 0.01 * index
+            probe.now_s = stamp
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.array([0.1 + 0.2 * stamp, -0.4, 1.0]),
+                PROBE.np.array([0.2, 0.0, 0.0]),
+                True,
+                stamp,
+                options,
+                good_measurement,
+            )
+
+        probe.now_s = 0.10
+        position, velocity, valid, _stamp, info = (
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.array([0.0, 0.0, 2.0]),
+                PROBE.np.array([0.0, 0.0, 0.0]),
+                True,
+                0.10,
+                options,
+                {
+                    "depth_mode": "adaptive",
+                    "depth_sensor_rejected": True,
+                },
+            ))
+
+        self.assertTrue(valid)
+        self.assertTrue(info["predicted"])
+        self.assertTrue(info["controlApplied"])
+        self.assertTrue(info["sensorDepthAnomalyDetected"])
+        self.assertEqual(info["activeTrigger"], "sensor_depth_anomaly")
+        self.assertLess(float(position[2]), 1.24)
+        self.assertLess(float(PROBE.np.linalg.norm(velocity)), 5.0)
+
+    def test_disabled_depth_fault_switch_never_promotes_rejected_fallback(self):
+        probe = self._probe()
+        fallback = PROBE.np.array([0.2, -0.3, 0.9])
+
+        position, _velocity, valid, _stamp, info = (
+            probe._resolve_high_ball_occlusion_state(
+                fallback,
+                PROBE.np.zeros(3),
+                True,
+                0.10,
+                self._options(takeover=False),
+                {
+                    "depth_mode": "adaptive",
+                    "depth_sensor_rejected": True,
+                },
+            ))
+
+        self.assertFalse(valid)
+        self.assertFalse(info["predicted"])
+        self.assertEqual(info["reason"], "disabled")
+        self.assertEqual(info["estimatorMode"], "depth_fault_invalid")
+        PROBE.np.testing.assert_array_equal(position, fallback)
+
+    def test_high_fov_reacquisition_waits_for_camera_velocity_warmup(self):
+        probe = self._probe()
+        options = self._options(takeover=False)
+        options.high_ball_occlusion_prediction = True
+        good_measurement = {
+            "depth_mode": "adaptive",
+            "depth_sensor_rejected": False,
+            "velocity_ready": True,
+        }
+        for index in range(10):
+            stamp = 0.01 * index
+            position = PROBE.np.array([
+                0.1 + 0.1 * stamp,
+                -0.4 + 0.2 * stamp,
+                1.45 + 2.0 * stamp - 4.9 * stamp * stamp,
+            ])
+            velocity = PROBE.np.array([
+                0.1, 0.2, 2.0 - 9.8 * stamp,
+            ])
+            probe.now_s = stamp
+            probe._resolve_high_ball_occlusion_state(
+                position, velocity, True, stamp, options, good_measurement)
+
+        probe.now_s = 0.10
+        _position, _velocity, valid, _stamp, lost = (
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.zeros(3), PROBE.np.zeros(3), False,
+                0.10, options, None))
+        self.assertTrue(valid)
+        self.assertTrue(lost["predicted"])
+
+        probe.now_s = 0.11
+        position, velocity, valid, _stamp, warming = (
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.array([0.111, -0.378, 1.61]),
+                PROBE.np.zeros(3), True, 0.11, options,
+                {
+                    "depth_mode": "adaptive",
+                    "depth_sensor_rejected": False,
+                    "velocity_ready": False,
+                }))
+
+        self.assertTrue(valid)
+        self.assertTrue(warming["predicted"])
+        self.assertTrue(warming["reacquisitionVelocityWarmup"])
+        self.assertFalse(warming["cameraVelocityReady"])
+        self.assertNotEqual(float(PROBE.np.linalg.norm(velocity)), 0.0)
+
+    def test_ir_top_edge_motion_outlier_starts_prediction_below_world_z_gate(self):
+        probe = self._probe()
+        options = self._options(takeover=False)
+        options.high_ball_occlusion_prediction = True
+        options.optimized_ball_prediction_initial_state = True
+        for index in range(10):
+            stamp = 0.01 * index
+            position = PROBE.np.array([
+                -0.08 + 0.1 * stamp,
+                -0.45 + 0.1 * stamp,
+                1.0 + 1.2 * stamp - 4.9 * stamp * stamp,
+            ])
+            velocity = PROBE.np.array([
+                0.1, 0.1, 1.2 - 9.8 * stamp,
+            ])
+            probe.now_s = stamp
+            probe._resolve_high_ball_occlusion_state(
+                position, velocity, True, stamp, options, {
+                    "cx": 548.0,
+                    "cy": 260.0 - 10.0 * index,
+                    "measurement_trusted_3d": True,
+                    "observation_state": "tracking",
+                    "velocity_ready": True,
+                    "synchronized_depth_enabled": False,
+                })
+
+        probe.now_s = 0.10
+        _position, _velocity, valid, _stamp, info = (
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.zeros(3), PROBE.np.zeros(3), False,
+                0.10, options, {
+                    "cx": 557.0,
+                    "cy": 84.0,
+                    "measurement_trusted_3d": False,
+                    "observation_state": "motion_outlier",
+                    "velocity_ready": False,
+                    "synchronized_depth_enabled": False,
+                }))
+
+        self.assertTrue(valid)
+        self.assertTrue(info["predicted"])
+        self.assertTrue(info["topFovExitDetected"])
+        self.assertEqual(info["topFovExitReason"], "rejected_2d_centre_at_top")
+        self.assertEqual(info["activeTrigger"], "high_fov_edge_exit")
+        self.assertEqual(info["estimatorMode"], "high_fov_prediction")
+
+        # The 20260812_152353 leave-and-return interval lasts about 0.40 s.
+        # Once explicitly activated, loss frames do not fall back to stale
+        # policy sampling merely because the predicted world Z crosses 1.24 m.
+        probe.now_s = 0.49
+        _p, _v, still_valid, _stamp, later = (
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.zeros(3), PROBE.np.zeros(3), False,
+                0.49, options, {
+                    "measurement_trusted_3d": False,
+                    "observation_state": "detection_loss",
+                    "velocity_ready": False,
+                    "synchronized_depth_enabled": False,
+                }))
+        self.assertTrue(still_valid)
+        self.assertTrue(later["predicted"])
+
+    def test_confirmed_detector_impact_clears_predictor_preimpact_history(self):
+        probe = self._probe()
+        options = self._options(takeover=False)
+        options.high_ball_occlusion_prediction = True
+        measurement = {
+            "cx": 540.0,
+            "cy": 220.0,
+            "measurement_trusted_3d": True,
+            "observation_state": "tracking",
+            "velocity_ready": True,
+            "velocity_impact_detected": False,
+            "synchronized_depth_enabled": False,
+        }
+        for index in range(6):
+            stamp = 0.01 * index
+            probe.now_s = stamp
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.array([0.0, -0.4, 1.2 - stamp]),
+                PROBE.np.array([0.0, 0.0, -1.0]),
+                True, stamp, options, measurement)
+
+        impact = dict(measurement)
+        impact["velocity_impact_detected"] = True
+        probe.now_s = 0.06
+        _p, _v, valid, _stamp, info = (
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.array([0.0, -0.4, 1.16]),
+                PROBE.np.array([0.0, 0.0, 1.5]),
+                True, 0.06, options, impact))
+
+        self.assertTrue(valid)
+        self.assertTrue(info["historyResetOnImpact"])
+        self.assertEqual(info["historySamples"], 1)
+
+    def test_recorded_152353_path_predicts_from_top_exit_until_return(self):
+        probe = self._probe()
+        options = self._options(takeover=True)
+        options.high_ball_occlusion_prediction = True
+        options.optimized_ball_prediction_initial_state = True
+        options.camera_reacquisition_smoothing = True
+        origin = 39.4612312
+        rows = [
+            (39.4612312, [-0.081009, -0.444696, 1.182889], 261.8, False),
+            (39.4723442, [-0.079117, -0.444166, 1.165908], 273.1, False),
+            (39.4833230, [-0.078948, -0.445483, 1.147108], 283.2, False),
+            (39.4943726, [-0.078799, -0.445874, 1.127360], 294.5, False),
+            (39.5056580, [-0.079064, -0.451617, 1.117477], 290.4, False),
+            (39.5165827, [-0.082463, -0.466667, 1.133185], 270.8, False),
+            # New detector confirms the two-frame reversal here.  The
+            # predictor must start a fresh launch segment at this sample.
+            (39.5278847, [-0.081214, -0.468479, 1.165810], 252.9, True),
+            (39.5388803, [-0.079586, -0.468886, 1.196982], 237.1, False),
+            (39.5500230, [-0.077274, -0.463681, 1.234086], 216.4, False),
+            (39.5611744, [-0.072880, -0.456946, 1.265660], 196.3, False),
+        ]
+        for absolute, position, cy, impact in rows:
+            stamp = absolute - origin
+            probe.now_s = stamp
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.asarray(position),
+                PROBE.np.array([0.0, 0.0, 1.0]),
+                True, stamp, options, {
+                    "cx": 540.0,
+                    "cy": cy,
+                    "measurement_trusted_3d": True,
+                    "observation_state": "tracking",
+                    "velocity_ready": True,
+                    "velocity_impact_detected": impact,
+                    "depth_mode": "adaptive",
+                    "depth_sensor_rejected": False,
+                    "synchronized_depth_enabled": False,
+                })
+
+        # The late point at camera stamp 39.610 is rejected by the tightened
+        # vertical motion gate, so it is diagnostic-only and cannot flatten
+        # the post-impact launch fit.
+        late_stamp = 39.6101046 - origin
+        probe.now_s = late_stamp
+        _p, _v, late_valid, _stamp, late = (
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.zeros(3), PROBE.np.zeros(3), False,
+                late_stamp, options, {
+                    "cx": 547.9,
+                    "cy": 174.3,
+                    "measurement_trusted_3d": False,
+                    "observation_state": "motion_outlier",
+                    "velocity_ready": False,
+                    "depth_mode": "adaptive",
+                    "depth_sensor_rejected": False,
+                    "synchronized_depth_enabled": False,
+                }))
+        self.assertFalse(late_valid)
+        self.assertFalse(late["predicted"])
+
+        edge_stamp = 39.6167994 - origin
+        probe.now_s = edge_stamp
+        _p, _v, edge_valid, _stamp, edge = (
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.zeros(3), PROBE.np.zeros(3), False,
+                edge_stamp, options, {
+                    "cx": 557.3,
+                    "cy": 83.9,
+                    "measurement_trusted_3d": False,
+                    "observation_state": "motion_outlier",
+                    "velocity_ready": False,
+                    "depth_mode": "adaptive",
+                    "depth_sensor_rejected": False,
+                    "synchronized_depth_enabled": False,
+                }))
+        self.assertTrue(edge_valid)
+        self.assertTrue(edge["predicted"])
+        self.assertEqual(edge["activeTrigger"], "high_fov_edge_exit")
+        self.assertGreater(edge["initialVelocityMps"][2], 2.2)
+
+        return_stamp = 40.0172696 - origin
+        probe.now_s = return_stamp
+        _p, _v, return_valid, _stamp, returning = (
+            probe._resolve_high_ball_occlusion_state(
+                PROBE.np.array([0.022311, -0.375139, 1.363672]),
+                PROBE.np.zeros(3), True, return_stamp, options, {
+                    "cx": 464.2,
+                    "cy": 150.5,
+                    "measurement_trusted_3d": True,
+                    "motion_reacquisition_confirmed": True,
+                    "observation_state": "reacquiring",
+                    "velocity_ready": False,
+                    "depth_mode": "adaptive",
+                    "depth_sensor_rejected": False,
+                    "synchronized_depth_enabled": False,
+                }))
+        self.assertTrue(return_valid)
+        self.assertTrue(returning["predicted"])
+        self.assertEqual(returning["estimatorMode"], "reacquiring")
+        self.assertEqual(returning["state"], "reacquisition_smoothing")
+
 
 class PolicyObservationScaleContractTest(unittest.TestCase):
 
@@ -56,6 +479,163 @@ class PolicyObservationScaleContractTest(unittest.TestCase):
         scales = PROBE._policy_observation_scales(
             [0.5, float("nan"), 1000.0], 4)
         self.assertEqual(scales, (0.5, 1.0, 100.0, 1.0))
+
+    def test_launch_dq_scale_changes_exactly_obs_7_through_13(self):
+        scales = PROBE._default_policy_observation_scales(67, 0.5)
+        self.assertEqual(scales[:7], (1.0,) * 7)
+        self.assertEqual(scales[7:14], (0.5,) * 7)
+        self.assertEqual(scales[14:], (1.0,) * 53)
+
+
+class PolicyDqObservationAdapterTest(unittest.TestCase):
+
+    def _adapter(self, *, tau=0.0, delay=0, gain=1.0, enabled=True):
+        config = PROBE.PolicyDqAdapterConfig(
+            enabled=enabled,
+            gain=(gain,) * 7,
+            tau_s=(tau,) * 7,
+            delay_steps=(delay,) * 7,
+            dt_s=0.005,
+        )
+        return PROBE.PolicyDqObservationAdapter(config)
+
+    def test_disabled_adapter_is_exact_identity(self):
+        adapter = self._adapter(tau=0.02, delay=3, gain=0.5, enabled=False)
+        raw = PROBE.np.linspace(-1.0, 1.0, 7, dtype=PROBE.np.float32)
+        policy, info = adapter.update(raw)
+        PROBE.np.testing.assert_array_equal(policy, raw)
+        self.assertFalse(info["active"])
+
+    def test_runtime_switch_can_enable_launch_disabled_adapter(self):
+        adapter = self._adapter(
+            tau=0.02, delay=3, gain=0.5, enabled=False)
+        raw = PROBE.np.linspace(-1.0, 1.0, 7, dtype=PROBE.np.float32)
+
+        policy, info = adapter.update(raw, enabled=True)
+
+        PROBE.np.testing.assert_allclose(policy, 0.5 * raw, atol=1e-7)
+        self.assertTrue(info["runtimeEnabled"])
+        self.assertTrue(info["active"])
+
+    def test_web_switch_edge_resets_ema_and_delay_history(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.policy_dq_adapter = self._adapter(
+            tau=0.02, delay=3, gain=0.5, enabled=False)
+        probe.policy_dq_adapter_runtime_enabled = False
+        probe.active_policy_profile = (
+            PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+        probe.cfg = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+        one = PROBE.np.ones(7, dtype=PROBE.np.float32)
+
+        first, first_info = probe._joint_velocity_observation_for_policy(
+            one, 1.0, True)
+        bypass, bypass_info = probe._joint_velocity_observation_for_policy(
+            3.0 * one, 1.005, False)
+        restarted, restarted_info = (
+            probe._joint_velocity_observation_for_policy(
+                4.0 * one, 1.010, True))
+
+        PROBE.np.testing.assert_allclose(first, 0.5, atol=1e-7)
+        PROBE.np.testing.assert_array_equal(bypass, 3.0 * one)
+        PROBE.np.testing.assert_allclose(restarted, 2.0, atol=1e-7)
+        self.assertEqual(first_info["sampleIndex"], 0)
+        self.assertFalse(bypass_info["active"])
+        self.assertEqual(restarted_info["sampleIndex"], 0)
+
+    def test_ema_gain_and_causal_delay_follow_fixed_tick_formula(self):
+        adapter = self._adapter(tau=0.01, delay=2, gain=0.5)
+        one = PROBE.np.ones(7, dtype=PROBE.np.float32)
+        three = 3.0 * one
+        out0, _ = adapter.update(one)
+        out1, _ = adapter.update(three)
+        out2, info2 = adapter.update(three)
+        out3, _ = adapter.update(three)
+        alpha = 1.0 - PROBE.math.exp(-0.005 / 0.01)
+        filtered1 = 1.0 + alpha * 2.0
+        PROBE.np.testing.assert_allclose(out0, 0.5, atol=1e-7)
+        PROBE.np.testing.assert_allclose(out1, 0.5, atol=1e-7)
+        PROBE.np.testing.assert_allclose(out2, 0.5, atol=1e-7)
+        PROBE.np.testing.assert_allclose(
+            out3, 0.5 * filtered1, atol=1e-6)
+        self.assertEqual(info2["delaySteps"], [2] * 7)
+
+    def test_simcode6_never_applies_the_simcode5_fitted_dq_adapter(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.policy_dq_adapter = self._adapter(
+            tau=0.02, delay=3, gain=0.5, enabled=True)
+        probe.policy_dq_adapter_runtime_enabled = True
+        probe.active_policy_profile = PROBE.OBSERVATION_PROFILE_SIMCODE6_QVEL67
+        probe.cfg = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE6_QVEL67)
+        raw = PROBE.np.linspace(-1.0, 1.0, 7, dtype=PROBE.np.float32)
+
+        policy_dq, info = probe._joint_velocity_observation_for_policy(
+            raw, 1.0, True)
+
+        PROBE.np.testing.assert_array_equal(policy_dq, raw)
+        self.assertFalse(info["active"])
+        self.assertEqual(
+            info["reason"], "only_enabled_for_simcode5_pure_actuator67")
+
+    def test_simcode5_profile_resolution_keeps_aligned_cpu_backend(self):
+        marker = Path("/tmp/simcode5_contract_marker")
+        cfg = PROBE.SimMirrorConfig(
+            model_path=marker,
+            policy_xml_path=marker,
+            sim_xml_path=marker,
+            policy_obs_dim=67,
+            control_dt=0.005,
+            backend="mujoco",
+            simcode5_model_path=marker,
+            simcode5_policy_xml_path=marker,
+            simcode5_sim_xml_path=marker,
+        )
+        resolved = PROBE.sim_mirror_config_for_policy_profile(
+            cfg, PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+        self.assertEqual(resolved.backend, "mujoco")
+
+    def test_simcode6_profile_resolution_keeps_aligned_cpu_backend(self):
+        marker = Path("/tmp/simcode6_contract_marker")
+        cfg = PROBE.SimMirrorConfig(
+            model_path=marker,
+            policy_xml_path=marker,
+            sim_xml_path=marker,
+            policy_obs_dim=67,
+            control_dt=0.005,
+            backend="mujoco",
+            simcode6_model_path=marker,
+            simcode6_policy_xml_path=marker,
+            simcode6_sim_xml_path=marker,
+        )
+        resolved = PROBE.sim_mirror_config_for_policy_profile(
+            cfg, PROBE.OBSERVATION_PROFILE_SIMCODE6_QVEL67)
+        self.assertEqual(resolved.backend, "mujoco")
+
+    def test_simcode5_cpu_xml_restores_checkpoint_sport_pd_profile(self):
+        from pingpong_controller.simcode2_xml import (
+            SPORT_TASKSPACE_FIT_RIGHT_ARM_PD,
+            build_simcode2_training_xml,
+        )
+        repo_root = PACKAGE_ROOT.parents[1]
+        xml_path = (
+            repo_root / "simcode5" / "pingpong_moz1-main"
+            / "pingpong_controller" / "tools" / "rl_sim" / "moz1_pd.xml")
+        patched = build_simcode2_training_xml(
+            xml_path, right_arm_pd_profile="sport_taskspace_fit_v1")
+        try:
+            root = ET.parse(patched).getroot()
+            values = {
+                elem.get("name"): (
+                    float(elem.get("kp", "nan")),
+                    float(elem.get("kv", "nan")),
+                )
+                for elem in root.findall(".//actuator/position")
+                if elem.get("name") in SPORT_TASKSPACE_FIT_RIGHT_ARM_PD
+            }
+            self.assertEqual(values, SPORT_TASKSPACE_FIT_RIGHT_ARM_PD)
+        finally:
+            patched.unlink(missing_ok=True)
 
 
 class RecordedBallStateAnalysisTest(unittest.TestCase):
@@ -118,6 +698,33 @@ class RecordedBallStateAnalysisTest(unittest.TestCase):
                 discovered["ballVelocityYCurve"],
                 "ball_velocity_y_curve.png",
             )
+
+    def test_saved_ball_curves_use_blue_for_measurement_and_red_for_prediction(self):
+        samples = [
+            {
+                "time": 0.005 * index,
+                "ballState6D": [
+                    0.1 + index * 0.01, 0.2, 1.0,
+                    1.0, 0.0, -1.0,
+                ],
+                "predictedBallIsPredicted": index >= 2,
+            }
+            for index in range(4)
+        ]
+        import matplotlib.axes
+        original_plot = matplotlib.axes.Axes.plot
+        colors = []
+
+        def recording_plot(axis, *args, **kwargs):
+            colors.append(kwargs.get("color"))
+            return original_plot(axis, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+                matplotlib.axes.Axes, "plot", recording_plot):
+            PROBE._plot_ball_state_curves(samples, Path(tmp))
+
+        self.assertEqual(colors.count("#1f77b4"), 6)
+        self.assertEqual(colors.count("#d62728"), 6)
 
     def test_records_and_plots_ir_center_and_depth_diagnostics(self):
         measurement = PROBE._camera_measurement_payload({
@@ -549,6 +1156,41 @@ class RosJointSampleClockTest(unittest.TestCase):
         self.assertEqual(ros_payload["jointSampleStampS"], 100.0)
         self.assertEqual(ros_payload["jointVelocitySource"], "joint_state")
 
+    def test_recording_keeps_raw_ros_dq_when_policy_dq_is_adapted_and_scaled(self):
+        raw_q = PROBE.np.linspace(-0.3, 0.3, 7, dtype=PROBE.np.float32)
+        raw_dq = PROBE.np.linspace(-1.0, 1.0, 7, dtype=PROBE.np.float32)
+        adapted_dq = raw_dq * PROBE.np.float32(0.8)
+        obs_unscaled = PROBE.np.zeros(67, dtype=PROBE.np.float32)
+        obs_unscaled[0:7] = raw_q
+        obs_unscaled[7:14] = adapted_dq
+        obs_scaled = obs_unscaled.copy()
+        obs_scaled[7:14] *= PROBE.np.float32(0.5)
+        trace = {
+            "obs": obs_scaled,
+            "obsUnscaled": obs_unscaled,
+            "rawJointPosition": raw_q,
+            "rawJointVelocity": raw_dq,
+            "jointFeedbackTiming": {"jointSampleStampS": 12.5},
+        }
+        ros_payload = {}
+
+        matched = PROBE._overlay_policy_trace_joint_feedback(
+            ros_payload, trace, obs_scaled)
+
+        self.assertTrue(matched)
+        self.assertEqual(
+            ros_payload["jointVelocity"], PROBE._rounded_vector(raw_dq))
+        self.assertEqual(
+            ros_payload["policyJointVelocityUnscaled"],
+            PROBE._rounded_vector(adapted_dq),
+        )
+        self.assertEqual(
+            ros_payload["policyJointVelocityScaled"],
+            PROBE._rounded_vector(adapted_dq * 0.5),
+        )
+        self.assertFalse(
+            ros_payload["jointVelocityMatchesPolicyObsUnscaled"])
+
 
 class CompensationFeedbackCoherenceTest(unittest.TestCase):
 
@@ -827,6 +1469,42 @@ class Simcode3BallSamplingContractTest(unittest.TestCase):
         self.assertEqual(age, 0.0)
         PROBE.np.testing.assert_array_equal(pos, PROBE.np.full(3, 7.0))
 
+    def test_forced_invalidation_clears_held_policy_ball_sample(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            control_dt=0.005,
+            ball_lost_timeout_s=0.6,
+        )
+        probe.policy_ball_sample_profile = (
+            PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+        probe.policy_ball_sample_step = 2
+        probe.policy_ball_sample_pos = PROBE.np.array(
+            [0.1, -0.2, 1.4], dtype=PROBE.np.float32)
+        probe.policy_ball_sample_vel = PROBE.np.array(
+            [0.2, 0.1, -0.3], dtype=PROBE.np.float32)
+        probe.policy_ball_sample_age_s = 0.015
+        probe.policy_ball_sample_has_valid = True
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+            control_mode="policy",
+            use_ball_estimator=False,
+        )
+
+        pos, vel, valid, age = probe._apply_policy_ball_sampling_contract(
+            PROBE.np.full(3, 9.0, dtype=PROBE.np.float32),
+            PROBE.np.full(3, 8.0, dtype=PROBE.np.float32),
+            False,
+            0.45,
+            options,
+            force_invalidate=True,
+        )
+
+        self.assertFalse(valid)
+        self.assertEqual(age, 0.6)
+        self.assertFalse(probe.policy_ball_sample_has_valid)
+        PROBE.np.testing.assert_array_equal(pos, PROBE.np.zeros(3))
+        PROBE.np.testing.assert_array_equal(vel, PROBE.np.zeros(3))
+
     def test_simcode4_fractional_hold_keeps_observation_age_zero(self):
         probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
         probe.cfg = SimpleNamespace(control_dt=0.005)
@@ -852,6 +1530,81 @@ class Simcode3BallSamplingContractTest(unittest.TestCase):
         self.assertEqual(positions[:4], [0.0, 0.0, 0.0, 0.0])
         self.assertEqual(positions[4:7], [4.0, 4.0, 4.0])
         self.assertEqual(ages, [0.0] * 11)
+
+    def test_simcode6_fractional_60hz_hold_keeps_age_zero(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(control_dt=0.005)
+        probe.policy_ball_sample_profile = None
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+            control_mode="policy",
+            use_ball_estimator=False,
+            ball_observation_rate_hz=60.0,
+        )
+        positions = []
+        ages = []
+        for step in range(200):
+            pos, _vel, valid, age = (
+                probe._apply_policy_ball_sampling_contract(
+                    PROBE.np.full(3, step, dtype=PROBE.np.float32),
+                    PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                    True,
+                    0.0,
+                    options,
+                ))
+            self.assertTrue(valid)
+            positions.append(float(pos[0]))
+            ages.append(float(age))
+
+        refreshes = 1 + sum(
+            current != previous for previous, current in zip(
+                positions, positions[1:]))
+        self.assertEqual(refreshes, 60)
+        self.assertEqual(probe.policy_ball_sample_sequence, 60)
+        self.assertEqual(ages, [0.0] * 200)
+
+    def test_reacquisition_handover_publishes_each_fresh_camera_frame(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(control_dt=0.005)
+        probe.policy_ball_sample_profile = None
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+            control_mode="policy",
+            use_ball_estimator=False,
+            ball_observation_rate_hz=90.0,
+            camera_control_time_compensation=False,
+            ball_source="camera",
+        )
+
+        first, _vel, valid, _age = (
+            probe._apply_policy_ball_sampling_contract(
+                PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                True, 0.0, options,
+                source_timestamp_s=1.000,
+                force_fresh_source=True))
+        second, _vel, valid2, _age = (
+            probe._apply_policy_ball_sampling_contract(
+                PROBE.np.ones(3, dtype=PROBE.np.float32),
+                PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                True, 0.0, options,
+                source_timestamp_s=1.011,
+                force_fresh_source=True))
+        repeated, _vel, valid3, _age = (
+            probe._apply_policy_ball_sampling_contract(
+                PROBE.np.full(3, 2.0, dtype=PROBE.np.float32),
+                PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                True, 0.0, options,
+                source_timestamp_s=1.011,
+                force_fresh_source=True))
+
+        self.assertTrue(valid and valid2 and valid3)
+        PROBE.np.testing.assert_array_equal(first, PROBE.np.zeros(3))
+        PROBE.np.testing.assert_array_equal(second, PROBE.np.ones(3))
+        # A repeated 200 Hz tick still holds the same camera state; this path
+        # is not the disabled 90->200 trajectory propagation feature.
+        PROBE.np.testing.assert_array_equal(repeated, PROBE.np.ones(3))
+        self.assertEqual(probe.policy_ball_sample_sequence, 2)
 
 
 class SourceSeqAlignmentTest(unittest.TestCase):
@@ -1507,6 +2260,45 @@ class CpuSimMirrorActuatorModelTest(unittest.TestCase):
         self.assertEqual(float(active_actuator[0]), 1.0)
         self.assertEqual(float(active_actuator[1]), 0.0)
         self.assertGreater(float(mirror.arm_applied_qvel[0]), 0.0)
+
+    def test_simcode6_cpu_history_delay_ignores_legacy_ui_delay(self):
+        mirror = PROBE.RealBallSimMirror.__new__(PROBE.RealBallSimMirror)
+        mirror.dt = 0.005
+        mirror.cfg = SimpleNamespace(
+            comp_delay_ms=72.0,
+            comp_actuator_tau_s=0.074,
+            comp_actuator_gain=1.0,
+            policy_obs_dim=67,
+        )
+        mirror.checkpoint_env_cfg = {"delay_min_ms": 45.0}
+        mirror.policy = SimpleNamespace(
+            arm_q_low=PROBE.np.full(7, -10.0, dtype=PROBE.np.float32),
+            arm_q_high=PROBE.np.full(7, 10.0, dtype=PROBE.np.float32),
+        )
+        mirror._pure_actuator_profile = True
+        mirror._servo_planner_profile = False
+        mirror.pure_actuator_wn = PROBE.np.full(
+            7, 20.0, dtype=PROBE.np.float32)
+        mirror.pure_actuator_zeta = PROBE.np.full(
+            7, 0.4, dtype=PROBE.np.float32)
+        mirror.pure_actuator_gain = PROBE.np.ones(
+            7, dtype=PROBE.np.float32)
+        mirror.pure_actuator_delay_steps = PROBE.np.asarray(
+            [9, 10, 9, 8, 7, 9, 11], dtype=PROBE.np.int32)
+        mirror.warm_arm_q = PROBE.np.zeros(7, dtype=PROBE.np.float32)
+        mirror.actuator_model_key = None
+        mirror.command_buffer = None
+        mirror.actuator_command_buffer = None
+        mirror.arm_q_ref_active = None
+        mirror.arm_actuator_q_ref_active = None
+        mirror.arm_applied_q = None
+        mirror.arm_applied_qvel = None
+
+        mirror._reset_actuator_model(
+            PROBE.np.zeros(7, dtype=PROBE.np.float32))
+
+        self.assertEqual(mirror.actuator_delay_steps, 9)
+        self.assertEqual(mirror.actuator_command_buffer_len, 16)
 
 
 class AnalysisJsonTest(unittest.TestCase):

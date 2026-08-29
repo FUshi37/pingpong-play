@@ -12,14 +12,16 @@ source /home/spirit-ai/pingpong_moz1/install/setup.bash
 #                      Set to "false" if CSV is in real robot coordinates (needs transformation)
 
 # Option 1: Pure simulation data (already in sim frame, NO transformation needed)
-#REPLAY_CSV="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/rl_sim/mjx_ball_replay.csv"
-#REPLAY_IS_SIM_FRAME="true"
+REPLAY_CSV="${REPLAY_CSV:-/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/rl_sim/mjx_ball_replay.csv}"
+REPLAY_IS_SIM_FRAME="${REPLAY_IS_SIM_FRAME:-true}"
 
 # Option 2: Real ball states (in base_link frame, transformation needed)
-DETECTION_CSV="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/videos/pingpong_raw_20260706_205810_hybrid_annotatedv1_detections.csv"
-REPLAY_DURATION_S=12.0
-REPLAY_CSV="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/rl_sim/simulation_replay/pingpong_raw_20260706_205810_replay_12s.csv"
-REPLAY_IS_SIM_FRAME="false"
+#DETECTION_CSV="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/videos/pingpong_raw_20260706_205810_hybrid_annotatedv1_detections.csv"
+#REPLAY_DURATION_S=12.0
+#REPLAY_CSV="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/rl_sim/simulation_replay/pingpong_raw_20260706_205810_replay_12s.csv"
+#REPLAY_IS_SIM_FRAME="false"
+DETECTION_CSV="${DETECTION_CSV:-}"
+REPLAY_DURATION_S="${REPLAY_DURATION_S:-12.0}"
 
 
 MODEL_PATH="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/rl_sim/inverse_compensation/18_stage4g_strong_contact_dr_inverse_mpc.pkl"
@@ -27,26 +29,45 @@ ROBOT_XML="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/m
 OUTPUT_DIR="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/rl_sim/simulation_replay"
 REFERENCE_OBS="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/data/rl_sim/validate_obs_trace/validate_obs_trace.csv"
 REFERENCE_ACTION="/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/data/rl_sim/validate_obs_trace/validate_trace.csv"
+RL_USE_VALID_BALL_OBS_AGE="${RL_USE_VALID_BALL_OBS_AGE:-true}"
+BALL_RELEASE_USE_ESTIMATOR_STATE="${BALL_RELEASE_USE_ESTIMATOR_STATE:-false}"
+REQUIRE_ENTER_CONFIRM="${REQUIRE_ENTER_CONFIRM:-true}"
 
-if [ ! -f "$DETECTION_CSV" ]; then
+if [ -n "$DETECTION_CSV" ] && [ ! -f "$DETECTION_CSV" ]; then
     echo "ERROR: Detection CSV not found: $DETECTION_CSV"
     exit 1
 fi
 
+if [ -z "$DETECTION_CSV" ] && [ ! -f "$REPLAY_CSV" ]; then
+    echo "ERROR: Replay CSV not found: $REPLAY_CSV"
+    exit 1
+fi
+
 mkdir -p "$OUTPUT_DIR"
+export ROS_LOG_DIR="${ROS_LOG_DIR:-$OUTPUT_DIR/ros_log}"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-$OUTPUT_DIR/.mplconfig}"
+mkdir -p "$ROS_LOG_DIR" "$MPLCONFIGDIR"
 
-echo "========================================================================"
-echo "Preparing replay CSV from offline hybrid detections..."
-echo "========================================================================"
-echo "Detection CSV: $DETECTION_CSV"
-echo "Replay CSV: $REPLAY_CSV"
-echo "Replay duration: ${REPLAY_DURATION_S}s"
-echo ""
+if [ -n "$DETECTION_CSV" ]; then
+    echo "========================================================================"
+    echo "Preparing replay CSV from offline hybrid detections..."
+    echo "========================================================================"
+    echo "Detection CSV: $DETECTION_CSV"
+    echo "Replay CSV: $REPLAY_CSV"
+    echo "Replay duration: ${REPLAY_DURATION_S}s"
+    echo ""
 
-python3 /home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/tools/prepare_replay_data.py \
-    "$DETECTION_CSV" \
-    --duration "$REPLAY_DURATION_S" \
-    --output "$REPLAY_CSV"
+    python3 /home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/tools/prepare_replay_data.py \
+        "$DETECTION_CSV" \
+        --duration "$REPLAY_DURATION_S" \
+        --output "$REPLAY_CSV"
+else
+    echo "========================================================================"
+    echo "Using existing simulation replay CSV..."
+    echo "========================================================================"
+    echo "Replay CSV: $REPLAY_CSV"
+    echo ""
+fi
 
 echo ""
 echo "========================================================================"
@@ -56,6 +77,9 @@ echo "Replay CSV: $REPLAY_CSV"
 echo "Replay is sim frame: $REPLAY_IS_SIM_FRAME"
 echo "Model: $(basename $MODEL_PATH)"
 echo "Output directory: $OUTPUT_DIR"
+echo "RL valid ball obs age: $RL_USE_VALID_BALL_OBS_AGE"
+echo "Ball release uses estimator state: $BALL_RELEASE_USE_ESTIMATOR_STATE"
+echo "Require enter confirm: $REQUIRE_ENTER_CONFIRM"
 echo ""
 
 # Run the node with policy logging enabled
@@ -64,6 +88,7 @@ ros2 run pingpong_controller pingpong_node --ros-args \
     -p policy_backend:=mjx \
     -p rl_model_path:=$MODEL_PATH \
     -p enable_delay_conditioning:=true \
+    -p rl_use_valid_ball_obs_age:=$RL_USE_VALID_BALL_OBS_AGE \
     -p robot_xml_path:=$ROBOT_XML \
     -p control_rate_hz:=200.0 \
     -p enable_replay_mode:=true \
@@ -72,7 +97,8 @@ ros2 run pingpong_controller pingpong_node --ros-args \
     -p replay_loop:=false \
     -p enable_init_pose:=true \
     -p init_pose_duration_s:=3.0 \
-    -p require_enter_confirm:=true \
+    -p require_enter_confirm:=$REQUIRE_ENTER_CONFIRM \
+    -p ball_release_use_estimator_state:=$BALL_RELEASE_USE_ESTIMATOR_STATE \
     -p enable_ball_lost_failsafe:=false \
     -p enable_ball_state_estimator:=false \
     -p enable_safety_limiter:=false \

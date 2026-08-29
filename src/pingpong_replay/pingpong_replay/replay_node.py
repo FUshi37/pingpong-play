@@ -13,7 +13,7 @@ Why everything ends up as a position command
 The original controller (see ``pingpong_controller/rl_policy.py``) turns the
 policy *action* into a desired joint acceleration, integrates it to a velocity
 and then to a position command every control tick, and publishes only that
-position.  This node supports four *input* representations of the same
+position.  This node supports seven *input* representations of the same
 recorded motion and converts each one back to the position stream:
 
   * ``action``  -- raw policy action in [-1, 1]; multiplied by the per-joint
@@ -21,8 +21,14 @@ recorded motion and converts each one back to the position stream:
   * ``qdd``     -- desired angular acceleration (rad/s^2); double-integrated.
   * ``qvel``    -- commanded angular velocity (rad/s); single-integrated.
   * ``angle``   -- commanded joint angle (rad); published directly.
+  * ``recorded``-- alias for ``angle`` that makes the intent explicit for
+                   simcode3/simcode4 traces with randomized action dynamics.
+  * ``compensated`` -- post-compensation, post-safety target (``arm_safe_q``),
+                       published directly without applying compensation again.
+  * ``sim_actual`` -- joint angle actually reached by the MuJoCo dynamics
+                      (``arm_q``), used as the real robot's replay reference.
 
-All four were verified against the recorded ``arm_cmd_q`` column: reconstruct
+The original four modes were verified against the legacy ``arm_cmd_q`` column: reconstruct
 error <= 6e-6 rad over the full 1200-step trace, so any mode reproduces the
 same motion.  ``angle`` is the most faithful (no integration drift) and is the
 recommended default for a first hardware check; the other modes exist so you
@@ -158,7 +164,43 @@ DEFAULT_Q_HIGH_RAD: List[float] = [
     3.14159, 0.15708, 3.05433, 2.25147, 3.05433, 1.65806, 1.5708,
 ]
 
-VALID_MODES = ("action", "qdd", "qvel", "angle")
+VALID_MODES = (
+    "action", "qdd", "qvel", "angle", "recorded", "compensated",
+    "sim_actual")
+
+# Named recordings shipped in this workspace. An explicit ``csv_path`` always
+# takes precedence, so newly generated traces remain usable without code edits.
+TRAJECTORY_PRESET_PATHS = {
+    "legacy": (
+        "src/pingpong_moz1/pingpong_controller/outputs/rl_sim/"
+        "stage4g_action_trace.csv"
+    ),
+    "simcode2": (
+        "simcode2/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/"
+        "goal_d455_autolaunch_idealpd67_viewdense_v1_seed976_gpu1_"
+        "resume_launch14_best55_20260722/"
+        "launch19_best2040_video_gpu1_seed20260722/action_trace.csv"
+    ),
+    "simcode3": (
+        "simcode3/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/"
+        "goal_d455_autolaunch_idealpd67_viewdense_v1_seed976_gpu1_"
+        "resume_launch14_best55_20260722/"
+        "launch19_best2040_video_gpu1_seed20260722/action_trace.csv"
+    ),
+    "simcode4": (
+        "simcode4/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/"
+        "goal_d455_gpu0_obsres2mm_servo_submission_20260729/"
+        "video/action_trace.csv"
+    ),
+}
+TRAJECTORY_PRESET_ALIASES = {
+    "": "legacy",
+    "default": "legacy",
+    "stage4g": "legacy",
+    "sim2": "simcode2",
+    "sim3": "simcode3",
+    "sim4": "simcode4",
+}
 
 # Output representation published on /mx_mix_command. 'joint' is the legacy
 # behaviour (MechUnitCmd.jnt_pos, use_jnt=True). 'cartesian' converts each
@@ -178,6 +220,9 @@ MODE_COLUMN_PREFIX = {
     "qdd": "desired_qdd_raw",        # rad/s^2
     "qvel": "arm_cmd_qvel",          # rad/s
     "angle": "arm_cmd_q",            # rad
+    "recorded": "arm_cmd_q",         # exact recorded nominal target (rad)
+    "compensated": "arm_safe_q",     # post-compensation safe target (rad)
+    "sim_actual": "arm_q",           # actual MuJoCo joint position (rad)
 }
 
 
@@ -189,9 +234,12 @@ class ReplayNode(Node):
 
         # --- Parameters ---
         self.declare_parameter('csv_path', '')
+        # legacy | simcode2 | simcode3 | simcode4; ignored with csv_path.
+        self.declare_parameter('trajectory_preset', 'legacy')
         self.declare_parameter('command_topic', '/mx_mix_command')
         self.declare_parameter('joint_state_topic', '/joint_states')
-        # One of: action | qdd | qvel | angle
+        # One of: action | qdd | qvel | angle | recorded | compensated |
+        # sim_actual
         self.declare_parameter('input_mode', 'angle')
         self.declare_parameter('right_arm_mu_idx', 0)
 
@@ -231,6 +279,12 @@ class ReplayNode(Node):
         # Data recording for analysis.
         self.declare_parameter('record_data', True)
         self.declare_parameter('output_dir', '')
+        # Generate comparison/error PNGs immediately after the analysis CSV.
+        self.declare_parameter('auto_plot_analysis', True)
+        # Empty paths produce timestamped files in output_dir. Relative paths
+        # are also resolved below output_dir; absolute paths are unchanged.
+        self.declare_parameter('comparison_plot_path', '')
+        self.declare_parameter('error_plot_path', '')
         # Use velocity/acceleration from JointState feedback instead of numerical
         # differentiation. JointState.velocity is standard; JointState.effort is
         # repurposed as acceleration (rad/s²) in this system (see pingpong_node.py).
@@ -345,6 +399,12 @@ class ReplayNode(Node):
             self.get_parameter('require_enter_confirm').value)
 
         self.record_data = bool(self.get_parameter('record_data').value)
+        self.auto_plot_analysis = bool(
+            self.get_parameter('auto_plot_analysis').value)
+        self.comparison_plot_path = str(
+            self.get_parameter('comparison_plot_path').value).strip()
+        self.error_plot_path = str(
+            self.get_parameter('error_plot_path').value).strip()
         self.use_feedback_velocity = bool(
             self.get_parameter('use_feedback_velocity').value)
         self.use_feedback_acceleration = bool(
@@ -425,15 +485,25 @@ class ReplayNode(Node):
             q_low=self.q_low if self.clip_to_limits else None,
             q_high=self.q_high if self.clip_to_limits else None,
         )
+        if (self.input_mode in ('compensated', 'sim_actual')
+                and self.compensator.enabled):
+            raise ValueError(
+                f'input_mode="{self.input_mode}" replays a trajectory after '
+                'the recorded compensation pipeline; set '
+                'compensation_mode:=none to avoid changing it again')
 
+        self.trajectory_preset = str(
+            self.get_parameter('trajectory_preset').value).strip().lower()
         csv_path = self._resolve_csv_path(
-            str(self.get_parameter('csv_path').value))
+            str(self.get_parameter('csv_path').value),
+            self.trajectory_preset)
 
         # Resolve output directory after csv_path is known
-        self.output_dir = str(self.get_parameter('output_dir').value)
+        self.output_dir = os.path.expanduser(str(
+            self.get_parameter('output_dir').value).strip())
         if not self.output_dir:
-            # Default to the same directory as the CSV
-            self.output_dir = os.path.dirname(csv_path) if csv_path else os.getcwd()
+            self.output_dir = self._resolve_default_output_dir()
+        self.output_dir = os.path.abspath(self.output_dir)
 
         # --- Build the position trajectory for the chosen mode ---
         start_index = int(self.get_parameter('start_index').value)
@@ -536,13 +606,25 @@ class ReplayNode(Node):
         self._confirm_thread: Optional[threading.Thread] = None
         self._confirm_prompted = False
 
-        # Pose the arm must reach before replay starts: the first pose of the
-        # (sliced) trajectory. With the default start_index=0 this is exactly
-        # the CSV row-0 right-arm pose (arm_cmd_q at t=0).
-        self.replay_start_pose = self.trajectory[0].copy()
+        # For a full replay, recover the reset pose immediately before CSV row
+        # 0 from q_cmd[0] - qvel_cmd[0] * dt. This preserves legacy's distinct
+        # reset posture while giving simcode2/3/4 their common warm-start pose.
+        # A sliced replay instead starts at its selected trajectory sample.
+        if start_index <= 0:
+            initial_cmd_q = self._read_columns(csv_path, 'arm_cmd_q')[0]
+            initial_cmd_qvel = self._read_columns(
+                csv_path, 'arm_cmd_qvel')[0]
+            self.replay_start_pose = (
+                initial_cmd_q - initial_cmd_qvel * self.integration_dt)
+            if self.clip_to_limits:
+                self.replay_start_pose = np.clip(
+                    self.replay_start_pose, self.q_low, self.q_high)
+        else:
+            self.replay_start_pose = self.trajectory[0].copy()
 
         self.get_logger().info(
             f'pingpong_replay: mode="{self.input_mode}" '
+            f'preset="{self.trajectory_preset}" '
             f'steps={self.n_steps} rate={self.control_rate_hz:.1f}Hz '
             f'mu_idx={self.right_arm_mu_idx} topic="{self.command_topic}" '
             f'loop={self.loop} move_to_start={self.move_to_start} '
@@ -553,8 +635,25 @@ class ReplayNode(Node):
                 f'arm_action_limiter={self.arm_action_limiter} '
                 f'integration_dt={self.integration_dt}')
         self.get_logger().info(
-            f'  start pose (CSV t=0, deg) = '
+            f'  pre-replay reset pose (deg) = '
             f'{np.round(np.degrees(self.replay_start_pose), 2).tolist()}')
+        self.get_logger().info(
+            f'  first replay sample (deg) = '
+            f'{np.round(np.degrees(self.trajectory[0]), 2).tolist()}')
+        self.get_logger().info(f'  analysis output directory: {self.output_dir}')
+        if self.input_mode == 'compensated':
+            self.get_logger().info(
+                '  compensated replay: publishing recorded arm_safe_q '
+                '(post-compensation/post-safety, pre-actuator)')
+            if self.trajectory_preset == 'simcode4':
+                self.get_logger().warn(
+                    '  simcode4 frozen trace uses its servo planner after the '
+                    'simulated actuator model; arm_safe_q intentionally does '
+                    'not replay that post-actuator planner stage')
+        elif self.input_mode == 'sim_actual':
+            self.get_logger().info(
+                '  simulation-actual replay: publishing recorded arm_q '
+                '(joint angle reached after MuJoCo actuator/PD dynamics)')
         self.get_logger().info(f'  {self.compensator.describe()}')
 
         if self.output_mode == 'cartesian':
@@ -569,26 +668,66 @@ class ReplayNode(Node):
     # ------------------------------------------------------------------
     # CSV loading / trajectory reconstruction
     # ------------------------------------------------------------------
-    def _resolve_csv_path(self, csv_path: str) -> str:
+    def _resolve_default_output_dir(self) -> str:
+        """Return the source-tree output directory for this workspace."""
+        roots = []
+        for start in (os.getcwd(), os.path.dirname(os.path.abspath(__file__))):
+            root = os.path.abspath(start)
+            while True:
+                if root not in roots:
+                    roots.append(root)
+                parent = os.path.dirname(root)
+                if parent == root:
+                    break
+                root = parent
+        relative = os.path.join(
+            'src', 'pingpong_replay', 'pingpong_replay', 'outputs')
+        for root in roots:
+            package_dir = os.path.join(
+                root, 'src', 'pingpong_replay', 'pingpong_replay')
+            if os.path.isdir(package_dir):
+                return os.path.join(root, relative)
+        return os.path.expanduser(
+            os.path.join('~/pingpong_moz1', relative))
+
+    def _resolve_csv_path(self, csv_path: str, preset: str) -> str:
         if csv_path:
             if not os.path.isfile(csv_path):
                 raise FileNotFoundError(f'csv_path not found: {csv_path}')
+            self.trajectory_preset = 'custom'
             return csv_path
-        # Fallback to the known recorded trace, searched relative to a few
-        # likely roots so the node runs both from source and an install tree.
-        rel = ('pingpong_controller/outputs/rl_sim/'
-               'stage4g_action_trace.csv')
-        candidates = [
-            os.path.join(os.getcwd(), 'src', 'pingpong_moz1', rel),
-            os.path.join(os.getcwd(), rel),
-        ]
+
+        canonical = TRAJECTORY_PRESET_ALIASES.get(preset, preset)
+        if canonical not in TRAJECTORY_PRESET_PATHS:
+            raise ValueError(
+                'trajectory_preset must be one of '
+                f'{tuple(TRAJECTORY_PRESET_PATHS)}, got {preset!r}')
+        self.trajectory_preset = canonical
+        rel = TRAJECTORY_PRESET_PATHS[canonical]
+
+        # Search upward from cwd and the installed/source module. This keeps
+        # presets relocatable and also works when ros2 is launched below the
+        # workspace root.
+        roots = []
+        for start in (os.getcwd(), os.path.dirname(os.path.abspath(__file__))):
+            root = os.path.abspath(start)
+            while True:
+                if root not in roots:
+                    roots.append(root)
+                parent = os.path.dirname(root)
+                if parent == root:
+                    break
+                root = parent
+        candidates = [os.path.join(root, rel) for root in roots]
         for c in candidates:
             if os.path.isfile(c):
-                self.get_logger().info(f'Using default csv_path: {c}')
+                self.get_logger().info(
+                    f'Using trajectory preset {canonical!r}: {c}')
                 return c
         raise FileNotFoundError(
-            'csv_path not set and default stage4g_action_trace.csv not found. '
-            'Pass -p csv_path:=/abs/path/to/stage4g_action_trace.csv')
+            f'csv_path not set and trajectory preset {canonical!r} was not '
+            f'found at relative path {rel!r}. Run from the workspace or pass '
+            '-p csv_path:=/abs/path/to/action_trace.csv')
 
     def _read_columns(self, csv_path: str, prefix: str) -> np.ndarray:
         """Read columns "<prefix>/<joint>" for every right-arm joint.
@@ -628,8 +767,8 @@ class ReplayNode(Node):
         qvel0 = self._read_columns(csv_path, 'arm_cmd_qvel')[0].copy()
         dt = self.integration_dt
 
-        if mode == 'angle':
-            traj = self._read_columns(csv_path, MODE_COLUMN_PREFIX['angle'])
+        if mode in ('angle', 'recorded', 'compensated', 'sim_actual'):
+            traj = self._read_columns(csv_path, MODE_COLUMN_PREFIX[mode])
             if self.clip_to_limits:
                 traj = np.clip(traj, self.q_low, self.q_high)
         else:
@@ -725,6 +864,38 @@ class ReplayNode(Node):
         """Load action trajectory and compute theoretical qdd, qvel, q."""
         # Load action data
         action_data = self._read_columns(csv_path, 'effective_action')
+
+        # Direct recorded modes must be compared against the selected stage of
+        # the recorded command pipeline, not against a fresh action integration
+        # using legacy fixed dynamics. This is essential for domain-randomized
+        # simcode3/simcode4 traces and for post-compensation replay.
+        if self.input_mode in (
+                'angle', 'recorded', 'compensated', 'sim_actual'):
+            q = self._read_columns(
+                csv_path, MODE_COLUMN_PREFIX[self.input_mode])
+            if self.input_mode == 'compensated':
+                qvel = self._read_columns(csv_path, 'arm_safe_qvel')
+                qdd = self._read_columns(csv_path, 'arm_safe_qacc')
+            elif self.input_mode == 'sim_actual':
+                qvel = self._read_columns(csv_path, 'arm_qvel')
+                qdd = self._read_columns(csv_path, 'arm_qacc')
+            else:
+                qvel = self._read_columns(csv_path, 'arm_cmd_qvel')
+                try:
+                    qdd = self._read_columns(csv_path, 'desired_qdd')
+                except KeyError:
+                    qdd = self._read_columns(csv_path, 'desired_qdd_raw')
+            s = max(0, start_index)
+            e = q.shape[0] if end_index < 0 else min(end_index, q.shape[0])
+            self.action_trajectory = action_data[s:e].copy()
+            self.theoretical_q = q[s:e].copy()
+            self.theoretical_qvel = qvel[s:e].copy()
+            self.theoretical_qdd = qdd[s:e].copy()
+            self.get_logger().info(
+                'Loaded recorded theoretical trajectory for comparison: '
+                f'{self.theoretical_q.shape[0]} steps '
+                f'({MODE_COLUMN_PREFIX[self.input_mode]})')
+            return
 
         # Load initial states
         q0 = self._read_columns(csv_path, 'arm_cmd_q')[0].copy()
@@ -1473,9 +1644,10 @@ class ReplayNode(Node):
         # Save to CSV
         timestamp_str = self.get_clock().now().to_msg()
         timestamp_sec = timestamp_str.sec
+        run_stem = f'{self.trajectory_preset}_{timestamp_sec}'
         output_csv = os.path.join(
             self.output_dir,
-            f'replay_analysis_{timestamp_sec}.csv'
+            f'{run_stem}_replay_analysis.csv'
         )
 
         os.makedirs(self.output_dir, exist_ok=True)
@@ -1494,6 +1666,8 @@ class ReplayNode(Node):
             'duration': float(times[-1] - times[0]),
             'control_rate_hz': self.control_rate_hz,
             'input_mode': self.input_mode,
+            'trajectory_preset': self.trajectory_preset,
+            'source_csv': self._csv_path,
             'joints': RIGHT_ARM_JOINTS,
             'output_csv': output_csv,
             'use_feedback_velocity': self.use_feedback_velocity and has_feedback_qvel,
@@ -1574,9 +1748,15 @@ class ReplayNode(Node):
                 }
             }
 
+        if self.auto_plot_analysis:
+            plot_paths = self._generate_analysis_plots(
+                output_csv, run_stem)
+            if plot_paths:
+                summary['analysis_plots'] = plot_paths
+
         output_json = os.path.join(
             self.output_dir,
-            f'replay_analysis_{timestamp_sec}.json'
+            f'{run_stem}_replay_analysis.json'
         )
         with open(output_json, 'w') as f:
             json.dump(summary, f, indent=2)
@@ -1588,6 +1768,47 @@ class ReplayNode(Node):
                 f"mean={summary['tracking_errors']['position']['mean_abs_deg']:.3f}° "
                 f"max={summary['tracking_errors']['position']['max_abs_deg']:.3f}°"
             )
+
+    def _generate_analysis_plots(
+            self, csv_path: str, run_stem: str) -> Dict[str, str]:
+        """Generate comparison/error plots without making replay depend on UI."""
+        def resolve_path(configured: str, default_name: str) -> str:
+            if not configured:
+                return os.path.join(self.output_dir, default_name)
+            if os.path.isabs(configured):
+                return configured
+            return os.path.join(self.output_dir, configured)
+
+        comparison_path = resolve_path(
+            self.comparison_plot_path,
+            f'{run_stem}_comparison.png')
+        error_path = resolve_path(
+            self.error_plot_path,
+            f'{run_stem}_error.png')
+        try:
+            # Lazy import keeps matplotlib/pandas out of the real-time replay
+            # path. Plotting only starts after the timer has been cancelled and
+            # the analysis CSV has been fully flushed to disk.
+            from pingpong_replay.plot_analysis import (
+                plot_comparison, plot_error_analysis)
+
+            os.makedirs(os.path.dirname(comparison_path) or '.', exist_ok=True)
+            os.makedirs(os.path.dirname(error_path) or '.', exist_ok=True)
+            plot_comparison(csv_path, comparison_path)
+            plot_error_analysis(csv_path, error_path)
+        except Exception as exc:
+            self.get_logger().error(
+                f'Automatic analysis plotting failed: {exc}')
+            return {}
+
+        self.get_logger().info(
+            f'Saved automatic comparison plot to: {comparison_path}')
+        self.get_logger().info(
+            f'Saved automatic error plot to: {error_path}')
+        return {
+            'comparison': comparison_path,
+            'error': error_path,
+        }
 
 
 def main(args=None) -> None:

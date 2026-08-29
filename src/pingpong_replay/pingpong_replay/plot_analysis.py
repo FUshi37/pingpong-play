@@ -127,6 +127,7 @@ def plot_comparison(csv_path: str, output_path: Optional[str] = None,
     if output_path:
         print(f"Saving plot to: {output_path}")
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
         print("Plot saved successfully")
     else:
         print("Displaying plot (close window to continue)...")
@@ -235,6 +236,7 @@ def plot_error_analysis(csv_path: str, output_path: Optional[str] = None,
     if output_path:
         print(f"Saving error plot to: {output_path}")
         plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close(fig)
         print("Error plot saved successfully")
     else:
         print("Displaying error plot (close window to continue)...")

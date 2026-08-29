@@ -1,0 +1,60 @@
+{
+  "$schema": "rmp_config_schema.json",
+  "meta": {
+    "name": "rmp_equiv_refine_baseline",
+    "description": "Recovered Movax RMP joint motion mode + XML low-level PD settings, tuned on record_new3/4 replay (2026-08). All angles in radians; all scales dimensionless. An empty per-joint list means 'do not scale' (keep the XML or default value).",
+    "robot": "spirit01",
+    "mech_unit": "RightArm",
+    "n_joints": 7
+  },
+  "planning": {
+    "dt": 0.001,
+    "period_s": 0.001,
+    "control_period_s": 0.005,
+    "use_safety_bounds": true,
+    "use_jerk_limit": false,
+    "target_update_delay_steps": 3,
+    "output_delay_steps_per_joint": [18, 19, 19, 18, 18, 18, 18]
+  },
+  "rmp": {
+    "kp": 324.0,
+    "kd": 36.0,
+    "jnt_kp": 400.0,
+    "jnt_kd": 40.0,
+    "jnt_kp_scale": 1.0,
+    "jnt_kd_scale": 1.0,
+    "jnt_kp_scale_per_joint": [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+    "jnt_kd_scale_per_joint": [1.0, 1.0, 0.9200000166893005, 1.0, 1.0, 1.0, 1.0],
+    "target_filter_length": 10,
+    "output_filter_length": 35,
+    "vel_weight": 30.0,
+    "acc_weight": 0.001,
+    "pos_limit_weight": 0.002,
+    "angle_gap_rad": [0.034906585, 0.034906585, 0.034906585, 0.034906585, 0.034906585, 0.034906585, 0.034906585],
+    "joint_velocity_feedforward": 0.5,
+    "joint_acceleration_feedforward": 0.0,
+    "estimator_joint_process_var": 50.0,
+    "estimator_joint_measure_var": 0.0001
+  },
+  "joint_limits": {
+    "q_min": [-2.094395, -2.96706, -3.054326, -0.174533, -3.054326, -1.658063, -1.570796],
+    "q_max": [3.141593, 0.15708, 3.054326, 2.251475, 3.054326, 1.658063, 1.570796],
+    "qd_max": [3.6652, 3.6652, 4.1888, 4.1888, 5.236, 5.236, 5.236],
+    "qdd_max": [22.6893, 22.6893, 31.4159, 52.3599, 52.3599, 52.3599, 52.3599],
+    "qddd_max": [610.87, 610.87, 785.4, 1047.2, 1047.2, 1047.2, 1047.2]
+  },
+  "xml_pd": {
+    "xml_path": "moz1_rmp_equiv.xml",
+    "kp": [32000.0, 32000.0, 27000.0, 20000.0, 13000.0, 15000.0, 10000.0],
+    "kv": [32000.0, 32000.0, 27000.0, 20000.0, 13000.0, 15000.0, 10000.0],
+    "kp_scale": 0.02,
+    "kd_scale": 0.10,
+    "kp_scale_per_joint": [3.509999990463257, 5.760000228881836, 4.949999809265137, 3.6600000858306885, 2.3399999141693115, 4.139999866485596, 3.509999990463257],
+    "kd_scale_per_joint": [4.52400016784668, 5.335999965667725, 6.380000114440918, 4.52400016784668, 7.424000263214111, 10.0, 5.800000190734863],
+    "damping": [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+    "armature": [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.02],
+    "damping_scale_per_joint": [0.6083999872207642, 0.9983999729156494, 0.9983999729156494, 1.9199999570846558, 0.5799999833106995, 1.1699999570846558, 0.7799999713897705],
+    "armature_scale_per_joint": [0.45239999890327454, 1.649999976158142, 0.9200000166893005, 1.2200000286102295, 0.5799999833106995, 0.5335999727249146, 0.5799999833106995],
+    "acceleration_feedforward_s2": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  }
+}

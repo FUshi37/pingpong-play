@@ -1,0 +1,85 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Recovered RMP planner configuration",
+  "type": "object",
+  "required": ["planning", "rmp", "joint_limits"],
+  "additionalProperties": false,
+  "properties": {
+    "meta": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "robot": { "type": "string" },
+        "mech_unit": { "type": "string" },
+        "n_joints": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "planning": {
+      "type": "object",
+      "required": ["dt", "use_safety_bounds", "use_jerk_limit"],
+      "properties": {
+        "dt": { "type": "number", "exclusiveMinimum": 0 },
+        "period_s": { "type": "number", "exclusiveMinimum": 0 },
+        "control_period_s": { "type": "number", "exclusiveMinimum": 0 },
+        "use_safety_bounds": { "type": "boolean" },
+        "use_jerk_limit": { "type": "boolean" },
+        "target_update_delay_steps": { "type": "integer", "minimum": 0 },
+        "output_delay_steps_per_joint": {
+          "type": "array", "items": { "type": "integer", "minimum": 0 }
+        }
+      }
+    },
+    "rmp": {
+      "type": "object",
+      "properties": {
+        "kp": { "type": "number" },
+        "kd": { "type": "number" },
+        "jnt_kp": { "type": "number" },
+        "jnt_kd": { "type": "number" },
+        "jnt_kp_scale": { "type": "number" },
+        "jnt_kd_scale": { "type": "number" },
+        "jnt_kp_scale_per_joint": { "type": "array", "items": { "type": "number" } },
+        "jnt_kd_scale_per_joint": { "type": "array", "items": { "type": "number" } },
+        "target_filter_length": { "type": "integer", "minimum": 1 },
+        "output_filter_length": { "type": "integer", "minimum": 1 },
+        "vel_weight": { "type": "number" },
+        "acc_weight": { "type": "number" },
+        "pos_limit_weight": { "type": "number" },
+        "angle_gap_rad": { "type": "array", "items": { "type": "number" } },
+        "joint_velocity_feedforward": { "type": "number" },
+        "joint_acceleration_feedforward": { "type": "number" },
+        "estimator_joint_process_var": { "type": "number" },
+        "estimator_joint_measure_var": { "type": "number" }
+      }
+    },
+    "joint_limits": {
+      "type": "object",
+      "required": ["q_min", "q_max", "qd_max", "qdd_max"],
+      "properties": {
+        "q_min": { "type": "array", "items": { "type": "number" } },
+        "q_max": { "type": "array", "items": { "type": "number" } },
+        "qd_max": { "type": "array", "items": { "type": "number" } },
+        "qdd_max": { "type": "array", "items": { "type": "number" } },
+        "qddd_max": { "type": "array", "items": { "type": "number" } }
+      }
+    },
+    "xml_pd": {
+      "type": "object",
+      "properties": {
+        "xml_path": { "type": "string" },
+        "kp": { "type": "array", "items": { "type": "number" } },
+        "kv": { "type": "array", "items": { "type": "number" } },
+        "kp_scale": { "type": "number" },
+        "kd_scale": { "type": "number" },
+        "kp_scale_per_joint": { "type": "array", "items": { "type": "number" } },
+        "kd_scale_per_joint": { "type": "array", "items": { "type": "number" } },
+        "damping": { "type": "array", "items": { "type": "number" } },
+        "armature": { "type": "array", "items": { "type": "number" } },
+        "damping_scale_per_joint": { "type": "array", "items": { "type": "number" } },
+        "armature_scale_per_joint": { "type": "array", "items": { "type": "number" } },
+        "acceleration_feedforward_s2": { "type": "array", "items": { "type": "number" } }
+      }
+    }
+  }
+}

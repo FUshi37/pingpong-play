@@ -7,7 +7,61 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 
-def build_simcode2_training_xml(xml_path: str | Path) -> Path:
+SPORT_TASKSPACE_FIT_RIGHT_ARM_PD: dict[str, tuple[float, float]] = {
+    "RightArm-0": (120000.0, 1250.0),
+    "RightArm-1": (120000.0, 675.0),
+    "RightArm-2": (101250.0, 1087.5),
+    "RightArm-3": (75000.0, 843.75),
+    "RightArm-4": (48750.0, 468.75),
+    "RightArm-5": (56250.0, 531.25),
+    "RightArm-6": (37500.0, 328.125),
+}
+
+RECOVERED_RMP_RMPMD_V2_RIGHT_ARM_PD: dict[str, tuple[float, float]] = {
+    "RightArm-0": (112320.0, 9048.0),
+    "RightArm-1": (184320.0, 9604.8),
+    "RightArm-2": (133650.0, 9570.0),
+    "RightArm-3": (73200.0, 4071.6),
+    "RightArm-4": (30420.0, 3712.0),
+    "RightArm-5": (62100.0, 5000.0),
+    "RightArm-6": (35100.0, 2030.0),
+}
+
+
+def _apply_right_arm_pd_profile(
+    root: ET.Element,
+    profile: str,
+) -> None:
+    canonical = str(profile).strip().lower()
+    if canonical in {"", "xml", "current"}:
+        return
+    profiles = {
+        "sport_taskspace_fit_v1": SPORT_TASKSPACE_FIT_RIGHT_ARM_PD,
+        "recovered_rmp_rmpmd_v2": RECOVERED_RMP_RMPMD_V2_RIGHT_ARM_PD,
+    }
+    if canonical not in profiles:
+        raise ValueError(f"unknown right_arm_pd_profile={profile!r}")
+    pd_values = profiles[canonical]
+    patched = 0
+    for actuator in root.findall(".//actuator/position"):
+        name = actuator.get("name", "")
+        if name not in pd_values:
+            continue
+        kp, kv = pd_values[name]
+        actuator.set("kp", f"{kp:g}")
+        actuator.set("kv", f"{kv:g}")
+        patched += 1
+    if patched != len(pd_values):
+        raise ValueError(
+            f"right_arm_pd_profile={profile!r} patched {patched} actuators, "
+            f"expected {len(pd_values)}")
+
+
+def build_simcode2_training_xml(
+    xml_path: str | Path,
+    *,
+    right_arm_pd_profile: str = "xml",
+) -> Path:
     """Return the exact CPU-loadable XML shape used by simcode2 MJX.
 
     This combines simcode2's ``_build_temp_xml_with_ball`` and
@@ -215,6 +269,11 @@ def build_simcode2_training_xml(xml_path: str | Path) -> Path:
             solimp="0.90 0.995 0.001",
             condim="3",
         )
+
+    # simcode5 applies this profile after adding the ball and before loading
+    # the MuJoCo/MJX model.  Apply it to the same final XML tree for the CPU
+    # mirror so both backends receive identical actuator kp/kv settings.
+    _apply_right_arm_pd_profile(root, right_arm_pd_profile)
 
     handle = tempfile.NamedTemporaryFile(
         prefix="pingpong_simcode2_training_", suffix=".xml", delete=False)

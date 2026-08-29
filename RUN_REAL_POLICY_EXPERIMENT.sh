@@ -33,6 +33,12 @@ Environment overrides:
   ENABLE_BALL_RELEASE_GATE=true
   BALL_RELEASE_MIN_DOWNWARD_VELOCITY_M_S=0.15
   BALL_RELEASE_MIN_Z_DROP_M=0.015
+  BALL_ESTIMATOR_CONTROL_MAX_EXTRAPOLATION_S=0.08
+  BALL_ESTIMATOR_CONTROL_OUTPUT_MODE=continuous
+  BALL_ESTIMATOR_FRAME_HOLD_OUTPUT_RATE_HZ=50.0
+  BALL_ESTIMATOR_RELEASE_GATED_DYNAMICS=false
+  RL_USE_VALID_BALL_OBS_AGE=true
+  BALL_RELEASE_USE_ESTIMATOR_STATE=false
 
 Extra ROS args after -- are appended last, so they can override defaults:
   ./RUN_REAL_POLICY_EXPERIMENT.sh -- -p run_duration_s:=30.0
@@ -73,7 +79,8 @@ INIT_POSE_DURATION_S="${INIT_POSE_DURATION_S:-8.0}"
 POST_ENTER_START_DELAY_S="${POST_ENTER_START_DELAY_S:-3.0}"
 REQUIRE_ENTER_CONFIRM="${REQUIRE_ENTER_CONFIRM:-true}"
 ENABLE_VISUALIZATION="${ENABLE_VISUALIZATION:-true}"
-ENABLE_SAFETY_LIMITER="${ENABLE_SAFETY_LIMITER:-false}"
+# Runtime policy commands are never allowed to enable this legacy limiter.
+ENABLE_SAFETY_LIMITER="false"
 ENABLE_COMPENSATION="${ENABLE_COMPENSATION:-true}"
 POLICY_OBS_DIM="${POLICY_OBS_DIM:-67}"
 ENABLE_BALL_RELEASE_GATE="${ENABLE_BALL_RELEASE_GATE:-true}"
@@ -82,6 +89,12 @@ BALL_RELEASE_MIN_Z_DROP_M="${BALL_RELEASE_MIN_Z_DROP_M:-0.015}"
 BALL_RELEASE_WINDOW_S="${BALL_RELEASE_WINDOW_S:-0.12}"
 BALL_RELEASE_REQUIRED_CONSECUTIVE_TICKS="${BALL_RELEASE_REQUIRED_CONSECUTIVE_TICKS:-3}"
 BALL_RELEASE_MAX_OBS_AGE_S="${BALL_RELEASE_MAX_OBS_AGE_S:-0.08}"
+BALL_ESTIMATOR_CONTROL_MAX_EXTRAPOLATION_S="${BALL_ESTIMATOR_CONTROL_MAX_EXTRAPOLATION_S:-0.08}"
+BALL_ESTIMATOR_CONTROL_OUTPUT_MODE="${BALL_ESTIMATOR_CONTROL_OUTPUT_MODE:-continuous}"
+BALL_ESTIMATOR_FRAME_HOLD_OUTPUT_RATE_HZ="${BALL_ESTIMATOR_FRAME_HOLD_OUTPUT_RATE_HZ:-50.0}"
+BALL_ESTIMATOR_RELEASE_GATED_DYNAMICS="${BALL_ESTIMATOR_RELEASE_GATED_DYNAMICS:-false}"
+RL_USE_VALID_BALL_OBS_AGE="${RL_USE_VALID_BALL_OBS_AGE:-true}"
+BALL_RELEASE_USE_ESTIMATOR_STATE="${BALL_RELEASE_USE_ESTIMATOR_STATE:-false}"
 
 DONE_Z_MIN_M="${DONE_Z_MIN_M:-0.6}"
 DONE_Z_MAX_M="${DONE_Z_MAX_M:-1.9}"
@@ -90,7 +103,7 @@ DONE_Y_RANGE_M="${DONE_Y_RANGE_M:-0.5}"
 
 SIM_CARTESIAN_X_OFFSET_M="${SIM_CARTESIAN_X_OFFSET_M:-0.0}"
 SIM_CARTESIAN_Y_OFFSET_M="${SIM_CARTESIAN_Y_OFFSET_M:-0.023583}"
-SIM_BASE_HEIGHT_M="${SIM_BASE_HEIGHT_M:-0.947396}"
+SIM_BASE_HEIGHT_M="${SIM_BASE_HEIGHT_M:-1.302396}"
 
 TRAJECTORY_CSV="$OUTPUT_ROOT/ball_trajectory_base_link.csv"
 TRAJECTORY_JSON="$OUTPUT_ROOT/ball_trajectory_base_link.json"
@@ -108,6 +121,28 @@ REAL_2D_PLOTTER="$WORKSPACE_DIR/plot_real_run_2d.py"
 TRAJECTORY_3D_PLOTTER="$WORKSPACE_DIR/plot_safety_replay_3d.py"
 REAL_RUN_METRICS_ANALYZER="$WORKSPACE_DIR/analyze_real_run_metrics.py"
 POLICY_SAFETY_ANALYZER="$WORKSPACE_DIR/analyze_policy_safety_trace.py"
+
+# pip-installed CUDA libraries used by torch/ultralytics live below
+# site-packages/nvidia/*/lib, which is not always in the dynamic loader path.
+# Configure it here before importing the detector so CUDA wheels can find cuDNN.
+_PY_SITE_PACKAGES="$(python3 -c 'import sysconfig; print(sysconfig.get_paths().get("purelib", ""))' 2>/dev/null || true)"
+_PY_USER_SITE_PACKAGES="$(python3 -c 'import site; print(site.getusersitepackages())' 2>/dev/null || true)"
+_NVIDIA_LD_PATHS=()
+for _PY_SITE_ROOT in "$_PY_SITE_PACKAGES" "$_PY_USER_SITE_PACKAGES"; do
+    if [ -n "$_PY_SITE_ROOT" ] && [ -d "$_PY_SITE_ROOT/nvidia" ]; then
+        for _NVIDIA_LIB_DIR in "$_PY_SITE_ROOT"/nvidia/*/lib; do
+            if [ -d "$_NVIDIA_LIB_DIR" ]; then
+                _NVIDIA_LD_PATHS+=("$_NVIDIA_LIB_DIR")
+            fi
+        done
+    fi
+done
+if [ "${#_NVIDIA_LD_PATHS[@]}" -gt 0 ]; then
+    _OLD_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+    _NVIDIA_LD_PATH="$(IFS=:; echo "${_NVIDIA_LD_PATHS[*]}")"
+    export LD_LIBRARY_PATH="$_NVIDIA_LD_PATH${_OLD_LD_LIBRARY_PATH:+:$_OLD_LD_LIBRARY_PATH}"
+fi
+unset _PY_SITE_PACKAGES _PY_USER_SITE_PACKAGES _PY_SITE_ROOT _NVIDIA_LIB_DIR _NVIDIA_LD_PATHS _OLD_LD_LIBRARY_PATH _NVIDIA_LD_PATH
 
 mkdir -p "$OUTPUT_ROOT"
 
@@ -137,6 +172,12 @@ ball_release_min_z_drop_m=$BALL_RELEASE_MIN_Z_DROP_M
 ball_release_window_s=$BALL_RELEASE_WINDOW_S
 ball_release_required_consecutive_ticks=$BALL_RELEASE_REQUIRED_CONSECUTIVE_TICKS
 ball_release_max_obs_age_s=$BALL_RELEASE_MAX_OBS_AGE_S
+ball_estimator_control_max_extrapolation_s=$BALL_ESTIMATOR_CONTROL_MAX_EXTRAPOLATION_S
+ball_estimator_control_output_mode=$BALL_ESTIMATOR_CONTROL_OUTPUT_MODE
+ball_estimator_frame_hold_output_rate_hz=$BALL_ESTIMATOR_FRAME_HOLD_OUTPUT_RATE_HZ
+ball_estimator_release_gated_dynamics=$BALL_ESTIMATOR_RELEASE_GATED_DYNAMICS
+rl_use_valid_ball_obs_age=$RL_USE_VALID_BALL_OBS_AGE
+ball_release_use_estimator_state=$BALL_RELEASE_USE_ESTIMATOR_STATE
 done_z_min_m=$DONE_Z_MIN_M
 sim_offsets=[$SIM_CARTESIAN_X_OFFSET_M, $SIM_CARTESIAN_Y_OFFSET_M, $SIM_BASE_HEIGHT_M]
 EOF
@@ -172,6 +213,7 @@ ros2 run pingpong_controller pingpong_node --ros-args \
     -p policy_backend:=mjx \
     -p rl_model_path:="$MODEL_PATH" \
     -p policy_obs_dim:="$POLICY_OBS_DIM" \
+    -p rl_use_valid_ball_obs_age:="$RL_USE_VALID_BALL_OBS_AGE" \
     -p robot_xml_path:="$ROBOT_XML" \
     -p control_rate_hz:="$CONTROL_RATE_HZ" \
     -p enable_init_pose:=true \
@@ -191,7 +233,12 @@ ros2 run pingpong_controller pingpong_node --ros-args \
     -p ball_release_window_s:="$BALL_RELEASE_WINDOW_S" \
     -p ball_release_required_consecutive_ticks:="$BALL_RELEASE_REQUIRED_CONSECUTIVE_TICKS" \
     -p ball_release_max_obs_age_s:="$BALL_RELEASE_MAX_OBS_AGE_S" \
+    -p ball_release_use_estimator_state:="$BALL_RELEASE_USE_ESTIMATOR_STATE" \
     -p enable_ball_state_estimator:=true \
+    -p ball_estimator_control_max_extrapolation_s:="$BALL_ESTIMATOR_CONTROL_MAX_EXTRAPOLATION_S" \
+    -p ball_estimator_control_output_mode:="$BALL_ESTIMATOR_CONTROL_OUTPUT_MODE" \
+    -p ball_estimator_frame_hold_output_rate_hz:="$BALL_ESTIMATOR_FRAME_HOLD_OUTPUT_RATE_HZ" \
+    -p ball_estimator_release_gated_dynamics:="$BALL_ESTIMATOR_RELEASE_GATED_DYNAMICS" \
     -p use_depth_sensor:=true \
     -p enable_visualization:="$ENABLE_VISUALIZATION" \
     -p start_confirm_topic:=/pingpong/start_control \

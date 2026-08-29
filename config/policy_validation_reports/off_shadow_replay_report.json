@@ -1,0 +1,108 @@
+{
+  "checkpoint": {
+    "path": "/home/spirit-ai/pingpong_moz1/simcode5/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/goal_d455_gpu1_pure_stable_v5_recovery_20260802/mjx_curriculum_best.pkl",
+    "sha256": "9d7e94e9ef803fcbe9385ab97485626b2529394be62c75136c69d873adffaa79",
+    "targetParametersFrom": "actual_checkpoint_env_cfg"
+  },
+  "claimScope": "implementation_and_offline_model_objective_only; does_not_establish_real_closed_loop_benefit",
+  "input": {
+    "path": "/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/interactive_recordings/record_new3/probe_recording_20260810_213245/control_samples.jsonl",
+    "policySamplesProcessed": 462,
+    "rowsSeen": 16454,
+    "sha256": "52f5ec02b81684de6d2c19b4df413939ed3b90cb1a5a1f268b4b7b52797ce63c"
+  },
+  "off": {
+    "equivalent": true,
+    "maxAbsCommandDeltaRad": 0.0
+  },
+  "realFit": {
+    "applyEligible": false,
+    "fitId": "record_new3_candidate_center_v1",
+    "fitVersion": "2026-08-13.rootcause-candidate-center.1",
+    "holdoutMetrics": {
+      "calibration_split_reported": false,
+      "holdout_split_reported": false,
+      "status": "known_model_bias",
+      "summary": "holdout underestimates real dq and qacc; no paired real closed-loop A/B"
+    },
+    "path": "/home/spirit-ai/pingpong_moz1/config/policy_plant_real_fit_record_new3_v1.json",
+    "provenanceStatus": "verified_local_recording_bytes",
+    "sourceHashesVerified": true,
+    "sourceRecordingSha256": {
+      "record_new3/probe_recording_20260810_213245/control_samples.jsonl": "52f5ec02b81684de6d2c19b4df413939ed3b90cb1a5a1f268b4b7b52797ce63c",
+      "record_new4/probe_recording_20260811_202932/control_samples.jsonl": "7f8e0b443e99900aaccf63fc8990929d65315af97a241d85b1c3e27847fd3b8d",
+      "record_new5/probe_recording_20260813_144443/control_samples.jsonl": "0ea6bace28d35478afa8eda5eb1b387d9578458ff04997040b1a9eca9fa9f648"
+    }
+  },
+  "schemaVersion": 1,
+  "shadow": {
+    "calibration": {
+      "directTargetErrorRms": {
+        "count": 277,
+        "max": 0.04466007032835004,
+        "mean": 0.028378799787262352,
+        "p50": 0.02931146733502997,
+        "p90": 0.0403753346144915,
+        "p99": 0.04360593152563726
+      },
+      "improvedTickFraction": 1.0,
+      "improvement": {
+        "count": 277,
+        "max": 0.012798031965828256,
+        "mean": 0.005198064154555056,
+        "p50": 0.005007398827268899,
+        "p90": 0.009521393620415704,
+        "p99": 0.012556967575475949
+      },
+      "shadowTargetErrorRms": {
+        "count": 277,
+        "max": 0.03710111255468908,
+        "mean": 0.023180735632707297,
+        "p50": 0.023995956635115636,
+        "p90": 0.031525725045934795,
+        "p99": 0.03692075357066808
+      }
+    },
+    "correctionRateRadS": {
+      "count": 452,
+      "max": 0.5333333333333634,
+      "mean": 0.45132199908388076,
+      "p50": 0.533333333333319,
+      "p90": 0.5333333333333634,
+      "p99": 0.5333333333333634
+    },
+    "holdout": {
+      "directTargetErrorRms": {
+        "count": 185,
+        "max": 0.06946914978116989,
+        "mean": 0.03864764210612844,
+        "p50": 0.035085786233468544,
+        "p90": 0.0648097874925946,
+        "p99": 0.06927804066746701
+      },
+      "improvedTickFraction": 0.972972972972973,
+      "improvement": {
+        "count": 185,
+        "max": 0.022144680909523866,
+        "mean": 0.007213727269256553,
+        "p50": 0.007108773485810814,
+        "p90": 0.013115372888363949,
+        "p99": 0.021369119931938622
+      },
+      "shadowTargetErrorRms": {
+        "count": 185,
+        "max": 0.06543251159683144,
+        "mean": 0.03143391483687189,
+        "p50": 0.029750241207729733,
+        "p90": 0.05457839244245546,
+        "p99": 0.06008032576856305
+      }
+    },
+    "maxAbsCorrectionRad": 0.053333333333333344,
+    "qEnvelopeViolationCount": 0,
+    "replayFaultCounts": {
+      "matcher prediction exceeds existing q/dq envelope": 31
+    }
+  },
+  "unresolvedRisk": "real fit has known dq/qacc underestimation and no paired real A/B; apply remains disabled"
+}

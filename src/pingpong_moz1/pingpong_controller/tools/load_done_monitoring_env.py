@@ -49,7 +49,6 @@ PARAMETER_TO_ENV = {
     "enable_ball_release_gate": "ENABLE_BALL_RELEASE_GATE",
     "enable_ball_lost_failsafe": "ENABLE_BALL_LOST_FAILSAFE",
     "ball_lost_failsafe_timeout_s": "BALL_LOST_FAILSAFE_TIMEOUT_S",
-    "enable_safety_limiter": "ENABLE_SAFETY_LIMITER",
     "control_rate_hz": "CONTROL_RATE_HZ",
     "sim_base_height_m": "SIM_BASE_HEIGHT_M",
     # Optional probe-only keys are accepted when added to the same YAML.

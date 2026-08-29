@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "fit_id": "record_new3_candidate_center_v1",
+  "fit_version": "2026-08-13.rootcause-candidate-center.1",
+  "source_recordings": [
+    "record_new3",
+    "record_new4",
+    "record_new5"
+  ],
+  "source_recording_root": "src/pingpong_moz1/pingpong_controller/outputs/interactive_recordings",
+  "source_recording_sha256": {
+    "record_new3/probe_recording_20260810_213245/control_samples.jsonl": "52f5ec02b81684de6d2c19b4df413939ed3b90cb1a5a1f268b4b7b52797ce63c",
+    "record_new4/probe_recording_20260811_202932/control_samples.jsonl": "7f8e0b443e99900aaccf63fc8990929d65315af97a241d85b1c3e27847fd3b8d",
+    "record_new5/probe_recording_20260813_144443/control_samples.jsonl": "0ea6bace28d35478afa8eda5eb1b387d9578458ff04997040b1a9eca9fa9f648"
+  },
+  "provenance_status": "verified_local_recording_bytes",
+  "apply_eligible": false,
+  "holdout_metrics": {
+    "status": "known_model_bias",
+    "summary": "holdout underestimates real dq and qacc; no paired real closed-loop A/B",
+    "calibration_split_reported": false,
+    "holdout_split_reported": false
+  },
+  "natural_frequency_rad_s": [
+    21.891138,
+    22.089575,
+    22.650471,
+    21.730533,
+    20.154948,
+    22.245138,
+    23.054672
+  ],
+  "damping_ratio": [
+    0.333003,
+    0.329552,
+    0.311164,
+    0.3114,
+    0.313106,
+    0.311233,
+    0.285535
+  ],
+  "gain_per_joint": [
+    0.997884,
+    0.996612,
+    0.992312,
+    0.990942,
+    0.982327,
+    0.992695,
+    0.983194
+  ],
+  "delay_ms_per_joint": [
+    45.0,
+    50.0,
+    45.0,
+    40.0,
+    35.0,
+    45.0,
+    50.0
+  ],
+  "solver": {
+    "horizon_steps": 16,
+    "q_tracking_weight": 1.0,
+    "dq_tracking_weight": 0.04,
+    "command_deviation_weight": 0.2,
+    "command_slew_weight": 0.1,
+    "max_correction_rad": [0.08, 0.08, 0.08, 0.08, 0.06, 0.06, 0.06],
+    "max_correction_rate_rad_s": [0.8, 0.8, 0.8, 0.8, 0.6, 0.6, 0.6],
+    "residual_uncertainty_scale": 1.5
+  }
+}

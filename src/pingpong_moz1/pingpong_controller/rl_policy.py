@@ -82,6 +82,7 @@ DEPLOYMENT_FK_WORLD_Z_CORRECTION_M = 0.0
 
 EXPECTED_OBS_DIM = 50  # Base observation dimension (legacy)
 EXPECTED_OBS_DIM_WITH_DELAY = 67  # 50 base + 17 delay conditioning
+EXPECTED_OBS_DIM_GPU0_REAL_RMP = 57
 
 # Observation contracts are explicit because the deployed legacy checkpoint was
 # trained with two observation bugs, while simcode2/ideal-PD67 was trained after
@@ -93,6 +94,7 @@ OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67 = "simcode3_actuator67"
 OBSERVATION_PROFILE_SIMCODE4_SERVO67 = "simcode4_servo67"
 OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67 = "simcode5_pure_actuator67"
 OBSERVATION_PROFILE_SIMCODE6_QVEL67 = "simcode6_qvel67"
+OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85 = "gpu0_qvel_real_rmp_v85"
 OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
@@ -100,6 +102,7 @@ OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
 )
 CORRECTED_67D_OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
@@ -138,6 +141,12 @@ def normalize_observation_profile(value: object) -> str:
         "simcode6": OBSERVATION_PROFILE_SIMCODE6_QVEL67,
         "qvel67": OBSERVATION_PROFILE_SIMCODE6_QVEL67,
         "qvel_67": OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+        "simcode7": OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+        "gpu0_qvel_real_rmp": OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+        "gpu0_qvel_real_rmp_v85": OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+        "gpu0_qvel_real=rmp": OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+        "gpu0_qvel/real=rmp": OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+        "gpu0_qvel/real_rmp": OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
     }
     profile = aliases.get(profile, profile)
     if profile not in OBSERVATION_PROFILES:
@@ -219,6 +228,7 @@ class RLPolicyController:
         enable_delay_conditioning: bool = True,
         use_valid_ball_obs_age: bool = True,
         observation_profile: str = OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+        expected_obs_dim: Optional[int] = None,
     ) -> None:
         self._logger = logger or _LoggerShim()
         self.dt = float(dt)
@@ -255,10 +265,16 @@ class RLPolicyController:
             raise ValueError(
                 f"{self.observation_profile} requires the 67D delay-conditioned "
                 "observation path")
-        self._expected_obs_dim = (
+        self._expected_obs_dim = int(expected_obs_dim) if expected_obs_dim is not None else (
             EXPECTED_OBS_DIM_WITH_DELAY if self.enable_delay_conditioning
             else EXPECTED_OBS_DIM
         )
+        if self._expected_obs_dim not in {
+                EXPECTED_OBS_DIM,
+                EXPECTED_OBS_DIM_WITH_DELAY,
+                EXPECTED_OBS_DIM_GPU0_REAL_RMP}:
+            raise ValueError(
+                f"unsupported expected_obs_dim={self._expected_obs_dim}")
 
         # Replicate simulation bug for validation purposes.
         # The training environment (mjx_juggle_env.py) has a bug where _make_obs
@@ -526,10 +542,10 @@ class RLPolicyController:
         self.last_cmd_q = self.arm_cmd_q.copy()
         self.last_cmd_qvel = np.zeros(self.n_arm, dtype=np.float32)
         self.last_cmd_qacc = np.zeros(self.n_arm, dtype=np.float32)
-        obs_dim = EXPECTED_OBS_DIM_WITH_DELAY if self.enable_delay_conditioning else EXPECTED_OBS_DIM
-        self.last_obs = np.zeros(obs_dim, dtype=np.float32)
-        self.last_obs_unscaled = np.zeros(obs_dim, dtype=np.float32)
-        self.last_observation_scales = np.ones(obs_dim, dtype=np.float32)
+        self.last_obs = np.zeros(self._expected_obs_dim, dtype=np.float32)
+        self.last_obs_unscaled = np.zeros(self._expected_obs_dim, dtype=np.float32)
+        self.last_observation_scales = np.ones(
+            self._expected_obs_dim, dtype=np.float32)
         self.last_observation_scale_indices: tuple[int, ...] = ()
 
         # Delay conditioning state: command history for active_command_error

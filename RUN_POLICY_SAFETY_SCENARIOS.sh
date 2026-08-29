@@ -108,6 +108,12 @@ REFERENCE_OBS="${REFERENCE_OBS:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_contro
 REFERENCE_ACTION="${REFERENCE_ACTION:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/data/rl_sim/validate_obs_trace/validate_trace.csv}"
 
 ENABLE_BALL_STATE_ESTIMATOR="${ENABLE_BALL_STATE_ESTIMATOR:-true}"
+BALL_ESTIMATOR_CONTROL_MAX_EXTRAPOLATION_S="${BALL_ESTIMATOR_CONTROL_MAX_EXTRAPOLATION_S:-0.08}"
+BALL_ESTIMATOR_CONTROL_OUTPUT_MODE="${BALL_ESTIMATOR_CONTROL_OUTPUT_MODE:-continuous}"
+BALL_ESTIMATOR_FRAME_HOLD_OUTPUT_RATE_HZ="${BALL_ESTIMATOR_FRAME_HOLD_OUTPUT_RATE_HZ:-50.0}"
+BALL_ESTIMATOR_RELEASE_GATED_DYNAMICS="${BALL_ESTIMATOR_RELEASE_GATED_DYNAMICS:-false}"
+RL_USE_VALID_BALL_OBS_AGE="${RL_USE_VALID_BALL_OBS_AGE:-true}"
+BALL_RELEASE_USE_ESTIMATOR_STATE="${BALL_RELEASE_USE_ESTIMATOR_STATE:-false}"
 ENABLE_BALL_CAPTURE_GATE="${ENABLE_BALL_CAPTURE_GATE:-true}"
 ENABLE_BALL_LOST_FAILSAFE="${ENABLE_BALL_LOST_FAILSAFE:-true}"
 ENABLE_DONE_MONITORING="${ENABLE_DONE_MONITORING:-true}"
@@ -176,6 +182,12 @@ echo "Rate: ${RATE_HZ}Hz"
 echo "Model path: $MODEL_PATH"
 echo "Policy obs dim: $POLICY_OBS_DIM (0=auto from MJX checkpoint)"
 echo "Estimator: $ENABLE_BALL_STATE_ESTIMATOR"
+echo "Estimator control max extrapolation: ${BALL_ESTIMATOR_CONTROL_MAX_EXTRAPOLATION_S}s"
+echo "Estimator control output mode: $BALL_ESTIMATOR_CONTROL_OUTPUT_MODE"
+echo "Estimator frame-hold output rate: ${BALL_ESTIMATOR_FRAME_HOLD_OUTPUT_RATE_HZ}Hz"
+echo "Estimator release-gated dynamics: $BALL_ESTIMATOR_RELEASE_GATED_DYNAMICS"
+echo "RL valid ball obs age: $RL_USE_VALID_BALL_OBS_AGE"
+echo "Ball release uses estimator state: $BALL_RELEASE_USE_ESTIMATOR_STATE"
 echo "Ball capture gate: $ENABLE_BALL_CAPTURE_GATE"
 echo "Safety limiter: $ENABLE_SAFETY_LIMITER"
 echo "Actuator compensation: $ENABLE_COMPENSATION"
@@ -232,6 +244,7 @@ for SC in "${SCENARIOS[@]}"; do
         -p policy_backend:=mjx \
         -p rl_model_path:="$MODEL_PATH" \
         -p policy_obs_dim:="$POLICY_OBS_DIM" \
+        -p rl_use_valid_ball_obs_age:="$RL_USE_VALID_BALL_OBS_AGE" \
         -p robot_xml_path:="$ROBOT_XML" \
         -p control_rate_hz:=200.0 \
         -p enable_replay_mode:=true \
@@ -245,7 +258,12 @@ for SC in "${SCENARIOS[@]}"; do
         -p enable_ball_capture_gate:="$ENABLE_BALL_CAPTURE_GATE" \
         -p enable_ball_lost_failsafe:="$ENABLE_BALL_LOST_FAILSAFE" \
         -p enable_done_monitoring:="$ENABLE_DONE_MONITORING" \
+        -p ball_release_use_estimator_state:="$BALL_RELEASE_USE_ESTIMATOR_STATE" \
         -p enable_ball_state_estimator:="$ENABLE_BALL_STATE_ESTIMATOR" \
+        -p ball_estimator_control_max_extrapolation_s:="$BALL_ESTIMATOR_CONTROL_MAX_EXTRAPOLATION_S" \
+        -p ball_estimator_control_output_mode:="$BALL_ESTIMATOR_CONTROL_OUTPUT_MODE" \
+        -p ball_estimator_frame_hold_output_rate_hz:="$BALL_ESTIMATOR_FRAME_HOLD_OUTPUT_RATE_HZ" \
+        -p ball_estimator_release_gated_dynamics:="$BALL_ESTIMATOR_RELEASE_GATED_DYNAMICS" \
         -p enable_safety_limiter:="$ENABLE_SAFETY_LIMITER" \
         -p enable_compensation:="$ENABLE_COMPENSATION" \
         -p compensation_mode:=inverse_mpc \

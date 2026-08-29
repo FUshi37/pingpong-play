@@ -621,6 +621,9 @@ class PolicyDqObservationAdapterTest(unittest.TestCase):
         xml_path = (
             repo_root / "simcode5" / "pingpong_moz1-main"
             / "pingpong_controller" / "tools" / "rl_sim" / "moz1_pd.xml")
+        if not xml_path.is_file():
+            self.skipTest(
+                f"simcode5 XML fixture is not installed: {xml_path}")
         patched = build_simcode2_training_xml(
             xml_path, right_arm_pd_profile="sport_taskspace_fit_v1")
         try:
@@ -725,6 +728,71 @@ class RecordedBallStateAnalysisTest(unittest.TestCase):
 
         self.assertEqual(colors.count("#1f77b4"), 6)
         self.assertEqual(colors.count("#d62728"), 6)
+
+    def test_writes_combined_ball_racket_contact_diagnostics(self):
+        samples = [
+            {
+                "time": 0.000,
+                "sourceSeq": 10,
+                "racket": [0.0, 0.0, 1.00],
+                "rawBall": [0.0, 0.0, 1.08],
+                "observedBall": [0.0, 0.0, 1.07],
+                "observedVelocity": [0.0, 0.0, -0.20],
+                "predictedBall": [0.0, 0.0, 1.06],
+                "cameraMeasurement": {
+                    "sensor_depth_mm": 812.0,
+                    "geom_depth_mm": 798.0,
+                    "depth_mm": 812.0,
+                    "depth_method": "sensor",
+                },
+                "age": 0.005,
+            },
+            {
+                "time": 0.005,
+                "sourceSeq": 11,
+                "racket": [0.0, 0.0, 1.00],
+                "rawBall": [0.0, 0.0, 1.05],
+                "observedBall": [0.0, 0.0, 1.04],
+                "observedVelocity": [0.0, 0.0, 0.30],
+                "predictedBall": [0.0, 0.0, 1.03],
+                "cameraMeasurement": {
+                    "sensor_depth_mm": 810.0,
+                    "geom_depth_mm": 799.0,
+                    "depth_mm": 810.0,
+                    "depth_method": "sensor",
+                },
+                "estimator": {"lossS": 0.0, "extrapolationS": 0.002},
+                "age": 0.006,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            analysis_dir = Path(tmp)
+            plots = PROBE._plot_ball_racket_position_curves(
+                samples, analysis_dir)
+            report = PROBE._analyze_ball_racket_contact_gaps(
+                samples, analysis_dir)
+            self.assertEqual(
+                [path.name for path in plots],
+                ["ball_racket_position_curves.png"],
+            )
+            self.assertTrue(
+                (analysis_dir / "ball_racket_position_curves.png").is_file())
+            self.assertTrue(
+                (analysis_dir / "ball_racket_contact_gaps.csv").is_file())
+            self.assertTrue(
+                (analysis_dir / "ball_racket_contact_gaps.json").is_file())
+            self.assertTrue(
+                (analysis_dir / "ball_racket_contact_gaps.txt").is_file())
+            self.assertEqual(report["contactCount"], 1)
+            discovered = PROBE._analysis_outputs_from_dir(analysis_dir)
+            self.assertEqual(
+                discovered["ballRacketPositionCurves"],
+                "ball_racket_position_curves.png",
+            )
+            self.assertEqual(
+                discovered["ballRacketContactGapsCsv"],
+                "ball_racket_contact_gaps.csv",
+            )
 
     def test_records_and_plots_ir_center_and_depth_diagnostics(self):
         measurement = PROBE._camera_measurement_payload({
@@ -1930,6 +1998,114 @@ class IdealPd67ResetAndGapAnalysisTest(unittest.TestCase):
         self.assertEqual(snapshot["mode"], "reset")
         self.assertEqual(snapshot["controlResetRequestId"], 1)
         self.assertFalse(proxy._reset_in_progress)
+
+
+class SimMirrorLifecycleContractTest(unittest.TestCase):
+
+    def test_transient_real_hold_preserves_mirror_episode(self):
+        class FakeSimMirrorSubprocess:
+            def __init__(self):
+                self.cfg = SimpleNamespace()
+                self.episode = 0
+                self.stream_seq = 0
+                self.reset_count = 0
+                self.step_source_seqs = []
+
+            def reset(self, arm_q=None, **_kwargs):
+                self.reset_count += 1
+                self.episode += 1
+                self.stream_seq = 0
+                return self.snapshot()
+
+            def step(self, _ball_pos, _ball_vel, **kwargs):
+                self.stream_seq += 1
+                self.step_source_seqs.append(int(kwargs["source_seq"]))
+                return self.snapshot()
+
+            def snapshot(self):
+                return {
+                    "available": True,
+                    "sync": {
+                        "ready": True,
+                        "episode": self.episode,
+                        "streamSeq": self.stream_seq,
+                    },
+                }
+
+            @staticmethod
+            def drain_completed_samples():
+                return []
+
+        mirror = FakeSimMirrorSubprocess()
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(enable_sim_mirror=True)
+        probe.sim_mirror = mirror
+        probe.sim_mirror_error = None
+        probe.latest_sim_snapshot = None
+        probe.sim_needs_policy_reset = True
+        probe.policy_needs_reentry_reset = False
+        probe.policy_reentry_reset_q = PROBE.np.zeros(
+            7, dtype=PROBE.np.float32)
+        probe.active_policy_profile = (
+            PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+        probe.active_policy_model = PROBE.GPU0_RMP_MODEL_V91
+        probe.policy_generation = 7
+        probe.recorder = SimpleNamespace(
+            record_sim_control_samples=lambda _samples: None)
+        probe._sim_compensation_options = lambda options: options
+        probe._reset_policy_dq_adapter = lambda _reason: None
+        options = SimpleNamespace(enable_sim_mirror=True)
+
+        def step(*, source_seq, control_mode, policy_active):
+            return probe._step_sim_mirror(
+                PROBE.np.asarray([0.1, -0.2, 1.2]),
+                PROBE.np.asarray([0.0, 0.0, -0.5]),
+                ball_valid=True,
+                age_s=0.0,
+                options=options,
+                source_seq=source_seq,
+                source_time_s=source_seq * 0.005,
+                ball_observation_seq=source_seq,
+                camera_stamp_s=None,
+                control_mode=control_mode,
+                policy_active=policy_active,
+            )
+
+        with mock.patch.object(
+                PROBE, "SimMirrorSubprocess", FakeSimMirrorSubprocess):
+            first = step(
+                source_seq=10, control_mode="policy", policy_active=True)
+            feedback_held = step(
+                source_seq=11,
+                control_mode="policy_feedback_hold",
+                policy_active=False,
+            )
+            ball_held = step(
+                source_seq=12,
+                control_mode="policy_ball_state_hold",
+                policy_active=False,
+            )
+            resumed = step(
+                source_seq=13, control_mode="policy", policy_active=True)
+
+            self.assertEqual(mirror.reset_count, 1)
+            self.assertEqual(mirror.step_source_seqs, [10, 13])
+            self.assertEqual(first["sync"]["episode"], 1)
+            self.assertEqual(feedback_held["sync"]["episode"], 1)
+            self.assertEqual(ball_held["sync"]["episode"], 1)
+            self.assertEqual(resumed["sync"]["episode"], 1)
+            self.assertTrue(probe.policy_needs_reentry_reset)
+            self.assertFalse(probe.sim_needs_policy_reset)
+
+            # An actual strategy boundary still starts a new mirror episode.
+            probe.sim_needs_policy_reset = True
+            probe.policy_reentry_reset_q = PROBE.np.ones(
+                7, dtype=PROBE.np.float32)
+            restarted = step(
+                source_seq=14, control_mode="policy", policy_active=True)
+
+        self.assertEqual(mirror.reset_count, 2)
+        self.assertEqual(restarted["sync"]["episode"], 2)
 
 
 class RecorderCadenceTest(unittest.TestCase):

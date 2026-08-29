@@ -41,6 +41,7 @@ else:
     _CV2_IMPORT_ERROR = None
 
 from pingpong_controller.mjx_rl_policy import (
+    Gpu0QvelRealRmpV85PolicyController,
     MjxRLPolicyController,
     Simcode2IdealPd67PolicyController,
     Simcode3Actuator67PolicyController,
@@ -50,6 +51,7 @@ from pingpong_controller.mjx_rl_policy import (
     inspect_mjx_checkpoint_metadata,
 )
 from pingpong_controller.rl_policy import (
+    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
@@ -135,6 +137,7 @@ class SimMirrorConfig:
     mjx_domain_randomization: bool = False
     mjx_zero_ball_obs_noise: bool = True
     policy_profile: str = OBSERVATION_PROFILE_LEGACY_BUG_COMPAT
+    policy_model: str = "v85"
     simcode2_model_path: Path | None = None
     simcode2_policy_xml_path: Path | None = None
     simcode2_sim_xml_path: Path | None = None
@@ -150,6 +153,11 @@ class SimMirrorConfig:
     simcode6_model_path: Path | None = None
     simcode6_policy_xml_path: Path | None = None
     simcode6_sim_xml_path: Path | None = None
+    simcode7_model_path: Path | None = None
+    simcode7_v85_model_path: Path | None = None
+    simcode7_v91_model_path: Path | None = None
+    simcode7_policy_xml_path: Path | None = None
+    simcode7_sim_xml_path: Path | None = None
 
 
 def normalize_policy_profile(value: object) -> str:
@@ -195,12 +203,31 @@ def sim_mirror_config_for_policy_profile(
             "policy_xml_path": base_cfg.simcode5_policy_xml_path,
             "sim_xml_path": base_cfg.simcode5_sim_xml_path,
         }
-    else:
+    elif canonical == OBSERVATION_PROFILE_SIMCODE6_QVEL67:
         alternate_paths = {
             "model_path": base_cfg.simcode6_model_path,
             "policy_xml_path": base_cfg.simcode6_policy_xml_path,
             "sim_xml_path": base_cfg.simcode6_sim_xml_path,
         }
+    elif canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+        policy_model = str(getattr(
+            base_cfg, "policy_model", "v85") or "v85").strip().lower()
+        if policy_model not in {"v85", "v91"}:
+            raise ValueError(
+                f"unknown GPU0-QVEL/REAL-RMP mirror model: {policy_model!r}")
+        selected_model_path = (
+            base_cfg.simcode7_v91_model_path
+            if policy_model == "v91"
+            else base_cfg.simcode7_v85_model_path
+        )
+        alternate_paths = {
+            "model_path": (
+                selected_model_path or base_cfg.simcode7_model_path),
+            "policy_xml_path": base_cfg.simcode7_policy_xml_path,
+            "sim_xml_path": base_cfg.simcode7_sim_xml_path,
+        }
+    else:
+        raise ValueError(f"unsupported sim mirror policy profile: {canonical}")
     missing = [name for name, value in alternate_paths.items() if value is None]
     if missing:
         raise ValueError(
@@ -209,15 +236,17 @@ def sim_mirror_config_for_policy_profile(
     return replace(
         base_cfg,
         policy_profile=canonical,
-        policy_obs_dim=67,
+        policy_obs_dim=(
+            57
+            if canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+            else 67),
         rl_use_valid_ball_obs_age=(canonical not in {
             OBSERVATION_PROFILE_SIMCODE4_SERVO67,
             OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
             OBSERVATION_PROFILE_SIMCODE6_QVEL67,
         }),
         # Simcode4 still requires its original MJX-only planner ordering.
-        # Simcode5's CPU plant is reconstructed below from checkpoint timing,
-        # per-joint delay/second-order parameters, and right-arm PD profile.
+        # Simcode5/6 and GPU0 RMP reconstruct their checkpoint plants on CPU.
         backend=(
             "mjx"
             if canonical == OBSERVATION_PROFILE_SIMCODE4_SERVO67
@@ -332,6 +361,7 @@ def _load_simcode_mjx_env(
         OBSERVATION_PROFILE_SIMCODE4_SERVO67: "simcode4",
         OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: "simcode5",
         OBSERVATION_PROFILE_SIMCODE6_QVEL67: "simcode6",
+        OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: "simcode7",
     }[canonical]
     rl_sim_dir = (
         _repo_root()
@@ -358,6 +388,8 @@ def _load_simcode_mjx_env(
         "camera_calibration",
         "delay_control",
         "mjx_smoke",
+        "recovered_rmp_jax",
+        "rmp_training_evidence",
         "rl_juggle_env_random",
         "sim2real_bridger",
     )
@@ -369,6 +401,7 @@ def _load_simcode_mjx_env(
         repo_root / "simcode4",
         repo_root / "simcode5",
         repo_root / "simcode6",
+        repo_root / "simcode7",
     )
     for module_name in local_module_names:
         loaded = sys.modules.get(module_name)
@@ -463,21 +496,26 @@ class RealBallSimMirror:
                 OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
                 OBSERVATION_PROFILE_SIMCODE6_QVEL67,
             })
+        self._real_rmp_profile = (
+            self.policy_profile
+            == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
         self._corrected_67d_profile = uses_corrected_67d_observation(
             self.policy_profile)
+        self._training_xml_profile = bool(
+            self._corrected_67d_profile or self._real_rmp_profile)
         self._logger = logger or _LoggerShim()
         if not _MUJOCO_AVAILABLE:
             raise RuntimeError(f"mujoco unavailable: {_MUJOCO_IMPORT_ERROR}")
         self.sim_xml_path = Path(cfg.sim_xml_path).expanduser().resolve()
         self.checkpoint_env_cfg: dict[str, Any] = {}
         self.right_arm_pd_profile = "xml"
-        if self._pure_actuator_profile:
+        if self._pure_actuator_profile or self._real_rmp_profile:
             self.checkpoint_env_cfg = dict(inspect_mjx_checkpoint_metadata(
                 str(Path(cfg.model_path).expanduser().resolve())
             ).get("env_cfg") or {})
             self.right_arm_pd_profile = str(
                 self.checkpoint_env_cfg.get("right_arm_pd_profile", "xml"))
-        if self._corrected_67d_profile:
+        if self._training_xml_profile:
             from pingpong_controller.simcode2_xml import (
                 build_simcode2_training_xml,
             )
@@ -504,6 +542,8 @@ class RealBallSimMirror:
                 Simcode5PureActuator67PolicyController),
             OBSERVATION_PROFILE_SIMCODE6_QVEL67: (
                 Simcode6Qvel67PolicyController),
+            OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: (
+                Gpu0QvelRealRmpV85PolicyController),
         }[self.policy_profile]
         self.policy = policy_cls(
             str(Path(cfg.model_path).expanduser().resolve()),
@@ -602,6 +642,18 @@ class RealBallSimMirror:
         if self.racket_site_id < 0:
             raise RuntimeError("simulation XML missing right_ee_site")
 
+        self.rmp_planner: Any | None = None
+        self.rmp_target_update_delay_steps = 0
+        self.rmp_output_delay_steps: np.ndarray | None = None
+        self.rmp_output_q_buffer: np.ndarray | None = None
+        self.rmp_output_qd_buffer: np.ndarray | None = None
+        self.rmp_output_qdd_buffer: np.ndarray | None = None
+        self.rmp_controller_kp: np.ndarray | None = None
+        self.rmp_controller_kv: np.ndarray | None = None
+        self.rmp_acceleration_feedforward_s2: np.ndarray | None = None
+        if self._real_rmp_profile:
+            self._initialize_recovered_rmp()
+
         self.default_ctrl = self._make_default_ctrl()
         self.renderer = None
         self.render_error: str | None = None
@@ -643,7 +695,7 @@ class RealBallSimMirror:
             aid = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_ACTUATOR, name)
             if aid >= 0:
                 ctrl[aid] = float(np.deg2rad(deg))
-        if self._corrected_67d_profile:
+        if self._training_xml_profile:
             # Corrected checkpoints carry their D455-aligned reset pose.
             # Seed the CPU plant at that pose before policy/history reset.
             for name, q_rad in zip(
@@ -659,6 +711,209 @@ class RealBallSimMirror:
                 ctrl[aid] = 0.0
         return ctrl
 
+    def _checkpoint_vector(
+        self,
+        name: str,
+        default: tuple[float, ...],
+        *,
+        dtype: Any = np.float64,
+    ) -> np.ndarray:
+        values = np.asarray(
+            self.checkpoint_env_cfg.get(name, default), dtype=dtype)
+        if values.shape != (len(RIGHT_ARM_JOINTS),) or not np.all(
+                np.isfinite(values)):
+            raise RuntimeError(
+                f"GPU0 RMP checkpoint {name} must contain seven finite values")
+        return values
+
+    def _initialize_recovered_rmp(self) -> None:
+        """Restore simcode7's nominal 1 kHz recovered-RMP plant on CPU."""
+        from recovered_rmp import JointLimits, JointRMPPlanner, RMPParams
+
+        env_cfg = self.checkpoint_env_cfg
+        if not bool(env_cfg.get("recovered_rmp_motion_mode", False)):
+            raise RuntimeError(
+                "GPU0 CPU mirror checkpoint does not enable recovered RMP")
+        period = float(env_cfg.get("recovered_rmp_period_s", 0.001))
+        checkpoint_substeps = int(env_cfg.get("frame_skip", self.substeps))
+        if (checkpoint_substeps != self.substeps
+                or not np.isclose(period, self.model.opt.timestep, rtol=0.0,
+                                  atol=1.0e-12)
+                or not np.isclose(
+                    checkpoint_substeps * period, self.dt,
+                    rtol=0.0, atol=1.0e-12)):
+            raise RuntimeError(
+                "GPU0 CPU mirror timing must match the checkpoint's "
+                "5 x 1 ms recovered-RMP integration")
+
+        kp_scale = self._checkpoint_vector(
+            "recovered_rmp_jnt_kp_scale_per_joint", (1.0,) * 7)
+        kd_scale = self._checkpoint_vector(
+            "recovered_rmp_jnt_kd_scale_per_joint",
+            (1.0, 1.0, 0.92, 1.0, 1.0, 1.0, 1.0))
+        damping_scale = self._checkpoint_vector(
+            "recovered_rmp_dof_damping_scale_per_joint",
+            (0.6084, 0.9984, 0.9984, 1.92, 0.58, 1.17, 0.78))
+        armature_scale = self._checkpoint_vector(
+            "recovered_rmp_dof_armature_scale_per_joint",
+            (0.4524, 1.65, 0.92, 1.22, 0.58, 0.5336, 0.58))
+        self.model.dof_damping[self.arm_vadr] *= damping_scale
+        self.model.dof_armature[self.arm_vadr] *= armature_scale
+
+        velocity_deg_s = self._checkpoint_vector(
+            "arm_vel_limit_deg_s",
+            (210.0, 210.0, 240.0, 240.0, 300.0, 300.0, 300.0))
+        acceleration_deg_s2 = self._checkpoint_vector(
+            "arm_acc_limit_deg_s2",
+            (1300.0, 1300.0, 1800.0, 3000.0, 3000.0, 3000.0, 3000.0))
+        jerk_deg_s3 = self._checkpoint_vector(
+            "recovered_rmp_jerk_limit_deg_s3",
+            (35000.0, 35000.0, 45000.0, 60000.0,
+             60000.0, 60000.0, 60000.0))
+        params = RMPParams(
+            jnt_kp=np.float64(400.0) * kp_scale,
+            jnt_kd=np.float64(40.0) * kd_scale,
+            acc_weight=float(env_cfg.get(
+                "recovered_rmp_acceleration_weight", 0.001)),
+            joint_vel_ffd=float(env_cfg.get(
+                "recovered_rmp_joint_velocity_feedforward", 0.5)),
+            joint_acc_ffd=float(env_cfg.get(
+                "recovered_rmp_joint_acceleration_feedforward", 0.0)),
+            filter_length=int(env_cfg.get(
+                "recovered_rmp_output_filter_length", 35)),
+            target_filter_length=int(env_cfg.get(
+                "recovered_rmp_target_filter_length", 10)),
+            estimator_joint_process_var=float(env_cfg.get(
+                "recovered_rmp_estimator_joint_process_var", 50.0)),
+            estimator_joint_measure_var=float(env_cfg.get(
+                "recovered_rmp_estimator_joint_measure_var", 0.0001)),
+        )
+        limits = JointLimits(
+            q_min=np.asarray(self.policy.arm_q_low, dtype=np.float64),
+            q_max=np.asarray(self.policy.arm_q_high, dtype=np.float64),
+            qd_max=np.deg2rad(velocity_deg_s),
+            qdd_max=np.deg2rad(acceleration_deg_s2),
+            qddd_max=np.deg2rad(jerk_deg_s3),
+        )
+        self.rmp_planner = JointRMPPlanner(
+            limits,
+            params,
+            period,
+            use_safety_bounds=bool(env_cfg.get(
+                "recovered_rmp_use_safety_bounds", True)),
+            use_jerk_limit=bool(env_cfg.get(
+                "recovered_rmp_use_jerk_limit", False)),
+        )
+        self.rmp_target_update_delay_steps = int(env_cfg.get(
+            "recovered_rmp_target_update_delay_steps", 3))
+        if not 0 <= self.rmp_target_update_delay_steps < self.substeps:
+            raise RuntimeError(
+                "GPU0 RMP target-update delay lies outside one policy tick")
+        delays = self._checkpoint_vector(
+            "recovered_rmp_output_delay_steps_per_joint",
+            (18.0, 19.0, 19.0, 18.0, 18.0, 18.0, 18.0),
+            dtype=np.float64)
+        if np.any(delays < 0.0):
+            raise RuntimeError("GPU0 RMP output delays must be nonnegative")
+        # Keep checkpoint integer delays bit-for-bit compatible while allowing
+        # a mirror-only fractional-millisecond identification override.  The
+        # recovered RMP advances at 1 kHz, so a fractional delay is represented
+        # by linear interpolation between its two adjacent output samples.
+        self.rmp_output_delay_steps = delays.astype(np.float64)
+        actuator_kp_scale = self._checkpoint_vector(
+            "recovered_rmp_actuator_kp_scale_per_joint", (1.0,) * 7)
+        actuator_kv_scale = self._checkpoint_vector(
+            "recovered_rmp_actuator_kv_scale_per_joint", (1.0,) * 7)
+        if (np.any(actuator_kp_scale <= 0.0)
+                or np.any(actuator_kv_scale <= 0.0)):
+            raise RuntimeError(
+                "GPU0 RMP mirror actuator Kp/Kv scales must be positive")
+        self.model.actuator_gainprm[self.arm_aids, 0] *= actuator_kp_scale
+        self.model.actuator_biasprm[self.arm_aids, 1] *= actuator_kp_scale
+        self.model.actuator_biasprm[self.arm_aids, 2] *= actuator_kv_scale
+        self.rmp_controller_kp = np.asarray(
+            self.model.actuator_gainprm[self.arm_aids, 0], dtype=np.float64)
+        self.rmp_controller_kv = -np.asarray(
+            self.model.actuator_biasprm[self.arm_aids, 2], dtype=np.float64)
+        if np.any(self.rmp_controller_kp <= 0.0):
+            raise RuntimeError("GPU0 RMP position actuators require positive Kp")
+        self.rmp_acceleration_feedforward_s2 = self._checkpoint_vector(
+            "recovered_rmp_acceleration_feedforward_s2", (0.0,) * 7)
+
+    def _reset_recovered_rmp(self, q0: np.ndarray) -> None:
+        if self.rmp_planner is None or self.rmp_output_delay_steps is None:
+            raise RuntimeError("GPU0 recovered RMP was not initialized")
+        q = np.asarray(q0, dtype=np.float64).reshape(len(RIGHT_ARM_JOINTS))
+        zeros = np.zeros_like(q)
+        self.rmp_planner.reset(
+            q, velocity=zeros, acceleration=zeros, target_position=q)
+        buffer_length = max(
+            1, int(np.ceil(np.max(self.rmp_output_delay_steps))))
+        self.rmp_output_q_buffer = np.repeat(q[None, :], buffer_length, axis=0)
+        self.rmp_output_qd_buffer = np.repeat(
+            zeros[None, :], buffer_length, axis=0)
+        self.rmp_output_qdd_buffer = np.repeat(
+            zeros[None, :], buffer_length, axis=0)
+
+    def _push_rmp_output_delay(
+        self,
+        buffer: np.ndarray,
+        value: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        if self.rmp_output_delay_steps is None:
+            raise RuntimeError("GPU0 RMP output delays are unavailable")
+        combined = np.concatenate(
+            (buffer, np.asarray(value, dtype=np.float64)[None, :]), axis=0)
+        delay = np.asarray(self.rmp_output_delay_steps, dtype=np.float64)
+        delay_floor = np.floor(delay).astype(np.int64)
+        delay_fraction = delay - delay_floor
+        newest = combined.shape[0] - 1
+        source_newer = newest - delay_floor
+        source_older = np.maximum(0, source_newer - 1)
+        joints = np.arange(len(RIGHT_ARM_JOINTS))
+        delayed = (
+            (1.0 - delay_fraction) * combined[source_newer, joints]
+            + delay_fraction * combined[source_older, joints]
+        )
+        return combined[1:].copy(), delayed
+
+    def _step_recovered_rmp(self, q_target: np.ndarray) -> np.ndarray:
+        if (self.rmp_planner is None
+                or self.rmp_output_q_buffer is None
+                or self.rmp_output_qd_buffer is None
+                or self.rmp_output_qdd_buffer is None
+                or self.rmp_controller_kp is None
+                or self.rmp_controller_kv is None
+                or self.rmp_acceleration_feedforward_s2 is None):
+            raise RuntimeError("GPU0 recovered RMP state is unavailable")
+        delayed_q = np.asarray(q_target, dtype=np.float64)
+        for servo_index in range(self.substeps):
+            command = self.rmp_planner.step(
+                q_target,
+                target_updated=(
+                    servo_index == self.rmp_target_update_delay_steps),
+            )
+            self.rmp_output_q_buffer, delayed_q = self._push_rmp_output_delay(
+                self.rmp_output_q_buffer, command.position)
+            self.rmp_output_qd_buffer, delayed_qd = self._push_rmp_output_delay(
+                self.rmp_output_qd_buffer, command.velocity)
+            self.rmp_output_qdd_buffer, delayed_qdd = self._push_rmp_output_delay(
+                self.rmp_output_qdd_buffer, command.acceleration)
+            low_level_ctrl_q = np.clip(
+                delayed_q
+                + self.rmp_controller_kv / self.rmp_controller_kp * delayed_qd
+                + self.rmp_acceleration_feedforward_s2 * delayed_qdd,
+                self.policy.arm_q_low,
+                self.policy.arm_q_high,
+            )
+            self.data.ctrl[:] = self.default_ctrl
+            self.data.ctrl[self.arm_aids] = low_level_ctrl_q
+            mj.mj_step(self.model, self.data)
+        # Match the MJX state contract: appliedCommand is the delayed Plan
+        # position output; actuatorTarget separately exposes the qd-equivalent
+        # XML position-actuator control value.
+        return delayed_q.astype(np.float32)
+
     def reset(
         self,
         arm_q: np.ndarray | None = None,
@@ -670,14 +925,14 @@ class RealBallSimMirror:
     ) -> dict[str, Any]:
         self.data = mj.MjData(self.model)
         self.data.ctrl[:] = self.default_ctrl
-        if arm_q is not None and not self._corrected_67d_profile:
+        if arm_q is not None and not self._training_xml_profile:
             q = _finite_vec(arm_q, len(RIGHT_ARM_JOINTS))
             for i, (qadr, aid) in enumerate(zip(self.arm_qadr, self.arm_aids)):
                 self.data.qpos[qadr] = float(q[i])
                 self.data.ctrl[aid] = float(q[i])
         for _ in range(700):
             mj.mj_step(self.model, self.data)
-        if arm_q is not None and self._corrected_67d_profile:
+        if arm_q is not None and self._training_xml_profile:
             # MJX reset first restores its canonical warm state, then the live
             # mirror's force-arm path overwrites q/dq/ctrl without an extra
             # settling interval.  Match that ordering exactly.
@@ -691,7 +946,7 @@ class RealBallSimMirror:
         self.policy.arm_cmd_q = q0.copy()
         self.policy.arm_cmd_qvel = (
             np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float32)
-            if self._corrected_67d_profile
+            if self._training_xml_profile
             else self.data.qvel[self.arm_vadr].astype(np.float32)
         )
         self.policy.last_cmd_q = q0.copy()
@@ -717,7 +972,7 @@ class RealBallSimMirror:
         if self.warm_arm_q is None:
             self.warm_arm_q = q0.copy()
             self.warm_arm_qvel = self.policy.arm_cmd_qvel.copy()
-        if self._ideal_pd_profile:
+        if self._ideal_pd_profile or self._real_rmp_profile:
             # simcode2's ideal-PD plant consumes the current nominal policy
             # command directly.  Keep the public command fields coherent while
             # leaving the legacy software delay/FOPDT state completely unused.
@@ -729,6 +984,8 @@ class RealBallSimMirror:
             self.actuator_command_buffer = None
             self.actuator_delay_steps = 0
             self.actuator_command_buffer_len = 1
+            if self._real_rmp_profile:
+                self._reset_recovered_rmp(q0)
         else:
             self._reset_actuator_model(q0)
         self.frame_seq = 0
@@ -759,7 +1016,7 @@ class RealBallSimMirror:
             return
         p = _finite_vec(ball_pos, 3)
         v = _finite_vec(ball_vel, 3)
-        if self._corrected_67d_profile:
+        if self._training_xml_profile:
             # Probe/policy inputs are already in the base-yaw frame, whereas
             # the MuJoCo free joint is world-frame.  Invert simcode2's
             # _point_to_base/_vel_to_base before injecting the physical ball.
@@ -1153,7 +1410,21 @@ class RealBallSimMirror:
                 observation_scales=getattr(
                     options, "policy_observation_scales", ()),
             )
-            if self._ideal_pd_profile:
+            if self._real_rmp_profile:
+                # The actor performs the one and only qvel->q_ref integration.
+                # The recovered planner then runs once per 1 ms MuJoCo step,
+                # including the checkpoint's target and output delays.
+                q_actuator = np.asarray(q_nominal, dtype=np.float32).copy()
+                q_active = q_actuator.copy()
+                q_applied = self._step_recovered_rmp(q_nominal)
+                if self.rmp_output_q_buffer is None:
+                    raise RuntimeError("GPU0 RMP output state is unavailable")
+                q_actuator_active = self.rmp_output_q_buffer[-1].astype(
+                    np.float32)
+                self.arm_q_ref_active = q_active.copy()
+                self.arm_actuator_q_ref_active = q_actuator_active.copy()
+                self.arm_applied_q = q_applied.copy()
+            elif self._ideal_pd_profile:
                 # New simcode2 checkpoint contract: policy -> current nominal
                 # target -> ideal XML position-actuator PD.  The 72 ms command
                 # history is observation-only and must not delay plant input.
@@ -1176,11 +1447,12 @@ class RealBallSimMirror:
                     options,
                     seed_q=arm_q,
                 )
-            self.data.ctrl[:] = self.default_ctrl
-            for i, aid in enumerate(self.arm_aids):
-                self.data.ctrl[aid] = float(q_applied[i])
-            for _ in range(self.substeps):
-                mj.mj_step(self.model, self.data)
+            if not self._real_rmp_profile:
+                self.data.ctrl[:] = self.default_ctrl
+                for i, aid in enumerate(self.arm_aids):
+                    self.data.ctrl[aid] = float(q_applied[i])
+                for _ in range(self.substeps):
+                    mj.mj_step(self.model, self.data)
         self._set_ball_state(ball_pos, ball_vel)
         mj.mj_forward(self.model, self.data)
         snap = self.snapshot(
@@ -1233,14 +1505,15 @@ class RealBallSimMirror:
         plant_contract = {
             "settingsSource": (
                 "checkpoint_env_cfg"
-                if self._pure_actuator_profile else "configured_xml"),
+                if (self._pure_actuator_profile or self._real_rmp_profile)
+                else "configured_xml"),
             "rightArmPdProfile": str(self.right_arm_pd_profile),
             "controlDtS": round(float(self.dt), 9),
             "mujocoTimestepS": round(float(self.model.opt.timestep), 9),
             "frameSkip": int(self.substeps),
             "jointVelocitySource": "mujoco_data.qvel[jnt_dofadr]",
             "checkpointPlantSettingsAligned": bool(
-                self._pure_actuator_profile),
+                self._pure_actuator_profile or self._real_rmp_profile),
             "backendNumericallyIdenticalToMjx": False,
         }
         if self._pure_actuator_profile:
@@ -1260,13 +1533,33 @@ class RealBallSimMirror:
                     [] if self.pure_actuator_gain is None
                     else self.pure_actuator_gain.tolist()),
             })
+        if self._real_rmp_profile:
+            plant_contract.update({
+                "controlStack": "actor_qvel_integrator_then_recovered_rmp",
+                "actuatorCompensationMode": "none",
+                "rmpPeriodS": round(float(self.model.opt.timestep), 9),
+                "rmpTargetUpdateDelaySteps": int(
+                    self.rmp_target_update_delay_steps),
+                "rmpOutputDelayStepsPerJoint": (
+                    [] if self.rmp_output_delay_steps is None
+                    else self.rmp_output_delay_steps.tolist()),
+                "controllerKp": (
+                    [] if self.rmp_controller_kp is None
+                    else self.rmp_controller_kp.tolist()),
+                "controllerKv": (
+                    [] if self.rmp_controller_kv is None
+                    else self.rmp_controller_kv.tolist()),
+            })
         return {
             "enabled": True,
             "available": True,
             "backend": (
-                "mujoco_ideal_pd_mirror"
-                if self._ideal_pd_profile else "mujoco_actuator_mirror"),
+                "mujoco_recovered_rmp_mirror"
+                if self._real_rmp_profile else (
+                    "mujoco_ideal_pd_mirror"
+                    if self._ideal_pd_profile else "mujoco_actuator_mirror")),
             "policyProfile": self.policy_profile,
+            "policyModel": str(self.cfg.policy_model),
             "timeWallS": round(float(time.time()), 6),
             "valid": bool(ball_valid),
             "age": round(float(max(0.0, ball_obs_age_s)), 6),
@@ -1318,7 +1611,8 @@ class RealBallSimMirror:
                     "available": True,
                     "mode": "none",
                 }
-                if (self._ideal_pd_profile or self._pure_actuator_profile) else {
+                if (self._ideal_pd_profile or self._pure_actuator_profile
+                    or self._real_rmp_profile) else {
                     "error": self.compensation_error,
                     "available": bool(_COMPENSATION_AVAILABLE),
                 }
@@ -1423,6 +1717,9 @@ class RealBallMjxJaxSimMirror:
                 OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
                 OBSERVATION_PROFILE_SIMCODE6_QVEL67,
             })
+        self._real_rmp_profile = (
+            self.policy_profile
+            == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
         self._corrected_67d_profile = uses_corrected_67d_observation(
             self.policy_profile)
         self._logger = logger or _LoggerShim()
@@ -1471,6 +1768,8 @@ class RealBallMjxJaxSimMirror:
                 Simcode5PureActuator67PolicyController),
             OBSERVATION_PROFILE_SIMCODE6_QVEL67: (
                 Simcode6Qvel67PolicyController),
+            OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: (
+                Gpu0QvelRealRmpV85PolicyController),
         }[self.policy_profile]
         self.policy = policy_cls(
             str(Path(cfg.model_path).expanduser().resolve()),
@@ -1602,6 +1901,23 @@ class RealBallMjxJaxSimMirror:
                 "arm_servo_planner_before_actuator_model": False,
                 "arm_actual_state_limiter": False,
                 "ball_obs_age_tracks_stale": False,
+                "dr_randomize_actuator": False,
+                "dr_randomize_actuator_cmd_filter": False,
+                "dr_randomize_second_order_actuator": False,
+            })
+        elif bool(getattr(self, "_real_rmp_profile", False)):
+            # Restore the checkpoint's recovered-RMP + XML-PD simulator plant.
+            # The external probe already supplies the exact held 90 Hz ball
+            # state/age, so only the environment's internal camera sampler is
+            # bypassed. No recovered-RMP component crosses into the real path.
+            fixed.update({
+                "action_filter_tau_ms": 0.0,
+                "action_jerk_limit": 0.0,
+                "enable_anti_windup": False,
+                "actuator_cmd_filter": False,
+                "actuator_compensation_mode": "none",
+                "arm_servo_target_tracking_planner": False,
+                "ball_obs_age_tracks_stale": True,
                 "dr_randomize_actuator": False,
                 "dr_randomize_actuator_cmd_filter": False,
                 "dr_randomize_second_order_actuator": False,
@@ -1772,7 +2088,7 @@ class RealBallMjxJaxSimMirror:
         zeros = jnp.zeros_like(q)
         qpos = state.data.qpos.at[:, self.env.arm_qadr].set(q)
         qvel = state.data.qvel.at[:, self.env.arm_vadr].set(zeros)
-        if self._corrected_67d_profile:
+        if self._corrected_67d_profile or self._real_rmp_profile:
             ctrl = state.data.ctrl.at[:, self.env.arm_aids_j].set(q)
             data = state.data.replace(qpos=qpos, qvel=qvel, ctrl=ctrl)
         else:
@@ -1788,7 +2104,7 @@ class RealBallMjxJaxSimMirror:
             "arm_actuator_q_ref_active": q,
             "arm_applied_q": q,
         }
-        if self._corrected_67d_profile:
+        if self._corrected_67d_profile or self._real_rmp_profile:
             racket_pos = data.site_xpos[:, self.env.racket_site_id]
             command_buffer = jnp.broadcast_to(
                 q[:, None, :], state.command_buffer.shape)
@@ -1915,6 +2231,7 @@ class RealBallMjxJaxSimMirror:
             done = bool(done_seq[index])
             samples.append({
                 "policyProfile": self.policy_profile,
+                "policyModel": str(self.cfg.policy_model),
                 "valid": bool(np.asarray(outputs["valid"][index])),
                 "age": round(float(max(
                     0.0, np.asarray(outputs["age"][index], dtype=np.float32).item())), 6),
@@ -1998,6 +2315,7 @@ class RealBallMjxJaxSimMirror:
             "available": True,
             "backend": "mjx_jax_real_ball",
             "policyProfile": self.policy_profile,
+            "policyModel": str(self.cfg.policy_model),
             "timeWallS": round(float(time.time()), 6),
             "valid": bool(sample["valid"]),
             "age": sample["age"],
@@ -2205,14 +2523,15 @@ class RealBallMjxJaxSimMirror:
         age_seq = age_seq[:n]
         observation_scale_vector = np.ones(
             (self.obs_dim,), dtype=np.float32)
-        candidate_scales = np.asarray(getattr(
-            options, "policy_observation_scales", ()),
-            dtype=np.float32,
-        ).reshape(-1)
-        if candidate_scales.shape == observation_scale_vector.shape:
-            observation_scale_vector = np.where(
-                np.isfinite(candidate_scales), candidate_scales, 1.0,
-            ).astype(np.float32)
+        if not self._real_rmp_profile:
+            candidate_scales = np.asarray(getattr(
+                options, "policy_observation_scales", ()),
+                dtype=np.float32,
+            ).reshape(-1)
+            if candidate_scales.shape == observation_scale_vector.shape:
+                observation_scale_vector = np.where(
+                    np.isfinite(candidate_scales), candidate_scales, 1.0,
+                ).astype(np.float32)
         scale_indices = tuple(np.flatnonzero(
             observation_scale_vector != np.float32(1.0)
         ).astype(int).tolist())
@@ -2331,6 +2650,7 @@ class RealBallMjxJaxSimMirror:
             "available": True,
             "backend": "mjx_jax_real_ball",
             "policyProfile": self.policy_profile,
+            "policyModel": str(self.cfg.policy_model),
             "timeWallS": round(float(time.time()), 6),
             "valid": bool(ball_valid),
             "age": round(float(max(0.0, ball_obs_age_s)), 6),

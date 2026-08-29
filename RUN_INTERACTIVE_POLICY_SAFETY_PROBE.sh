@@ -6,11 +6,28 @@ set -euo pipefail
 
 WORKSPACE_DIR="${WORKSPACE_DIR:-/home/spirit-ai/pingpong_moz1}"
 PROBE_SCRIPT="$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/tools/interactive_policy_safety_probe.py"
+POLICY_RELEASE_VALIDATOR="$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/policy_release_manifest.py"
+POLICY_RELEASE_MANIFEST="${POLICY_RELEASE_MANIFEST:-$WORKSPACE_DIR/config/policy_release_manifest.json}"
+POLICY_RELEASE_ID="${POLICY_RELEASE_ID:-simcode5_v5_recovery}"
 SETUP_FILE="${SETUP_FILE:-$WORKSPACE_DIR/install/setup.bash}"
 CONFIG_DONE_MONITORING_YAML="${CONFIG_DONE_MONITORING_YAML:-$WORKSPACE_DIR/config_done_monitoring.yaml}"
 LOAD_CONFIG_DONE_MONITORING="${LOAD_CONFIG_DONE_MONITORING:-true}"
 _DONE_CONFIG_LOADER="$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/tools/load_done_monitoring_env.py"
 _YAML_EFFECTIVE_KEYS=()
+_POLICY_RELEASE_EXPLICIT_OVERRIDE_KEYS=()
+for _release_override_key in \
+        POLICY_RELEASE_ID POLICY_PROFILE SIMCODE5_MODEL_PATH \
+        SIMCODE5_POLICY_XML_PATH SIMCODE6_MODEL_PATH \
+        SIMCODE6_POLICY_XML_PATH SIMCODE7_MODEL_PATH \
+        SIMCODE7_V85_MODEL_PATH SIMCODE7_V91_MODEL_PATH \
+        SIMCODE7_POLICY_XML_PATH POLICY_OBS_DIM CONTROL_RATE_HZ \
+        BALL_OBSERVATION_RATE_HZ POLICY_DQ_MODE \
+        POLICY_PLANT_MATCHER_MODE POLICY_PLANT_MATCHER_REAL_CONFIG \
+        ALLOW_POLICY_PLANT_MATCHER_APPLY; do
+    if [[ -v $_release_override_key ]]; then
+        _POLICY_RELEASE_EXPLICIT_OVERRIDE_KEYS+=("$_release_override_key")
+    fi
+done
 
 # Interactive probe launch profile defaults. Seed these before optional YAML
 # loading so running this script as-is uses this profile; explicit environment
@@ -56,7 +73,7 @@ if [ "$LOAD_CONFIG_DONE_MONITORING" = "true" ]; then
 fi
 
 MODEL_PATH="${MODEL_PATH:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/outputs/rl_sim/inverse_compensation/18_stage4g_strong_contact_dr_inverse_mpc.pkl}"
-POLICY_PROFILE="${POLICY_PROFILE:-simcode6_qvel67}"
+POLICY_PROFILE="${POLICY_PROFILE:-simcode5_pure_actuator67}"
 SIMCODE2_MODEL_PATH="${SIMCODE2_MODEL_PATH:-$WORKSPACE_DIR/simcode2/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/goal_d455_autolaunch_idealpd67_viewdense_v1_seed976_gpu1_resume_launch14_best55_20260722/launch19_best2040_video_gpu1_seed20260722/policy_launch19_best_u2040_frozen.pkl}"
 SIMCODE2_POLICY_XML_PATH="${SIMCODE2_POLICY_XML_PATH:-$WORKSPACE_DIR/simcode2/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 SIMCODE3_MODEL_PATH="${SIMCODE3_MODEL_PATH:-$WORKSPACE_DIR/simcode3/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/goal_d455_gpu1_resume8_launch19_survival_lr1e4_20260727/mjx_curriculum_best.pkl}"
@@ -68,27 +85,32 @@ SIMCODE5_MODEL_PATH="${SIMCODE5_MODEL_PATH:-$WORKSPACE_DIR/simcode5/pingpong_moz
 SIMCODE5_POLICY_XML_PATH="${SIMCODE5_POLICY_XML_PATH:-$WORKSPACE_DIR/simcode5/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 SIMCODE6_MODEL_PATH="${SIMCODE6_MODEL_PATH:-$WORKSPACE_DIR/simcode6/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/record_new3_plateau_rework_20260812/formal_gpu0_v14_heavy_ball_conservative_n1024_s128_e4_online/mjx_curriculum_last.pkl}"
 SIMCODE6_POLICY_XML_PATH="${SIMCODE6_POLICY_XML_PATH:-$WORKSPACE_DIR/simcode6/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
+SIMCODE7_V85_MODEL_PATH="${SIMCODE7_V85_MODEL_PATH:-$WORKSPACE_DIR/simcode7/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/measured_qvel_rmp_vertical_v85_gpu0_seed20261004_20260828_stage23_failure_time_survival_online1/mjx_curriculum_best.pkl}"
+SIMCODE7_V91_MODEL_PATH="${SIMCODE7_V91_MODEL_PATH:-$WORKSPACE_DIR/simcode7/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/measured_qvel_rmp_vertical_v91_gpu0_seed20261018_20260829_stage24_ceilling_gate_online2/26_rmp91_complete_nonexecution_factorized_commit.pkl}"
+_SIMCODE7_RELEASE_DEFAULT="$SIMCODE7_V85_MODEL_PATH"
+if [ "${POLICY_RELEASE_ID,,}" = "gpu0_qvel_real_rmp_v91" ]; then
+    _SIMCODE7_RELEASE_DEFAULT="$SIMCODE7_V91_MODEL_PATH"
+fi
+SIMCODE7_MODEL_PATH="${SIMCODE7_MODEL_PATH:-$_SIMCODE7_RELEASE_DEFAULT}"
+SIMCODE7_POLICY_XML_PATH="${SIMCODE7_POLICY_XML_PATH:-$WORKSPACE_DIR/simcode7/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 ROBOT_XML="${ROBOT_XML:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/models/moz1_pd.xml}"
 POLICY_OBS_DIM="${POLICY_OBS_DIM:-67}"
-# Policy-only real dq adapter fitted by replaying record_new3's published angle
-# commands through the checkpoint-authoritative simcode5 MJX plant. It is the
-# default real-policy observation path and can still be disabled in the UI.
-if [ -z "${ENABLE_POLICY_DQ_ADAPTER:-}" ]; then
-    case "${POLICY_PROFILE,,}" in
-        simcode5|simcode5_pure_actuator67|pure_actuator67|pure_actuator_67)
-            ENABLE_POLICY_DQ_ADAPTER="true"
-            ;;
-        *)
-            ENABLE_POLICY_DQ_ADAPTER="false"
-            ;;
-    esac
-fi
+# The release declares whether actor q/dq/FK/Jdq are coherent.  The legacy
+# adapter remains available only as an explicitly armed paired ablation.
+POLICY_DQ_MODE="${POLICY_DQ_MODE:-raw_coherent}"
+ENABLE_POLICY_DQ_ADAPTER="${ENABLE_POLICY_DQ_ADAPTER:-false}"
+ALLOW_INCOHERENT_DQ_ABLATION="${ALLOW_INCOHERENT_DQ_ABLATION:-false}"
+INCOHERENT_DQ_ABLATION_MAX_IMPACTS="${INCOHERENT_DQ_ABLATION_MAX_IMPACTS:-0}"
 POLICY_DQ_ADAPTER_GAIN="${POLICY_DQ_ADAPTER_GAIN:-0.8229080313,0.7241145962,0.8223335217,0.8333474552,0.7505777228,0.8204823652,0.7738224499}"
 POLICY_DQ_ADAPTER_TAU_S="${POLICY_DQ_ADAPTER_TAU_S:-0.020,0.0,0.0,0.010,0.0,0.010,0.020}"
 POLICY_DQ_ADAPTER_DELAY_STEPS="${POLICY_DQ_ADAPTER_DELAY_STEPS:-0,0,3,0,2,0,0}"
 # Policy Observation Scale applied to obs[7:14] in both real and sim mirror.
 # Use 0.5 for the requested dq/2 ablation; keep 1.0 with the fitted adapter.
 POLICY_DQ_OBSERVATION_SCALE="${POLICY_DQ_OBSERVATION_SCALE:-1.0}"
+POLICY_PLANT_MATCHER_MODE="${POLICY_PLANT_MATCHER_MODE:-shadow}"
+POLICY_PLANT_MATCHER_REAL_CONFIG="${POLICY_PLANT_MATCHER_REAL_CONFIG:-$WORKSPACE_DIR/config/policy_plant_real_fit_record_new3_v1.json}"
+ALLOW_POLICY_PLANT_MATCHER_APPLY="${ALLOW_POLICY_PLANT_MATCHER_APPLY:-false}"
+POLICY_BALL_HANDOVER_MODE="${POLICY_BALL_HANDOVER_MODE:-legacy_force_fresh}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8765}"
 
@@ -175,7 +197,9 @@ JUGGLE_READY_MAX_BALL_SPEED_M_S="${JUGGLE_READY_MAX_BALL_SPEED_M_S:-0.12}"
 JUGGLE_READY_SETTLE_S="${JUGGLE_READY_SETTLE_S:-0.30}"
 JUGGLE_MAX_BALL_AGE_S="${JUGGLE_MAX_BALL_AGE_S:-0.08}"
 JUGGLE_CONTACT_GRACE_S="${JUGGLE_CONTACT_GRACE_S:-0.06}"
-ENABLE_SAFETY_LIMITER="${ENABLE_SAFETY_LIMITER:-false}"
+# Policy/hold/parking commands must never enter RightArmCommandSafetyLimiter.
+# The Python backend keeps a separate, explicit reset-only call path.
+ENABLE_SAFETY_LIMITER="false"
 SAFETY_PARKING_VELOCITY_SCALE="${SAFETY_PARKING_VELOCITY_SCALE:-0.08}"
 SAFETY_PARKING_ACCELERATION_SCALE="${SAFETY_PARKING_ACCELERATION_SCALE:-0.06}"
 ENABLE_CONTACT_ACTION_SHIELD="${ENABLE_CONTACT_ACTION_SHIELD:-false}"
@@ -224,6 +248,9 @@ if [ -z "${COMPENSATION_PRESET:-}" ]; then
             ;;
         simcode6|simcode6_qvel67|qvel67|qvel_67)
             COMPENSATION_PRESET="simcode6_direct"
+            ;;
+        simcode7|gpu0_qvel_real_rmp|gpu0_qvel_real_rmp_v85|gpu0-qvel/real-rmp)
+            COMPENSATION_PRESET="gpu0_real_rmp_direct"
             ;;
         *)
             COMPENSATION_PRESET="current"
@@ -342,8 +369,24 @@ case "$COMPENSATION_PRESET" in
         COMP_DELAY_MS="45.0"
         COMP_DELAY_CONDITIONING="true"
         ;;
+    gpu0_real_rmp_direct)
+        # The robot controller already owns the physical RMP.  The actor
+        # integrates measured-feedback qvel once and publishes bounded q_ref.
+        ENABLE_COMPENSATION="false"
+        COMPENSATION_MODE="none"
+        CONTROL_RATE_HZ="200.0"
+        POLICY_OBS_DIM="57"
+        COMP_DELAY_MS="0.0"
+        COMP_DELAY_CONDITIONING="false"
+        BALL_OBSERVATION_RATE_HZ="90.0"
+        POLICY_DQ_MODE="raw_coherent"
+        POLICY_DQ_OBSERVATION_SCALE="1.0"
+        POLICY_PLANT_MATCHER_MODE="off"
+        ENABLE_CONTACT_ACTION_SHIELD="false"
+        ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD="false"
+        ;;
     *)
-        echo "Unsupported COMPENSATION_PRESET=$COMPENSATION_PRESET (expected current, simcode2_live_v2, simcode2_offline_v1, simcode3_checkpoint, simcode4_checkpoint, simcode5_direct, or simcode6_direct)" >&2
+        echo "Unsupported COMPENSATION_PRESET=$COMPENSATION_PRESET (expected current, simcode2_live_v2, simcode2_offline_v1, simcode3_checkpoint, simcode4_checkpoint, simcode5_direct, simcode6_direct, or gpu0_real_rmp_direct)" >&2
         exit 2
         ;;
 esac
@@ -358,18 +401,84 @@ REAL_COMP_MPC_TRACKING_WEIGHT="${REAL_COMP_MPC_TRACKING_WEIGHT:-$COMP_MPC_TRACKI
 REAL_COMP_MPC_NOMINAL_WEIGHT="${REAL_COMP_MPC_NOMINAL_WEIGHT:-$COMP_MPC_NOMINAL_WEIGHT}"
 REAL_COMP_MPC_DELTA_WEIGHT="${REAL_COMP_MPC_DELTA_WEIGHT:-$COMP_MPC_DELTA_WEIGHT}"
 REAL_COMP_MPC_MAX_DELTA_RAD="${REAL_COMP_MPC_MAX_DELTA_RAD:-$COMP_MPC_MAX_DELTA_RAD}"
-if [ -z "${BALL_OBSERVATION_RATE_HZ:-}" ]; then
-    case "${POLICY_PROFILE,,}" in
-        simcode6|simcode6_qvel67|qvel67|qvel_67)
-            # Frozen qvel-v14 camera contract: fractional 60 Hz samples held
-            # on the 200 Hz control clock.
-            BALL_OBSERVATION_RATE_HZ="60.0"
-            ;;
+BALL_OBSERVATION_RATE_HZ="${BALL_OBSERVATION_RATE_HZ:-90.0}"
+
+# Resolve and hash the selected release before config-only exits and before
+# any setup file, ROS node, publisher, camera, or policy is initialized.
+if [ ! -f "$POLICY_RELEASE_VALIDATOR" ]; then
+    echo "ERROR: policy release validator not found: $POLICY_RELEASE_VALIDATOR" >&2
+    exit 2
+fi
+case "${POLICY_PROFILE,,}" in
+    simcode5|simcode5_pure_actuator67|pure_actuator67|pure_actuator_67)
+        _RELEASE_CHECKPOINT_CANDIDATE="$SIMCODE5_MODEL_PATH"
+        _RELEASE_XML_CANDIDATE="$SIMCODE5_POLICY_XML_PATH"
+        ;;
+    simcode6|simcode6_qvel67|qvel67|qvel_67)
+        _RELEASE_CHECKPOINT_CANDIDATE="$SIMCODE6_MODEL_PATH"
+        _RELEASE_XML_CANDIDATE="$SIMCODE6_POLICY_XML_PATH"
+        ;;
+    simcode7|gpu0_qvel_real_rmp|gpu0_qvel_real_rmp_v85|gpu0-qvel/real-rmp)
+        _RELEASE_CHECKPOINT_CANDIDATE="$SIMCODE7_MODEL_PATH"
+        _RELEASE_XML_CANDIDATE="$SIMCODE7_POLICY_XML_PATH"
+        ;;
+    *)
+        echo "ERROR: POLICY_PROFILE=$POLICY_PROFILE has no versioned live release in $POLICY_RELEASE_MANIFEST" >&2
+        exit 2
+        ;;
+esac
+_RELEASE_VALIDATE_ARGS=(
+    --manifest "$POLICY_RELEASE_MANIFEST"
+    --release-id "$POLICY_RELEASE_ID"
+    --repo-root "$WORKSPACE_DIR"
+    --policy-profile "$POLICY_PROFILE"
+    --checkpoint-path "$_RELEASE_CHECKPOINT_CANDIDATE"
+    --policy-xml-path "$_RELEASE_XML_CANDIDATE"
+    --observation-dim "$POLICY_OBS_DIM"
+    --control-rate-hz "$CONTROL_RATE_HZ"
+    --deployment-ball-rate-hz "$BALL_OBSERVATION_RATE_HZ"
+    --policy-dq-mode "$POLICY_DQ_MODE"
+    --format shell
+)
+for _release_override_key in "${_POLICY_RELEASE_EXPLICIT_OVERRIDE_KEYS[@]}"; do
+    _RELEASE_VALIDATE_ARGS+=(--explicit-override-key "$_release_override_key")
+done
+if ! _RELEASE_ROWS="$(python3 "$POLICY_RELEASE_VALIDATOR" "${_RELEASE_VALIDATE_ARGS[@]}")"; then
+    exit 2
+fi
+while IFS=$'\t' read -r _RELEASE_KEY _RELEASE_VALUE; do
+    case "$_RELEASE_KEY" in
+        POLICY_RELEASE_ID) POLICY_RELEASE_ID="$_RELEASE_VALUE" ;;
+        POLICY_PROFILE) POLICY_PROFILE="$_RELEASE_VALUE" ;;
+        POLICY_RELEASE_CHECKPOINT_PATH) POLICY_RELEASE_CHECKPOINT_PATH="$_RELEASE_VALUE" ;;
+        POLICY_RELEASE_XML_PATH) POLICY_RELEASE_XML_PATH="$_RELEASE_VALUE" ;;
+        POLICY_RELEASE_MANIFEST_SHA256) POLICY_RELEASE_MANIFEST_SHA256="$_RELEASE_VALUE" ;;
+        POLICY_RELEASE_CHECKPOINT_SHA256) POLICY_RELEASE_CHECKPOINT_SHA256="$_RELEASE_VALUE" ;;
+        POLICY_RELEASE_XML_SHA256) POLICY_RELEASE_XML_SHA256="$_RELEASE_VALUE" ;;
+        POLICY_RELEASE_REPO_HEAD) POLICY_RELEASE_REPO_HEAD="$_RELEASE_VALUE" ;;
+        POLICY_RELEASE_REPO_DIRTY) POLICY_RELEASE_REPO_DIRTY="$_RELEASE_VALUE" ;;
+        POLICY_RELEASE_CONTRACT_JSON) POLICY_RELEASE_CONTRACT_JSON="$_RELEASE_VALUE" ;;
         *)
-            BALL_OBSERVATION_RATE_HZ="90.0"
+            echo "ERROR: unexpected policy release validator key: $_RELEASE_KEY" >&2
+            exit 2
             ;;
     esac
-fi
+done <<< "$_RELEASE_ROWS"
+case "${POLICY_PROFILE,,}" in
+    simcode5_pure_actuator67)
+        SIMCODE5_MODEL_PATH="$POLICY_RELEASE_CHECKPOINT_PATH"
+        SIMCODE5_POLICY_XML_PATH="$POLICY_RELEASE_XML_PATH"
+        ;;
+    simcode6_qvel67)
+        SIMCODE6_MODEL_PATH="$POLICY_RELEASE_CHECKPOINT_PATH"
+        SIMCODE6_POLICY_XML_PATH="$POLICY_RELEASE_XML_PATH"
+        ;;
+    gpu0_qvel_real_rmp_v85)
+        SIMCODE7_MODEL_PATH="$POLICY_RELEASE_CHECKPOINT_PATH"
+        SIMCODE7_POLICY_XML_PATH="$POLICY_RELEASE_XML_PATH"
+        ;;
+esac
+export POLICY_RELEASE_CONTRACT_JSON
 PROBE_BACKEND_CONTROL_LOOP="${PROBE_BACKEND_CONTROL_LOOP:-true}"
 PROBE_CONTROL_SUBPROCESS="${PROBE_CONTROL_SUBPROCESS:-$PROBE_BACKEND_CONTROL_LOOP}"
 PROBE_CONTROL_SUBPROCESS_STARTUP_TIMEOUT_S="${PROBE_CONTROL_SUBPROCESS_STARTUP_TIMEOUT_S:-300.0}"
@@ -386,9 +495,8 @@ PROBE_RECORDING_QUEUE_SIZE="${PROBE_RECORDING_QUEUE_SIZE:-4096}"
 ENABLE_SIM_MIRROR="${ENABLE_SIM_MIRROR:-true}"
 SIM_MIRROR_DEFAULT_ENABLED="${SIM_MIRROR_DEFAULT_ENABLED:-$ENABLE_SIM_MIRROR}"
 SIM_SUBPROCESS="${SIM_SUBPROCESS:-true}"
-# Simcode4 still requires the original MJX planner ordering.  The simcode5
-# CPU mirror restores checkpoint timing, per-joint delay/second-order dynamics,
-# and sport-taskspace PD, so it can use the fast MuJoCo backend by default.
+# Simcode4 still requires the original MJX planner ordering.  Simcode5/6 and
+# simcode7 restore their checkpoint plants on the fast CPU MuJoCo backend.
 SIM_BACKEND="${SIM_BACKEND:-mujoco}"
 case "${POLICY_PROFILE,,}" in
     simcode4|simcode4_servo67|servo67|servo_67)
@@ -401,6 +509,7 @@ SIMCODE3_SIM_XML_PATH="${SIMCODE3_SIM_XML_PATH:-$WORKSPACE_DIR/simcode3/pingpong
 SIMCODE4_SIM_XML_PATH="${SIMCODE4_SIM_XML_PATH:-$WORKSPACE_DIR/simcode4/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 SIMCODE5_SIM_XML_PATH="${SIMCODE5_SIM_XML_PATH:-$WORKSPACE_DIR/simcode5/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 SIMCODE6_SIM_XML_PATH="${SIMCODE6_SIM_XML_PATH:-$WORKSPACE_DIR/simcode6/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
+SIMCODE7_SIM_XML_PATH="${SIMCODE7_SIM_XML_PATH:-$WORKSPACE_DIR/simcode7/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml}"
 SIM_ENABLE_VIDEO="${SIM_ENABLE_VIDEO:-false}"
 SIM_FRAME_RATE_HZ="${SIM_FRAME_RATE_HZ:-90.0}"
 SIM_RENDER_WIDTH="${SIM_RENDER_WIDTH:-640}"
@@ -445,6 +554,10 @@ simcode5|simcode5_pure_actuator67|pure_actuator67|pure_actuator_67)
 simcode6|simcode6_qvel67|qvel67|qvel_67)
     # Held, non-missing fractional 60 Hz observations remain age zero.
     RL_USE_VALID_BALL_OBS_AGE="false"
+    ;;
+simcode7|gpu0_qvel_real_rmp|gpu0_qvel_real_rmp_v85|gpu0-qvel/real-rmp)
+    # V85 tracks held-frame age and fails closed after 350 ms.
+    RL_USE_VALID_BALL_OBS_AGE="true"
     ;;
 esac
 BALL_RELEASE_USE_ESTIMATOR_STATE="${BALL_RELEASE_USE_ESTIMATOR_STATE:-false}"
@@ -509,20 +622,7 @@ USE_HYBRID_DETECTOR="${USE_HYBRID_DETECTOR:-true}"
 USE_DEPTH_SENSOR="${USE_DEPTH_SENSOR:-true}"
 IMAGE_WIDTH="${IMAGE_WIDTH:-848}"
 IMAGE_HEIGHT="${IMAGE_HEIGHT:-480}"
-if [ -z "${REALSENSE_FPS:-}" ]; then
-    case "${POLICY_PROFILE,,}" in
-        simcode6|simcode6_qvel67|qvel67|qvel_67)
-            # Match the checkpoint's physical camera cadence as well as the
-            # policy-side fractional refresh clock.  Capturing at 90 Hz and
-            # merely downsampling would change the raw velocity estimator's
-            # source intervals.
-            REALSENSE_FPS="60"
-            ;;
-        *)
-            REALSENSE_FPS="90"
-            ;;
-    esac
-fi
+REALSENSE_FPS="${REALSENSE_FPS:-90}"
 CAMERA_IMAGE_TOPIC="${CAMERA_IMAGE_TOPIC:-/camera/camera/color/image_raw/compressed}"
 CAMERA_RAW_IMAGE_TOPIC="${CAMERA_RAW_IMAGE_TOPIC:-/camera/camera/color/image_raw}"
 CAMERA_IMAGE_TRANSPORT="${CAMERA_IMAGE_TRANSPORT:-auto}"
@@ -634,18 +734,18 @@ if [ "$ENABLE_HYBRID_BALL_TRACKER" = "true" ]; then
     echo "[ProbeConfig] hybrid tracker config=$HYBRID_BALL_TRACKER_CONFIG_PATH"
 fi
 echo "[ProbeConfig] reset_initial_pose=$RESET_INITIAL_POSE"
-echo "[ProbeConfig] RL profile=$POLICY_PROFILE legacy_model=$MODEL_PATH"
-echo "[ProbeConfig] simcode2 ideal-PD67 model=$SIMCODE2_MODEL_PATH"
-echo "[ProbeConfig] simcode3 actuator67 model=$SIMCODE3_MODEL_PATH"
-echo "[ProbeConfig] simcode4 servo67 model=$SIMCODE4_MODEL_PATH frozen_sim_order=FOPDT->planner real_servo_planner=$SIMCODE4_REAL_SERVO_PLANNER (default off)"
-echo "[ProbeConfig] simcode4 real default order=compensated_angle->physical_joint; opt-in planner requires checkpoint env_cfg planner_before_actuator=true"
-echo "[ProbeConfig] simcode5 pure-actuator67 model=$SIMCODE5_MODEL_PATH real_order=latest_policy_angle->physical_joint mirror_plant=per_joint_delay->second_order->sport_PD"
-echo "[ProbeConfig] simcode6 qvel67 model=$SIMCODE6_MODEL_PATH action=normalized_qvel scale=0.85 filter=15ms slew=30/s real_order=latest_policy_angle->physical_joint"
-echo "[ProbeConfig] sim mirror=$ENABLE_SIM_MIRROR backend=$SIM_BACKEND (simcode4 forces MJX; simcode5/6 CPU restore checkpoint plant settings)"
+echo "[ProbeConfig] release_id=$POLICY_RELEASE_ID profile=$POLICY_PROFILE repo_head=$POLICY_RELEASE_REPO_HEAD dirty=$POLICY_RELEASE_REPO_DIRTY"
+echo "[ProbeConfig] release_manifest=$POLICY_RELEASE_MANIFEST sha256=$POLICY_RELEASE_MANIFEST_SHA256"
+echo "[ProbeConfig] checkpoint=$POLICY_RELEASE_CHECKPOINT_PATH sha256=$POLICY_RELEASE_CHECKPOINT_SHA256"
+echo "[ProbeConfig] policy_xml=$POLICY_RELEASE_XML_PATH sha256=$POLICY_RELEASE_XML_SHA256"
+echo "[ProbeConfig] sim mirror=$ENABLE_SIM_MIRROR backend=$SIM_BACKEND (simcode4 forces MJX; simcode5/6 and GPU0-RMP restore checkpoint plants on CPU MuJoCo)"
 echo "[ProbeConfig] sim compensation_preset=$COMPENSATION_PRESET mode=$COMPENSATION_MODE delay=${COMP_DELAY_MS}ms tau=${COMP_ACTUATOR_TAU_S}s gain=$COMP_ACTUATOR_GAIN beta=$COMP_MPC_BETA tau_scale=$COMP_MPC_TAU_SCALE horizon=$COMP_MPC_HORIZON_STEPS weights=${COMP_MPC_TRACKING_WEIGHT}/${COMP_MPC_NOMINAL_WEIGHT}/${COMP_MPC_DELTA_WEIGHT} max_delta=${COMP_MPC_MAX_DELTA_RAD}rad"
 echo "[ProbeConfig] real-only compensation delay=${REAL_COMP_DELAY_MS}ms tau=${REAL_COMP_ACTUATOR_TAU_S}s gain=$REAL_COMP_ACTUATOR_GAIN beta=$REAL_COMP_MPC_BETA delay_scale=$REAL_COMP_MPC_DELAY_SCALE tau_scale=$REAL_COMP_MPC_TAU_SCALE horizon=$REAL_COMP_MPC_HORIZON_STEPS weights=${REAL_COMP_MPC_TRACKING_WEIGHT}/${REAL_COMP_MPC_NOMINAL_WEIGHT}/${REAL_COMP_MPC_DELTA_WEIGHT} max_delta=$REAL_COMP_MPC_MAX_DELTA_RAD parameter_target=real"
-echo "[ProbeConfig] policy observation=${POLICY_OBS_DIM}D ball_refresh=${BALL_OBSERVATION_RATE_HZ}Hz valid_frame_age=$RL_USE_VALID_BALL_OBS_AGE joint_feedback=measured_q_dq"
-echo "[ProbeConfig] policy dq_adapter=$ENABLE_POLICY_DQ_ADAPTER gain=$POLICY_DQ_ADAPTER_GAIN tau_s=$POLICY_DQ_ADAPTER_TAU_S delay_steps=$POLICY_DQ_ADAPTER_DELAY_STEPS dq_obs_scale=$POLICY_DQ_OBSERVATION_SCALE"
+echo "[ProbeConfig] policy observation=${POLICY_OBS_DIM}D ball_refresh=${BALL_OBSERVATION_RATE_HZ}Hz release_verified=true valid_frame_age=$RL_USE_VALID_BALL_OBS_AGE joint_feedback=atomic_measured_q_dq"
+echo "[ProbeConfig] policy dq_mode=$POLICY_DQ_MODE coherence=$([ "$POLICY_DQ_MODE" = raw_coherent ] && echo coherent || echo incoherent_legacy_ablation) adapter=$ENABLE_POLICY_DQ_ADAPTER allow_incoherent=$ALLOW_INCOHERENT_DQ_ABLATION impact_limit=$INCOHERENT_DQ_ABLATION_MAX_IMPACTS dq_obs_scale=$POLICY_DQ_OBSERVATION_SCALE"
+echo "[ProbeConfig] command safety limiter=hard-disabled reset_only=true"
+echo "[ProbeConfig] plant_matcher mode=$POLICY_PLANT_MATCHER_MODE apply_allowed=$ALLOW_POLICY_PLANT_MATCHER_APPLY real_config=$POLICY_PLANT_MATCHER_REAL_CONFIG"
+echo "[ProbeConfig] ball_handover mode=$POLICY_BALL_HANDOVER_MODE"
 echo "[ProbeConfig] camera=${CAMERA_SOURCE_MODE} ${IMAGE_WIDTH}x${IMAGE_HEIGHT}@${REALSENSE_FPS}Hz yolo=${ENABLE_YOLO} candidate_filter=${ENABLE_HYBRID_CANDIDATE_FILTER} visualization=${ENABLE_CAMERA_VISUALIZATION}@${CAMERA_VISUALIZATION_RATE_HZ}Hz"
 echo "[ProbeConfig] camera depth_mode=$CAMERA_DEPTH_MODE surface_to_center=$ENABLE_SENSOR_SURFACE_TO_CENTER_DEPTH depth_sync=$USE_SYNCHRONIZED_IR_DEPTH median_frames=$DEPTH_TEMPORAL_WINDOW_FRAMES velocity_ls=$CAMERA_VELOCITY_LEAST_SQUARES velocity_frames=$CAMERA_VELOCITY_WINDOW_FRAMES impact_reset=$CAMERA_IMPACT_VELOCITY_RESET"
 echo "[ProbeConfig] contact_action_shield=$ENABLE_CONTACT_ACTION_SHIELD window=${CONTACT_SHIELD_PRE_CONTACT_WINDOW_S}/${CONTACT_SHIELD_POST_CONTACT_WINDOW_S}s normal_xy=$CONTACT_SHIELD_MAX_NORMAL_LATERAL lateral_speed=${CONTACT_SHIELD_MAX_LATERAL_SPEED_M_S}m/s workspace_margin=${CONTACT_SHIELD_WORKSPACE_MARGIN_M}m"
@@ -692,8 +792,8 @@ if [ "$ENABLE_SIM_MIRROR" = "prompt" ] && [ -t 0 ]; then
     SIM_MIRROR_DEFAULT_ENABLED="$ENABLE_SIM_MIRROR"
 fi
 
-# Simcode4's planner order is still MJX-only.  Simcode5 may use the aligned
-# CPU MuJoCo mirror or the original MJX backend selected above/by the operator.
+# Simcode4's planner order is still MJX-only.  Other profiles may use the CPU
+# MuJoCo mirror or an explicitly selected MJX backend.
 if [ "$ENABLE_SIM_MIRROR" = "true" ]; then
     case "${POLICY_PROFILE,,}" in
         simcode4|simcode4_servo67|servo67|servo_67)
@@ -757,11 +857,14 @@ fi
 if [ "$DONE_ENABLE_PREDICTIVE_STOP" != "true" ]; then
     FLOW_ARGS+=(--disable-done-predictive-stop)
 fi
-if [ "$ENABLE_SAFETY_LIMITER" = "true" ]; then
-    FLOW_ARGS+=(--enable-safety-limiter)
-fi
 if [ "$ENABLE_POLICY_DQ_ADAPTER" = "true" ]; then
     FLOW_ARGS+=(--enable-policy-dq-adapter)
+fi
+if [ "$ALLOW_INCOHERENT_DQ_ABLATION" = "true" ]; then
+    FLOW_ARGS+=(--allow-incoherent-dq-ablation)
+fi
+if [ "$ALLOW_POLICY_PLANT_MATCHER_APPLY" = "true" ]; then
+    FLOW_ARGS+=(--allow-policy-plant-matcher-apply)
 fi
 if [ "$ENABLE_CONTACT_ACTION_SHIELD" = "true" ]; then
     FLOW_ARGS+=(--enable-contact-action-shield)
@@ -942,10 +1045,14 @@ fi
 # The probe is a source-tree development tool.  Prefer the files being edited
 # in this workspace over an older colcon install copy; otherwise safety-filter
 # changes in rl_policy/compensation can silently be absent from a live run.
-_PROBE_SOURCE_PYTHONPATH="$WORKSPACE_DIR/src/pingpong_moz1:$WORKSPACE_DIR/src/pingpong_replay"
+_PROBE_SOURCE_PYTHONPATH="$WORKSPACE_DIR:$WORKSPACE_DIR/src/pingpong_moz1:$WORKSPACE_DIR/src/pingpong_replay"
 export PYTHONPATH="$_PROBE_SOURCE_PYTHONPATH${PYTHONPATH:+:$PYTHONPATH}"
 
 ANALYSIS_ARGS=()
+if [ -z "${ANALYSIS:-}" ] && [ -n "${ANALISYS:-}" ]; then
+    ANALYSIS="$ANALISYS"
+    echo "WARNING: ANALISYS is deprecated; use ANALYSIS instead." >&2
+fi
 select_analysis_recording_dir() {
     local mode="${ANALYSIS:-false}"
     local mode_lc="${mode,,}"
@@ -1016,6 +1123,8 @@ select_analysis_recording_dir
 exec python3 "$PROBE_SCRIPT" \
     --host "$HOST" \
     --port "$PORT" \
+    --policy-release-manifest "$POLICY_RELEASE_MANIFEST" \
+    --policy-release-id "$POLICY_RELEASE_ID" \
     --model-path "$MODEL_PATH" \
     --policy-profile "$POLICY_PROFILE" \
     --simcode2-model-path "$SIMCODE2_MODEL_PATH" \
@@ -1028,6 +1137,10 @@ exec python3 "$PROBE_SCRIPT" \
     --simcode5-policy-xml-path "$SIMCODE5_POLICY_XML_PATH" \
     --simcode6-model-path "$SIMCODE6_MODEL_PATH" \
     --simcode6-policy-xml-path "$SIMCODE6_POLICY_XML_PATH" \
+    --simcode7-model-path "$SIMCODE7_MODEL_PATH" \
+    --simcode7-v85-model-path "$SIMCODE7_V85_MODEL_PATH" \
+    --simcode7-v91-model-path "$SIMCODE7_V91_MODEL_PATH" \
+    --simcode7-policy-xml-path "$SIMCODE7_POLICY_XML_PATH" \
     --robot-xml-path "$ROBOT_XML" \
     --policy-obs-dim "$POLICY_OBS_DIM" \
     --reset-initial-pose "$RESET_INITIAL_POSE" \
@@ -1071,7 +1184,12 @@ exec python3 "$PROBE_SCRIPT" \
     --workspace-soft-boundary-joint-speed-scale "$WORKSPACE_SOFT_BOUNDARY_JOINT_SPEED_SCALE" \
     --workspace-hold-trigger-margin-m "$WORKSPACE_HOLD_TRIGGER_MARGIN_M" \
     --ball-noise-std-m "$BALL_NOISE_STD_M" \
+    --policy-ball-handover-mode "$POLICY_BALL_HANDOVER_MODE" \
     --control-rate-hz "$CONTROL_RATE_HZ" \
+    --policy-dq-mode "$POLICY_DQ_MODE" \
+    --incoherent-dq-ablation-max-impacts "$INCOHERENT_DQ_ABLATION_MAX_IMPACTS" \
+    --policy-plant-matcher-mode "$POLICY_PLANT_MATCHER_MODE" \
+    --policy-plant-matcher-real-config "$POLICY_PLANT_MATCHER_REAL_CONFIG" \
     --policy-dq-adapter-gain "$POLICY_DQ_ADAPTER_GAIN" \
     --policy-dq-adapter-tau-s "$POLICY_DQ_ADAPTER_TAU_S" \
     --policy-dq-adapter-delay-steps "$POLICY_DQ_ADAPTER_DELAY_STEPS" \
@@ -1164,6 +1282,7 @@ exec python3 "$PROBE_SCRIPT" \
     --simcode4-sim-xml-path "$SIMCODE4_SIM_XML_PATH" \
     --simcode5-sim-xml-path "$SIMCODE5_SIM_XML_PATH" \
     --simcode6-sim-xml-path "$SIMCODE6_SIM_XML_PATH" \
+    --simcode7-sim-xml-path "$SIMCODE7_SIM_XML_PATH" \
     --sim-frame-rate-hz "$SIM_FRAME_RATE_HZ" \
     --sim-render-width "$SIM_RENDER_WIDTH" \
     --sim-render-height "$SIM_RENDER_HEIGHT" \

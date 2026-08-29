@@ -100,6 +100,7 @@ from pingpong_controller.done_condition_monitor import (
     _wrap_angle_rad,
 )
 from pingpong_controller.mjx_rl_policy import (
+    Gpu0QvelRealRmpV85PolicyController,
     MjxRLPolicyController,
     Simcode2IdealPd67PolicyController,
     Simcode3Actuator67PolicyController,
@@ -114,6 +115,26 @@ from pingpong_controller.policy_dq_observation_adapter import (
     SIMCODE5_DQ_ADAPTER_GAIN,
     SIMCODE5_DQ_ADAPTER_TAU_S,
 )
+from pingpong_controller.policy_release_manifest import (
+    ReleaseContractError,
+    validate_policy_release,
+)
+from pingpong_controller.policy_joint_sample import (
+    PolicyDqMode,
+    PolicyJointSample,
+)
+from pingpong_controller.policy_plant_model_reference import (
+    JointPlantParameters,
+    PlantMatcherFailClosed,
+    PlantMatcherMode,
+    PolicyPlantModelReference,
+    load_real_plant_fit,
+)
+from pingpong_controller.policy_ball_handover import (
+    BoundedHandoverBlend,
+    PolicyBallHandoverMode,
+    is_fractional_refresh,
+)
 from pingpong_controller.racket_ball_tracker import (
     RacketBallTracker,
     RacketBallTrackerConfig,
@@ -127,6 +148,7 @@ from pingpong_controller.racket_juggle_mpc import (
 )
 from pingpong_controller.rl_policy import (
     DEFAULT_ARM_ACC_LIMIT_DEG_S2,
+    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
@@ -258,6 +280,48 @@ DEFAULT_SIMCODE6_POLICY_XML = (
     REPO_ROOT / "simcode6" / "pingpong_moz1-main" / "pingpong_controller"
     / "tools" / "rl_sim" / "moz1_pd.xml"
 )
+DEFAULT_SIMCODE7_V85_MODEL_PATH = (
+    REPO_ROOT / "simcode7" / "pingpong_moz1-main" / "pingpong_controller"
+    / "outputs" / "rl_sim"
+    / "measured_qvel_rmp_vertical_v85_gpu0_seed20261004_20260828_stage23_failure_time_survival_online1"
+    / "mjx_curriculum_best.pkl"
+)
+DEFAULT_SIMCODE7_V91_MODEL_PATH = (
+    REPO_ROOT / "simcode7" / "pingpong_moz1-main" / "pingpong_controller"
+    / "outputs" / "rl_sim"
+    / "measured_qvel_rmp_vertical_v91_gpu0_seed20261018_20260829_stage24_ceilling_gate_online2"
+    / "26_rmp91_complete_nonexecution_factorized_commit.pkl"
+)
+# Backward-compatible default for direct CLI users.
+DEFAULT_SIMCODE7_MODEL_PATH = DEFAULT_SIMCODE7_V85_MODEL_PATH
+GPU0_RMP_MODEL_V85 = "v85"
+GPU0_RMP_MODEL_V91 = "v91"
+GPU0_RMP_MODEL_IDS = (GPU0_RMP_MODEL_V85, GPU0_RMP_MODEL_V91)
+
+
+def _normalize_gpu0_rmp_model(
+    value: object,
+    default: str = GPU0_RMP_MODEL_V85,
+) -> str:
+    text = str(value if value is not None else default).strip().lower()
+    aliases = {
+        "85": GPU0_RMP_MODEL_V85,
+        "v85": GPU0_RMP_MODEL_V85,
+        "gpu0_qvel_real_rmp_v85": GPU0_RMP_MODEL_V85,
+        "91": GPU0_RMP_MODEL_V91,
+        "v91": GPU0_RMP_MODEL_V91,
+        "gpu0_qvel_real_rmp_v91": GPU0_RMP_MODEL_V91,
+    }
+    try:
+        return aliases[text]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown GPU0-QVEL/REAL-RMP model {value!r}; expected V85 or V91"
+        ) from exc
+DEFAULT_SIMCODE7_POLICY_XML = (
+    REPO_ROOT / "simcode7" / "pingpong_moz1-main" / "pingpong_controller"
+    / "tools" / "rl_sim" / "moz1_pd.xml"
+)
 DEFAULT_VISION_MODEL = (
     REPO_ROOT / "src" / "pingpong_moz1" / "pingpong_controller"
     / "models" / "best.pt"
@@ -267,6 +331,8 @@ DEFAULT_CALIBRATION_JSON = (
     / "outputs" / "vision_calib" / "eye_hand_result_848_undistorted.json"
 )
 DEFAULT_IR_PARAMS_JSON = REPO_ROOT / "ir_params.json"
+DEFAULT_POLICY_PLANT_REAL_CONFIG = (
+    REPO_ROOT / "config" / "policy_plant_real_fit_record_new3_v1.json")
 DEFAULT_DEPTH_CORRECTION_MODEL = (
     REPO_ROOT / "src" / "pingpong_moz1" / "pingpong_controller"
     / "depth_correction_model.pkl"
@@ -287,7 +353,13 @@ SIMCODE2_RACKET_LAUNCH_VXY_MAX_M_S = 0.003
 SIMCODE2_RACKET_LAUNCH_VNORMAL_MAX_M_S = 0.003
 SIMCODE2_RACKET_LAUNCH_EDGE_MARGIN_M = 0.005
 SIMCODE2_BALL_RADIUS_M = 0.020
-ANALYSIS_SCHEMA_VERSION = 7
+ANALYSIS_SCHEMA_VERSION = 8
+RECORDING_SCHEMA_VERSION = 11
+# Full browser snapshots are useful for reconstructing the UI, but they are
+# roughly an order of magnitude larger than the control essentials.  The
+# exact 200 Hz policy/sim streams remain available below; recording the full
+# UI state at 10 Hz keeps diagnostics from stealing time from control.
+RECORDING_SNAPSHOT_RATE_HZ = 10.0
 # High-FOV activation must be expressed in image geometry as well as world Z:
 # a tilted camera's top border maps to a different base-frame height at every
 # depth.  These conservative fractions use the raw IR centre (the orange/red
@@ -556,6 +628,10 @@ class ProbeConfig:
     simcode5_policy_xml_path: Path
     simcode6_model_path: Path
     simcode6_policy_xml_path: Path
+    simcode7_model_path: Path
+    simcode7_v85_model_path: Path
+    simcode7_v91_model_path: Path
+    simcode7_policy_xml_path: Path
     robot_xml_path: Path
     policy_obs_dim: int
     reset_initial_pose_id: str
@@ -609,6 +685,12 @@ class ProbeConfig:
     juggle_mpc_terminal_velocity_tolerance_m_s: float
     control_rate_hz: float
     enable_policy_dq_adapter: bool
+    policy_dq_mode: str
+    allow_incoherent_dq_ablation: bool
+    incoherent_dq_ablation_max_impacts: int
+    policy_plant_matcher_mode: str
+    policy_plant_matcher_real_config: Path
+    allow_policy_plant_matcher_apply: bool
     policy_dq_adapter_gain: tuple[float, ...]
     policy_dq_adapter_tau_s: tuple[float, ...]
     policy_dq_adapter_delay_steps: tuple[int, ...]
@@ -685,6 +767,7 @@ class ProbeConfig:
     done_prediction_orientation_margin_rad: float
     ball_noise_std_m: float
     ball_observation_rate_hz: float
+    policy_ball_handover_mode: str
     backend_control_loop: bool
     backend_snapshot_rate_hz: float
     browser_step_rate_hz: float
@@ -841,6 +924,7 @@ class ProbeConfig:
     simcode4_sim_xml_path: Path
     simcode5_sim_xml_path: Path
     simcode6_sim_xml_path: Path
+    simcode7_sim_xml_path: Path
     sim_enable_video_frames: bool
     sim_frame_rate_hz: float
     sim_render_width: int
@@ -1117,12 +1201,51 @@ def _strict_json_dumps(payload: Any, **kwargs: Any) -> str:
     return json.dumps(finite_or_none(payload), allow_nan=False, **kwargs)
 
 
+def _policy_release_contract_payload() -> dict[str, Any]:
+    raw = os.environ.get("POLICY_RELEASE_CONTRACT_JSON", "")
+    if not raw:
+        return {"validated": False, "reason": "contract_environment_missing"}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {"validated": False, "reason": f"invalid_contract_json: {exc}"}
+    if not isinstance(payload, dict):
+        return {"validated": False, "reason": "contract_not_object"}
+    return dict(payload)
+
+
 def _recording_writer_main(
     run_dir_text: str,
     event_q,
     status_q,
     metadata: dict[str, Any],
 ) -> None:
+    # Writing recordings must always lose CPU scheduling priority to the
+    # controller.  This is best-effort because nice(2) may be unavailable on
+    # non-POSIX hosts, while an inability to lower priority is not fatal.
+    try:
+        os.nice(10)
+    except (AttributeError, OSError):
+        pass
+    if not run_dir_text:
+        # The writer is spawned before the control loop starts, then waits for
+        # a recording request.  This keeps Python/JAX module import completely
+        # outside the live 200 Hz interval.
+        try:
+            configure = event_q.get()
+        except (EOFError, OSError, KeyboardInterrupt):
+            return
+        if not isinstance(configure, dict):
+            return
+        if str(configure.get("kind", "")) == "shutdown":
+            return
+        if str(configure.get("kind", "")) != "configure":
+            return
+        run_dir_text = str(configure.get("runDir", ""))
+        configured_metadata = configure.get("metadata")
+        if not run_dir_text or not isinstance(configured_metadata, dict):
+            return
+        metadata = dict(configured_metadata)
     run_dir = Path(run_dir_text)
     frames_dir = run_dir / "frames"
     sim_frames_dir = run_dir / "sim_frames"
@@ -1265,6 +1388,11 @@ def _recording_writer_main(
             publish_status(False)
     except BaseException as exc:  # noqa: BLE001 - propagate to UI.
         publish_status(False, error=str(exc))
+    else:
+        # Reuse the already-imported writer for the next recording.  This
+        # recursive wait adds one tiny Python frame per completed recording
+        # and avoids ever spawning/importing while control is live.
+        _recording_writer_main("", event_q, status_q, {})
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -1386,6 +1514,10 @@ def _analysis_outputs_from_dir(analysis_dir: Path) -> dict[str, str]:
         "ballVelocityXCurve": "ball_velocity_x_curve.png",
         "ballVelocityYCurve": "ball_velocity_y_curve.png",
         "ballVelocityZCurve": "ball_velocity_z_curve.png",
+        "ballRacketPositionCurves": "ball_racket_position_curves.png",
+        "ballRacketContactGapsCsv": "ball_racket_contact_gaps.csv",
+        "ballRacketContactGapsJson": "ball_racket_contact_gaps.json",
+        "ballRacketContactGapsText": "ball_racket_contact_gaps.txt",
         "cameraIrCxCurve": "camera_ir_cx_curve.png",
         "cameraIrCyCurve": "camera_ir_cy_curve.png",
         "cameraSensorDepthCurve": "camera_sensor_depth_curve.png",
@@ -2394,6 +2526,346 @@ def _sim2real_cohort_key(row: dict[str, Any]) -> tuple[str, int, int]:
     return profile, generation, episode
 
 
+def _analysis_point_series(
+    samples: list[dict[str, Any]],
+    *keys: str,
+) -> np.ndarray:
+    values = np.full((len(samples), 3), np.nan, dtype=np.float64)
+    for index, sample in enumerate(samples):
+        point: list[float] | None = None
+        for key in keys:
+            raw: Any = sample
+            for part in key.split("."):
+                if not isinstance(raw, dict):
+                    raw = None
+                    break
+                raw = raw.get(part)
+            point = _point_or_none(raw)
+            if point is not None:
+                break
+        if point is not None:
+            values[index] = np.asarray(point, dtype=np.float64)
+    return values
+
+
+def _observed_ball_position_series(samples: list[dict[str, Any]]) -> np.ndarray:
+    values = np.full((len(samples), 3), np.nan, dtype=np.float64)
+    for index, sample in enumerate(samples):
+        state = _sample_ball_state_6d(sample)
+        if state is not None and np.all(np.isfinite(state[:3])):
+            values[index] = state[:3]
+            continue
+        point = _point_or_none(sample.get("observedBall"))
+        if point is not None:
+            values[index] = np.asarray(point, dtype=np.float64)
+    return values
+
+
+def _predicted_ball_position_series(samples: list[dict[str, Any]]) -> np.ndarray:
+    values = np.full((len(samples), 3), np.nan, dtype=np.float64)
+    for index, sample in enumerate(samples):
+        estimator = sample.get("estimator")
+        estimator = estimator if isinstance(estimator, dict) else {}
+        point = _point_or_none(sample.get("predictedBall"))
+        if point is None:
+            point = _point_or_none(estimator.get("positionM"))
+        if point is not None:
+            values[index] = np.asarray(point, dtype=np.float64)
+    return values
+
+
+def _contact_candidate_indices(
+    samples: list[dict[str, Any]],
+    observed_ball: np.ndarray,
+    racket: np.ndarray,
+    observed_velocity: np.ndarray,
+) -> list[int]:
+    if not samples:
+        return []
+    indices: list[int] = []
+    last_time = -float("inf")
+    for index in range(1, min(len(samples), observed_ball.shape[0], racket.shape[0])):
+        prev_vz = observed_velocity[index - 1, 2]
+        curr_vz = observed_velocity[index, 2]
+        if not (math.isfinite(prev_vz) and math.isfinite(curr_vz)):
+            continue
+        if prev_vz > -0.05 or curr_vz < 0.05:
+            continue
+        if not (np.all(np.isfinite(observed_ball[index]))
+                and np.all(np.isfinite(racket[index]))):
+            continue
+        distance = float(np.linalg.norm(observed_ball[index] - racket[index]))
+        if not math.isfinite(distance) or distance > 0.18:
+            continue
+        t = _row_float(samples[index], "time", index * 0.005)
+        if not math.isfinite(t):
+            t = index * 0.005
+        if t - last_time < 0.08:
+            continue
+        indices.append(index)
+        last_time = t
+    return indices
+
+
+def _finite_mean_abs(values: np.ndarray) -> float | None:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    return float(np.nanmean(np.abs(finite)))
+
+
+def _finite_percentile_abs(values: np.ndarray, percentile: float) -> float | None:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    return float(np.nanpercentile(np.abs(finite), percentile))
+
+
+def _plot_ball_racket_position_curves(
+    samples: list[dict[str, Any]],
+    analysis_dir: Path,
+) -> list[Path]:
+    """Plot racket, raw ball, observed ball, and predicted ball positions."""
+    if not samples:
+        return []
+    t = np.asarray([_row_float(r, "time", i * 0.005)
+                    for i, r in enumerate(samples)], dtype=np.float64)
+    raw_ball = _analysis_point_series(samples, "rawBall")
+    observed_ball = _observed_ball_position_series(samples)
+    predicted_ball = _predicted_ball_position_series(samples)
+    racket = _analysis_point_series(
+        samples, "racket", "ros.eePosition", "workspaceSafety.eePosition",
+        "commandRacket")
+    observed_velocity = _analysis_point_series(
+        samples, "observedVelocity", "policyInput.velocity")
+    if not any(np.any(np.isfinite(values)) for values in (
+            raw_ball, observed_ball, predicted_ball, racket)):
+        return []
+
+    contacts = _contact_candidate_indices(
+        samples, observed_ball, racket, observed_velocity)
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    series = [
+        ("racket", racket, "#4e79a7", "-", 1.25),
+        ("raw ball", raw_ball, "#59a14f", "-", 1.0),
+        ("observed/policy ball", observed_ball, "#9c6ade", "--", 1.15),
+        ("predicted ball", predicted_ball, "#e15759", ":", 1.35),
+    ]
+    axes_names = ("x", "y", "z")
+    fig, axes = plt.subplots(3, 1, figsize=(15, 10), sharex=True)
+    for dim, ax in enumerate(axes):
+        for label, values, color, linestyle, linewidth in series:
+            if np.any(np.isfinite(values[:, dim])):
+                ax.plot(
+                    t, values[:, dim], label=label, color=color,
+                    linestyle=linestyle, linewidth=linewidth)
+        for contact in contacts:
+            contact_t = t[contact] if contact < t.size else float("nan")
+            if math.isfinite(contact_t):
+                ax.axvline(contact_t, color="#b07aa1", alpha=0.35,
+                           linewidth=1.0)
+        ax.set_ylabel(f"{axes_names[dim]} (m)")
+        ax.grid(True, alpha=0.22)
+    axes[0].set_title(
+        "Racket, raw ball, observed ball, and predicted ball position")
+    axes[-1].set_xlabel("time (s)")
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        axes[0].legend(handles, labels, loc="upper right", ncol=2)
+    if contacts:
+        z_ax = axes[2]
+        for contact in contacts[:8]:
+            if contact >= t.size:
+                continue
+            obs_gap = observed_ball[contact, 2] - racket[contact, 2]
+            if not math.isfinite(obs_gap):
+                continue
+            z_ax.annotate(
+                f"{obs_gap * 1000.0:.0f} mm",
+                (t[contact], observed_ball[contact, 2]),
+                textcoords="offset points",
+                xytext=(4, 4),
+                fontsize=7,
+                color="#3f3f46",
+            )
+    fig.tight_layout()
+    out = analysis_dir / "ball_racket_position_curves.png"
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    return [out]
+
+
+def _analyze_ball_racket_contact_gaps(
+    samples: list[dict[str, Any]],
+    analysis_dir: Path,
+) -> dict[str, Any]:
+    """Summarize ball/racket z gaps near contact-like velocity reversals."""
+    raw_ball = _analysis_point_series(samples, "rawBall")
+    measured_ball = _analysis_point_series(samples, "measuredBall")
+    observed_ball = _observed_ball_position_series(samples)
+    predicted_ball = _predicted_ball_position_series(samples)
+    racket = _analysis_point_series(
+        samples, "racket", "ros.eePosition", "workspaceSafety.eePosition",
+        "commandRacket")
+    observed_velocity = _analysis_point_series(
+        samples, "observedVelocity", "policyInput.velocity")
+    contacts = _contact_candidate_indices(
+        samples, observed_ball, racket, observed_velocity)
+
+    csv_path = analysis_dir / "ball_racket_contact_gaps.csv"
+    fieldnames = [
+        "time_s", "source_seq", "observed_vz_m_s", "racket_z_m",
+        "raw_ball_z_m", "measured_ball_z_m", "observed_ball_z_m",
+        "predicted_ball_z_m", "raw_z_gap_mm", "measured_z_gap_mm",
+        "observed_z_gap_mm", "predicted_z_gap_mm", "raw_to_observed_z_mm",
+        "predicted_to_observed_z_mm", "raw_distance_m", "observed_distance_m",
+        "predicted_distance_m", "age_s", "estimator_loss_s",
+        "estimator_extrapolation_s", "camera_sensor_depth_mm",
+        "camera_geometry_depth_mm", "camera_selected_depth_mm",
+        "camera_depth_method", "sim_aligned", "sim_input_match",
+    ]
+
+    def scalar(values: np.ndarray, index: int, dim: int) -> float:
+        if index >= values.shape[0]:
+            return float("nan")
+        value = float(values[index, dim])
+        return value if math.isfinite(value) else float("nan")
+
+    def distance(values: np.ndarray, index: int) -> float:
+        if index >= values.shape[0] or index >= racket.shape[0]:
+            return float("nan")
+        if not (np.all(np.isfinite(values[index]))
+                and np.all(np.isfinite(racket[index]))):
+            return float("nan")
+        return float(np.linalg.norm(values[index] - racket[index]))
+
+    rows: list[dict[str, Any]] = []
+    for index in contacts:
+        sample = samples[index]
+        estimator = sample.get("estimator")
+        estimator = estimator if isinstance(estimator, dict) else {}
+        camera = sample.get("cameraMeasurement")
+        camera = camera if isinstance(camera, dict) else {}
+        rz = scalar(racket, index, 2)
+        raw_z = scalar(raw_ball, index, 2)
+        measured_z = scalar(measured_ball, index, 2)
+        observed_z = scalar(observed_ball, index, 2)
+        predicted_z = scalar(predicted_ball, index, 2)
+        row = {
+            "time_s": _row_float(sample, "time", index * 0.005),
+            "source_seq": _sample_source_seq(sample),
+            "observed_vz_m_s": scalar(observed_velocity, index, 2),
+            "racket_z_m": rz,
+            "raw_ball_z_m": raw_z,
+            "measured_ball_z_m": measured_z,
+            "observed_ball_z_m": observed_z,
+            "predicted_ball_z_m": predicted_z,
+            "raw_z_gap_mm": (raw_z - rz) * 1000.0,
+            "measured_z_gap_mm": (measured_z - rz) * 1000.0,
+            "observed_z_gap_mm": (observed_z - rz) * 1000.0,
+            "predicted_z_gap_mm": (predicted_z - rz) * 1000.0,
+            "raw_to_observed_z_mm": (raw_z - observed_z) * 1000.0,
+            "predicted_to_observed_z_mm": (predicted_z - observed_z) * 1000.0,
+            "raw_distance_m": distance(raw_ball, index),
+            "observed_distance_m": distance(observed_ball, index),
+            "predicted_distance_m": distance(predicted_ball, index),
+            "age_s": _row_float(sample, "age", float("nan")),
+            "estimator_loss_s": _row_float(estimator, "lossS", float("nan")),
+            "estimator_extrapolation_s": _row_float(
+                estimator, "extrapolationS", float("nan")),
+            "camera_sensor_depth_mm": _row_float(
+                camera, "sensor_depth_mm", float("nan")),
+            "camera_geometry_depth_mm": _row_float(
+                camera, "geom_depth_mm", float("nan")),
+            "camera_selected_depth_mm": _row_float(
+                camera, "selected_depth_mm", float("nan")),
+            "camera_depth_method": camera.get("depth_method"),
+            "sim_aligned": sample.get("simAligned"),
+            "sim_input_match": sample.get("simInputMatch"),
+        }
+        rows.append(row)
+
+    with csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+    def array_from_rows(name: str) -> np.ndarray:
+        return np.asarray([float(row.get(name, float("nan")))
+                           for row in rows], dtype=np.float64)
+
+    raw_obs = array_from_rows("raw_to_observed_z_mm")
+    pred_obs = array_from_rows("predicted_to_observed_z_mm")
+    obs_gap = array_from_rows("observed_z_gap_mm")
+    age = array_from_rows("age_s")
+    depth_delta = (
+        array_from_rows("camera_sensor_depth_mm")
+        - array_from_rows("camera_geometry_depth_mm"))
+
+    hints: list[str] = []
+    mean_raw_obs = _finite_mean_abs(raw_obs)
+    mean_pred_obs = _finite_mean_abs(pred_obs)
+    mean_gap = _finite_mean_abs(obs_gap)
+    mean_age = _finite_mean_abs(age)
+    mean_depth_delta = _finite_mean_abs(depth_delta)
+    if not rows:
+        hints.append(
+            "No contact-like observed z-velocity reversals near the racket were detected.")
+    else:
+        if mean_raw_obs is not None and mean_raw_obs > 25.0:
+            hints.append(
+                "Raw and policy-facing ball z differ near contact; inspect estimator smoothing, hold, prediction, or handover.")
+        if mean_pred_obs is not None and mean_pred_obs > 25.0:
+            hints.append(
+                "Predicted ball z diverges from observed ball z near contact; inspect prediction horizon and stale-state handling.")
+        if mean_depth_delta is not None and mean_depth_delta > 35.0:
+            hints.append(
+                "Sensor and geometry depth disagree near contact; inspect depth calibration, masking, and reflective-ball depth selection.")
+        if mean_age is not None and mean_age > 0.04:
+            hints.append(
+                "Ball observation age is high near contact; timing skew or held observations may explain the z gap.")
+        if (mean_gap is not None and mean_gap > 35.0
+                and (mean_raw_obs is None or mean_raw_obs <= 25.0)
+                and (mean_pred_obs is None or mean_pred_obs <= 25.0)):
+            hints.append(
+                "Raw, observed, and predicted ball streams are similar while the racket gap remains; inspect racket site/frame, ball radius, contact timing, or collision geometry before blaming the detector.")
+    if not hints:
+        hints.append(
+            "No single dominant observation fault was detected from contact gaps alone; compare the PNG around each impact marker.")
+
+    report: dict[str, Any] = {
+        "contactCount": len(rows),
+        "summary": {
+            "observedZGapMeanAbsMm": mean_gap,
+            "observedZGapP95AbsMm": _finite_percentile_abs(obs_gap, 95.0),
+            "rawToObservedZMeanAbsMm": mean_raw_obs,
+            "predictedToObservedZMeanAbsMm": mean_pred_obs,
+            "sensorMinusGeometryDepthMeanAbsMm": mean_depth_delta,
+            "ageMeanAbsS": mean_age,
+        },
+        "hints": hints,
+        "csv": csv_path.name,
+    }
+    json_path = analysis_dir / "ball_racket_contact_gaps.json"
+    json_path.write_text(
+        json.dumps(report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    lines = ["Ball/Racket Contact Gap Diagnostics", ""]
+    lines.append(f"contacts: {len(rows)}")
+    for key, value in report["summary"].items():
+        lines.append(f"{key}: {value}")
+    lines.append("")
+    lines.append("hints:")
+    lines.extend(f"- {hint}" for hint in hints)
+    (analysis_dir / "ball_racket_contact_gaps.txt").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8")
+    return report
 def _matrix_slice(
     rows: list[dict[str, Any]],
     key: str,
@@ -3519,6 +3991,22 @@ window.addEventListener('resize', draw); draw();
 
 
 def _obs_names(width: int) -> list[str]:
+    if width == 57:
+        return [
+            *(f"arm_q[{i}]" for i in range(7)),
+            *(f"arm_dq[{i}]" for i in range(7)),
+            "base_q_x", "base_q_y", "base_q_yaw",
+            "base_dq_x", "base_dq_y", "base_dq_yaw",
+            "ball_pos_x", "ball_pos_y", "ball_pos_z",
+            "ball_vel_x", "ball_vel_y", "ball_vel_z",
+            "racket_pos_x", "racket_pos_y", "racket_pos_z",
+            "racket_vel_x", "racket_vel_y", "racket_vel_z",
+            "rel_x", "rel_y", "rel_z",
+            *(f"prev_action[{i}]" for i in range(7)),
+            *(f"arm_dq_delta[{i}]" for i in range(7)),
+            "ball_age_norm",
+            *(f"q_ref_error[{i}]" for i in range(7)),
+        ]
     names = [
         "arm_q[0]", "arm_q[1]", "arm_q[2]", "arm_q[3]", "arm_q[4]", "arm_q[5]", "arm_q[6]",
         "arm_dq[0]", "arm_dq[1]", "arm_dq[2]", "arm_dq[3]", "arm_dq[4]", "arm_dq[5]", "arm_dq[6]",
@@ -3811,6 +4299,10 @@ def _recording_analysis_main(
     status_q,
     video_fps: float,
 ) -> None:
+    try:
+        os.nice(10)
+    except (AttributeError, OSError):
+        pass
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
     run_dir = Path(run_dir_text)
     analysis_dir = run_dir / "analysis"
@@ -3921,6 +4413,13 @@ def _recording_analysis_main(
             outputs[plot_path.stem] = plot_path.name
         for plot_path in _plot_ball_state_curves(samples, analysis_dir):
             outputs[plot_path.stem] = plot_path.name
+        for plot_path in _plot_ball_racket_position_curves(samples, analysis_dir):
+            outputs["ballRacketPositionCurves"] = plot_path.name
+        contact_gap_report = _analyze_ball_racket_contact_gaps(
+            samples, analysis_dir)
+        outputs["ballRacketContactGapsCsv"] = "ball_racket_contact_gaps.csv"
+        outputs["ballRacketContactGapsJson"] = "ball_racket_contact_gaps.json"
+        outputs["ballRacketContactGapsText"] = "ball_racket_contact_gaps.txt"
         for plot_path in _plot_camera_measurement_curves(samples, analysis_dir):
             outputs[plot_path.stem] = plot_path.name
 
@@ -3975,6 +4474,7 @@ def _recording_analysis_main(
             "sim2RealPrimaryGapHint": (
                 (sim_report.get("diagnostics") or {}).get(
                     "primaryGapHint")),
+            "ballRacketContactDiagnostics": contact_gap_report,
             "snapshots": len(snapshots),
             "outputs": outputs,
             "completedWallTimeS": time.time(),
@@ -3997,11 +4497,83 @@ def _recording_analysis_main(
         )
 
 
+def _compact_sim_record_sample(sample: dict[str, Any]) -> dict[str, Any]:
+    """Keep exact sim2real evidence without re-sending static sim metadata."""
+    compact = {
+        "schemaVersion": RECORDING_SCHEMA_VERSION,
+        "enabled": bool(sample.get("enabled", True)),
+        "available": bool(sample.get("available", True)),
+        "active": bool(sample.get("active", False)),
+        "backend": sample.get("backend"),
+        "policyProfile": sample.get("policyProfile"),
+        "policyModel": sample.get("policyModel"),
+        "timeWallS": sample.get("timeWallS"),
+        "valid": bool(sample.get("valid", False)),
+        "age": sample.get("age"),
+        "ball": sample.get("ball"),
+        "velocity": sample.get("velocity"),
+        "jointPosition": sample.get("jointPosition"),
+        "jointVelocity": sample.get("jointVelocity"),
+        "jointAcceleration": sample.get("jointAcceleration"),
+        "jointAccelerationSource": sample.get("jointAccelerationSource"),
+        "actuatorTarget": sample.get("actuatorTarget"),
+        "policyCommand": sample.get("policyCommand"),
+        "compensatedCommand": sample.get("compensatedCommand"),
+        "activeCommand": sample.get("activeCommand"),
+        "activeCompensatedCommand": sample.get("activeCompensatedCommand"),
+        "appliedCommand": sample.get("appliedCommand"),
+        "racket": sample.get("racket"),
+        "racketQuatXyzw": sample.get("racketQuatXyzw"),
+        "policyObs": sample.get("policyObs"),
+        "policyBallObservation": sample.get("policyBallObservation"),
+        "policyAction": sample.get("policyAction"),
+        "policyExecutedAction": sample.get(
+            "policyExecutedAction", sample.get("policyAction")),
+        "command": sample.get("command"),
+        "sync": dict(sample.get("sync") or {}),
+    }
+    unscaled = sample.get("policyObsUnscaled")
+    if (unscaled is not None
+            and not np.array_equal(unscaled, sample.get("policyObs"))):
+        compact["policyObsUnscaled"] = unscaled
+    policy_dq = sample.get("policyJointVelocity")
+    if policy_dq is not None:
+        compact["policyJointVelocity"] = policy_dq
+    dq_contract = sample.get("dqObservationContract")
+    if dq_contract:
+        compact["dqObservationContract"] = dict(dq_contract)
+    return compact
+
+
+def _compact_inactive_diagnostic(payload: Any) -> dict[str, Any]:
+    """Retain full intervention evidence, summarize the common idle case."""
+    if not isinstance(payload, dict):
+        return {}
+    if bool(
+        payload.get("active", False)
+        or payload.get("intervened", False)
+        or payload.get("predicted", False)
+    ):
+        return dict(payload)
+    return {
+        key: payload.get(key)
+        for key in (
+            "configuredEnabled", "enabled", "active", "intervened",
+            "predicted", "state", "reason", "sampleIndex",
+        )
+        if key in payload
+    }
+
+
 class AsyncProbeRecorder:
     def __init__(self, cfg: ProbeConfig):
         self.cfg = cfg
         self.lock = threading.Lock()
-        self.ctx = mp.get_context("spawn")
+        # The writer is spawned during probe construction, before ROS/camera
+        # control starts.  Clicking Record only configures this standby child,
+        # so heavyweight module import never occurs in a live control period.
+        self.start_method = "spawn"
+        self.ctx = mp.get_context(self.start_method)
         self.event_q = None
         self.status_q = None
         self.process: mp.Process | None = None
@@ -4026,11 +4598,25 @@ class AsyncProbeRecorder:
         }
         self.dropped = 0
         self.next_control_record_wall = 0.0
+        self.next_snapshot_record_wall = 0.0
         self.next_frame_record_wall = 0.0
         self.next_sim_frame_record_wall = 0.0
         self.last_frame_seq = -1
         self.last_sim_frame_seq = -1
         self.frozen_source_seq: int | None = None
+        self._spawn_standby_writer()
+
+    def _spawn_standby_writer(self) -> None:
+        self.event_q = self.ctx.Queue(
+            maxsize=max(8, int(self.cfg.recording_queue_size)))
+        self.status_q = self.ctx.Queue(maxsize=1)
+        self.process = self.ctx.Process(
+            target=_recording_writer_main,
+            args=("", self.event_q, self.status_q, {}),
+            name="policy_probe_recording_writer",
+            daemon=False,
+        )
+        self.process.start()
 
     def start(
         self,
@@ -4042,26 +4628,52 @@ class AsyncProbeRecorder:
                 return self.status_locked()
             stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
             self.run_dir = self.cfg.recording_output_root / f"probe_recording_{stamp}"
-            self.event_q = self.ctx.Queue(maxsize=max(8, int(self.cfg.recording_queue_size)))
-            self.status_q = self.ctx.Queue(maxsize=1)
             metadata = {
                 "config": config,
                 "recording": {
                     "controlRateHz": float(self.cfg.recording_control_rate_hz),
+                    "snapshotRateHz": float(RECORDING_SNAPSHOT_RATE_HZ),
                     "imageRateHz": float(self.cfg.recording_image_rate_hz),
                     "queueSize": int(self.cfg.recording_queue_size),
+                    "schemaVersion": int(RECORDING_SCHEMA_VERSION),
+                    "priority": "control_first",
+                    "writerStartMethod": str(self.start_method),
+                    "writerPrestarted": True,
                 },
             }
-            self.process = self.ctx.Process(
-                target=_recording_writer_main,
-                args=(str(self.run_dir), self.event_q, self.status_q, metadata),
-                name="policy_probe_recording_writer",
-                daemon=False,
-            )
-            self.process.start()
+            if (self.process is None or not self.process.is_alive()
+                    or self.event_q is None):
+                self.last_status = {
+                    "active": False,
+                    "runDir": str(self.run_dir),
+                    "counts": {},
+                    "elapsedS": 0.0,
+                    "dropped": int(self.dropped),
+                    "error": (
+                        "standby recording writer is unavailable; recording "
+                        "was not started so control timing stays unaffected"),
+                }
+                return self.status_locked()
+            try:
+                self.event_q.put({
+                    "kind": "configure",
+                    "runDir": str(self.run_dir),
+                    "metadata": metadata,
+                }, timeout=1.0)
+            except (Full, OSError) as exc:
+                self.last_status = {
+                    "active": False,
+                    "runDir": str(self.run_dir),
+                    "counts": {},
+                    "elapsedS": 0.0,
+                    "dropped": int(self.dropped),
+                    "error": f"standby recording writer did not accept start: {exc}",
+                }
+                return self.status_locked()
             self.active = True
             self.dropped = 0
             self.next_control_record_wall = 0.0
+            self.next_snapshot_record_wall = 0.0
             self.next_frame_record_wall = 0.0
             self.next_sim_frame_record_wall = 0.0
             self.last_frame_seq = -1
@@ -4107,19 +4719,27 @@ class AsyncProbeRecorder:
                     self.dropped += 1
                     self.last_status["error"] = (
                         "recording queue did not drain; stop marker was not written")
-        if process is not None:
-            process.join(timeout=5.0)
-            if process.is_alive():
-                _terminate_process_tree(process, "recording writer")
+        flush_complete = False
+        flush_deadline = time.monotonic() + 5.0
+        while process is not None and time.monotonic() < flush_deadline:
+            with self.lock:
+                self._drain_status_locked()
+                flush_complete = bool(
+                    self.last_status.get("active") is False
+                    and self.last_status.get("runDir")
+                    == (str(self.run_dir) if self.run_dir is not None else None)
+                )
+            if flush_complete or not process.is_alive():
+                break
+            time.sleep(0.01)
         with self.lock:
             self.active = False
             run_dir = str(self.run_dir) if self.run_dir is not None else None
+            if not flush_complete:
+                self.last_status["error"] = (
+                    self.last_status.get("error")
+                    or "recording writer did not confirm flush within 5 seconds")
         status = self.status()
-        with self.lock:
-            self.process = None
-            self.event_q = None
-            self.status_q = None
-        _close_mp_queue(q)
         if analyze and run_dir:
             status = self.start_analysis(run_dir)
         return status
@@ -4127,7 +4747,23 @@ class AsyncProbeRecorder:
     def shutdown(self) -> None:
         self.stop()
         with self.lock:
+            writer = self.process
+            writer_q = self.event_q
             process = self.analysis_process
+        if writer is not None and writer.is_alive():
+            if writer_q is not None:
+                try:
+                    writer_q.put({"kind": "shutdown"}, timeout=0.5)
+                except (Full, OSError):
+                    pass
+            writer.join(timeout=1.0)
+            if writer.is_alive():
+                _terminate_process_tree(writer, "standby recording writer")
+        with self.lock:
+            self.process = None
+            self.event_q = None
+            self.status_q = None
+        _close_mp_queue(writer_q)
         if process is not None and process.is_alive():
             process.join(timeout=1.0)
             if process.is_alive():
@@ -4334,6 +4970,12 @@ class AsyncProbeRecorder:
     def record_snapshot(self, snapshot: dict[str, Any] | None) -> None:
         if not isinstance(snapshot, dict):
             return
+        now = time.perf_counter()
+        with self.lock:
+            if not self.active or now < self.next_snapshot_record_wall:
+                return
+            self.next_snapshot_record_wall = (
+                now + 1.0 / max(RECORDING_SNAPSHOT_RATE_HZ, 1e-6))
         self._put({"kind": "snapshot", "snapshot": dict(snapshot)})
 
     def record_control_sample(self, sample: dict[str, Any]) -> None:
@@ -4376,7 +5018,7 @@ class AsyncProbeRecorder:
                     and source_seq is not None
                     and int(source_seq) > frozen_source_seq):
                 continue
-            batch.append(dict(sample))
+            batch.append(_compact_sim_record_sample(sample))
         if not batch:
             return
         self._put({"kind": "sim_control_batch", "samples": batch})
@@ -4672,6 +5314,7 @@ class ContactActionShieldOptions:
 class RuntimeOptions:
     control_mode: str
     policy_profile: str
+    policy_model: str
     enable_policy_dq_adapter: bool
     policy_observation_scales: tuple[float, ...]
     racket_tracking_height_offset_m: float
@@ -4750,6 +5393,7 @@ class RuntimeOptions:
     camera_reacquisition_smoothing: bool
     optimized_ball_prediction_initial_state: bool
     ball_observation_rate_hz: float
+    policy_ball_handover_mode: str
     ball_source: str
     camera: CameraRuntimeOptions
 
@@ -4867,6 +5511,10 @@ def _sim_snapshot_unavailable(
         "available": False,
         "active": bool(active),
         "backend": str(getattr(sim_cfg, "backend", "mujoco")),
+        "policyProfile": str(getattr(
+            sim_cfg, "policy_profile", OBSERVATION_PROFILE_LEGACY_BUG_COMPAT)),
+        "policyModel": str(getattr(
+            sim_cfg, "policy_model", GPU0_RMP_MODEL_V85)),
         "error": reason,
         "frame": {"seq": 0, "ageS": None},
     }
@@ -4875,6 +5523,7 @@ def _sim_snapshot_unavailable(
 def _runtime_options_for_sim_process(options: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key in (
+        "policy_model",
         "policy_profile",
         "policy_observation_scales",
         "enable_compensation",
@@ -4912,6 +5561,12 @@ def _sim_runtime_config_matches(
         return False
     if actual_profile != expected_profile:
         return False
+    if (expected_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+            and _normalize_gpu0_rmp_model(getattr(
+                options, "policy_model", GPU0_RMP_MODEL_V85))
+            != _normalize_gpu0_rmp_model(getattr(
+                sim_cfg, "policy_model", GPU0_RMP_MODEL_V85))):
+        return False
     if not str(backend).startswith("mjx"):
         return True
     expected: dict[str, Any] = {
@@ -4920,7 +5575,9 @@ def _sim_runtime_config_matches(
     }
     # The ideal-PD67 mirror intentionally does not inherit the real robot's
     # inverse-MPC/FOPDT knobs.  Its plant is checkpoint-fixed policy -> XML PD.
-    if expected_profile == OBSERVATION_PROFILE_SIMCODE2_IDEALPD67:
+    if expected_profile in {
+            OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
+            OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85}:
         pass
     else:
         expected.update({
@@ -5004,9 +5661,11 @@ def _sim_mirror_process_main(
     last_frame_seq = -1
     active_profile = normalize_observation_profile(
         getattr(sim_cfg, "policy_profile", None))
+    active_model = _normalize_gpu0_rmp_model(getattr(
+        sim_cfg, "policy_model", GPU0_RMP_MODEL_V85))
     active_generation = 0
     active_cfg = sim_mirror_config_for_policy_profile(
-        sim_cfg, active_profile)
+        replace(sim_cfg, policy_model=active_model), active_profile)
 
     def _request_shutdown(_signum, _frame) -> None:
         shutdown_requested.set()
@@ -5048,6 +5707,7 @@ def _sim_mirror_process_main(
             "info": {
                 **dict(info or {}),
                 "policyProfile": str(active_profile),
+                "policyModel": str(active_model),
                 "policyGeneration": int(active_generation),
             },
         })
@@ -5075,10 +5735,12 @@ def _sim_mirror_process_main(
         snapshot = mirror.snapshot()
         snapshot["active"] = False
         snapshot["policyProfile"] = str(active_profile)
+        snapshot["policyModel"] = str(active_model)
         snapshot["policyGeneration"] = int(active_generation)
         snapshot["sync"] = {
             "ready": True,
             "policyProfile": str(active_profile),
+            "policyModel": str(active_model),
             "policyGeneration": int(active_generation),
             "streamContinuous": True,
             "resultDrops": 0,
@@ -5123,15 +5785,20 @@ def _sim_mirror_process_main(
             if kind == "reset":
                 requested_profile = normalize_observation_profile(
                     cmd.get("policy_profile", active_profile))
+                requested_model = _normalize_gpu0_rmp_model(
+                    cmd.get("policy_model", active_model), active_model)
                 requested_generation = int(
                     cmd.get("policy_generation", active_generation) or 0)
-                if requested_profile != active_profile:
+                if (requested_profile != active_profile
+                        or requested_model != active_model):
                     try:
                         mirror.close()
                     except Exception:
                         pass
                     active_cfg = sim_mirror_config_for_policy_profile(
-                        sim_cfg, requested_profile)
+                        replace(sim_cfg, policy_model=requested_model),
+                        requested_profile,
+                    )
                     mirror = _make_sim_mirror(active_cfg)
                     if hasattr(mirror, "prewarm"):
                         mirror.prewarm(max_batch_steps)
@@ -5145,6 +5812,7 @@ def _sim_mirror_process_main(
                             "sim/control dt mismatch after profile switch: "
                             f"sim={sim_dt_s:.9f}s control={control_dt_s:.9f}s")
                     active_profile = requested_profile
+                    active_model = requested_model
                     last_frame_seq = -1
                 active_generation = requested_generation
                 arm_q = cmd.get("arm_q")
@@ -5166,11 +5834,13 @@ def _sim_mirror_process_main(
                 completion_times.clear()
                 snapshot["active"] = False
                 snapshot["policyProfile"] = str(active_profile)
+                snapshot["policyModel"] = str(active_model)
                 snapshot["policyGeneration"] = int(active_generation)
                 snapshot["sync"] = {
                     "ready": True,
                     "episode": int(cmd.get("episode", 0) or 0),
                     "policyProfile": str(active_profile),
+                    "policyModel": str(active_model),
                     "policyGeneration": int(active_generation),
                     "streamContinuous": True,
                     "resultDrops": 0,
@@ -5186,9 +5856,12 @@ def _sim_mirror_process_main(
                 continue
             command_profile = normalize_observation_profile(
                 cmd.get("policy_profile", active_profile))
+            command_model = _normalize_gpu0_rmp_model(
+                cmd.get("policy_model", active_model), active_model)
             command_generation = int(
                 cmd.get("policy_generation", active_generation) or 0)
             if (command_profile != active_profile
+                    or command_model != active_model
                     or command_generation != active_generation):
                 mismatch = _sim_snapshot_unavailable(
                     active_cfg,
@@ -5199,6 +5872,7 @@ def _sim_mirror_process_main(
                     "ready": True,
                     "episode": int(cmd.get("episode", 0) or 0),
                     "policyProfile": str(active_profile),
+                    "policyModel": str(active_model),
                     "policyGeneration": int(active_generation),
                     "runtimeConfigMatch": False,
                     "streamContinuous": False,
@@ -5238,6 +5912,8 @@ def _sim_mirror_process_main(
                         != int(batch_cmds[0].get("episode", 0) or 0)
                         or str(next_cmd.get("policy_profile", ""))
                         != str(batch_cmds[0].get("policy_profile", ""))
+                        or str(next_cmd.get("policy_model", ""))
+                        != str(batch_cmds[0].get("policy_model", ""))
                         or int(next_cmd.get("policy_generation", -1))
                         != int(batch_cmds[0].get("policy_generation", -1))
                         or dict(next_cmd.get("options") or {})
@@ -5346,6 +6022,7 @@ def _sim_mirror_process_main(
                     "inputAgeS": float(source_cmd.get("age_s", 0.0) or 0.0),
                     "controlMode": str(source_cmd.get("control_mode", "policy")),
                     "policyProfile": str(active_profile),
+                    "policyModel": str(active_model),
                     "policyGeneration": int(active_generation),
                     "runtimeConfigMatch": bool(runtime_config_match),
                     "streamContinuous": bool(stream_continuous),
@@ -5443,6 +6120,8 @@ class SimMirrorSubprocess:
         self.episode = 0
         self.policy_profile = normalize_observation_profile(
             getattr(sim_cfg, "policy_profile", None))
+        self.policy_model = _normalize_gpu0_rmp_model(getattr(
+            sim_cfg, "policy_model", GPU0_RMP_MODEL_V85))
         self.policy_generation = 0
         self.submitted_source_seq: int | None = None
         self.command_drops = 0
@@ -5552,6 +6231,10 @@ class SimMirrorSubprocess:
                             if normalize_observation_profile(sync.get(
                                     "policyProfile")) != self.policy_profile:
                                 continue
+                            if _normalize_gpu0_rmp_model(sync.get(
+                                    "policyModel", self.policy_model)
+                                    ) != self.policy_model:
+                                continue
                             self.completed_samples.append(copied)
                             self.last_completed_stream_seq = max(
                                 self.last_completed_stream_seq,
@@ -5576,6 +6259,7 @@ class SimMirrorSubprocess:
                     if isinstance(info, dict):
                         info_generation = info.get("policyGeneration")
                         info_profile = info.get("policyProfile")
+                        info_model = info.get("policyModel")
                         if (info_generation is not None
                                 and int(info_generation)
                                 != self.policy_generation):
@@ -5583,6 +6267,10 @@ class SimMirrorSubprocess:
                         if (info_profile is not None
                                 and normalize_observation_profile(info_profile)
                                 != self.policy_profile):
+                            continue
+                        if (info_model is not None
+                                and _normalize_gpu0_rmp_model(info_model)
+                                != self.policy_model):
                             continue
                     self.latest_frame = bytes(frame)
                     self.latest_frame_info = (
@@ -5596,6 +6284,7 @@ class SimMirrorSubprocess:
         sync.update({
             "episode": int(self.episode),
             "policyProfile": str(self.policy_profile),
+            "policyModel": str(self.policy_model),
             "policyGeneration": int(self.policy_generation),
             "producedStreamSeq": int(self.stream_seq),
             "producedSourceSeq": self.submitted_source_seq,
@@ -5658,12 +6347,15 @@ class SimMirrorSubprocess:
         ball_valid: bool = False,
         ball_obs_age_s: float = 0.0,
         policy_profile: str | None = None,
+        policy_model: str | None = None,
         policy_generation: int | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             if policy_profile is not None:
                 self.policy_profile = normalize_observation_profile(
                     policy_profile)
+            if policy_model is not None:
+                self.policy_model = _normalize_gpu0_rmp_model(policy_model)
             if policy_generation is not None:
                 self.policy_generation = int(policy_generation)
             self.target_sim_time_s = 0.0
@@ -5685,12 +6377,14 @@ class SimMirrorSubprocess:
                 active=False,
             )
             self.latest_snapshot["policyProfile"] = str(self.policy_profile)
+            self.latest_snapshot["policyModel"] = str(self.policy_model)
             self.latest_snapshot["policyGeneration"] = int(
                 self.policy_generation)
             self.latest_snapshot["sync"] = {
                 "ready": False,
                 "episode": int(episode),
                 "policyProfile": str(self.policy_profile),
+                "policyModel": str(self.policy_model),
                 "policyGeneration": int(self.policy_generation),
                 "streamContinuous": True,
                 "resultDrops": 0,
@@ -5700,6 +6394,7 @@ class SimMirrorSubprocess:
                 "seq": 0,
                 "ageS": None,
                 "policyProfile": str(self.policy_profile),
+                "policyModel": str(self.policy_model),
                 "policyGeneration": int(self.policy_generation),
             }
         # A reset starts a new episode, so it must not wait behind stale work
@@ -5715,6 +6410,7 @@ class SimMirrorSubprocess:
             "kind": "reset",
             "episode": episode,
             "policy_profile": str(self.policy_profile),
+            "policy_model": str(self.policy_model),
             "policy_generation": int(self.policy_generation),
             "arm_q": (
                 None if arm_q is None
@@ -5752,15 +6448,19 @@ class SimMirrorSubprocess:
         camera_stamp_s: float | None,
         control_mode: str,
         policy_profile: str,
+        policy_model: str,
         policy_generation: int,
     ) -> dict[str, Any]:
         profile = normalize_observation_profile(policy_profile)
+        model = _normalize_gpu0_rmp_model(policy_model)
         if (profile != self.policy_profile
+                or model != self.policy_model
                 or int(policy_generation) != self.policy_generation):
             raise RuntimeError(
                 "sim mirror step profile/generation changed without reset: "
                 f"{profile}/{policy_generation} != "
-                f"{self.policy_profile}/{self.policy_generation}")
+                f"{self.policy_profile}/{self.policy_generation}; "
+                f"model={model}/{self.policy_model}")
         self.stream_seq += 1
         self.submitted_source_seq = int(source_seq)
         self.target_sim_time_s += max(
@@ -5775,6 +6475,7 @@ class SimMirrorSubprocess:
             "camera_stamp_s": camera_stamp_s,
             "control_mode": str(control_mode),
             "policy_profile": str(profile),
+            "policy_model": str(model),
             "policy_generation": int(policy_generation),
             "target_sim_time_s": float(self.target_sim_time_s),
             "control_dt_s": float(getattr(self.sim_cfg, "control_dt", 0.005)),
@@ -5897,6 +6598,8 @@ def _policy_uses_valid_ball_obs_age(
             OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
             OBSERVATION_PROFILE_SIMCODE6_QVEL67}:
         return False
+    if profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+        return True
     if uses_corrected_67d_observation(profile):
         return True
     return bool(requested)
@@ -5931,11 +6634,21 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
          "unit": "m"},
         {"name": "previous_executed_action", "start": 35, "stop": 42,
          "unit": "normalized"},
-        {"name": "command_tracking_error", "start": 42, "stop": 49,
-         "unit": "rad"},
+        {"name": (
+            "measured_velocity_delta"
+            if expected_obs_dim == 57 else "command_tracking_error"),
+         "start": 42, "stop": 49,
+         "unit": "rad/s" if expected_obs_dim == 57 else "rad"},
         {"name": "ball_observation_age", "start": 49, "stop": 50,
          "unit": "normalized"},
     ]
+    if expected_obs_dim == 57:
+        observation_segments.append({
+            "name": "bounded_q_reference_error",
+            "start": 50,
+            "stop": 57,
+            "unit": "rad",
+        })
     if expected_obs_dim == 67:
         observation_segments.extend([
             {"name": "actuator_delay", "start": 50, "stop": 51,
@@ -5959,6 +6672,9 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             and model_action_shape == (action_dim,)),
         "observationProfile": str(getattr(
             controller, "observation_profile", "")),
+        "policyModel": str(getattr(controller, "policy_model_id", "")),
+        "checkpointSha256": str(getattr(
+            controller, "_checkpoint_sha256", "")),
         "actionCommandMode": action_mode,
         "actionVelocityScale": float(getattr(
             controller, "action_velocity_scale", 1.0)),
@@ -6365,6 +7081,9 @@ class RosBridgeNode(Node):
         self.latest_joint_sample_dt_s: float | None = None
         self.latest_joint_header_stamp_s: float | None = None
         self.latest_joint_sample_stamp_source: str = "unavailable"
+        self.latest_joint_source_sequence: int = -1
+        self.latest_joint_repeated_source_sample: bool = False
+        self.latest_joint_source_fault: str = ""
         self.latest_joint_dq_source: str = "unavailable"
         self.latest_joint_ddq_source: str = "unavailable"
         self.latest_cart_pos: np.ndarray | None = None
@@ -6600,6 +7319,8 @@ class RosBridgeNode(Node):
                 self.latest_joint_stamp_monotonic_s)
             previous_q = self.latest_joint_q
             previous_dq = self.latest_joint_dq
+            previous_source_sequence = int(getattr(
+                self, "latest_joint_source_sequence", -1))
             repeated_sample = bool(
                 header_stamp_s is not None
                 and previous_header_stamp is not None
@@ -6619,6 +7340,8 @@ class RosBridgeNode(Node):
                         if header_stamp_s is not None
                         else stamp_monotonic_s)
                 sample_stamp_source = "header_repeat"
+                source_sequence = previous_source_sequence
+                source_fault = ""
             else:
                 # Keep one local effective sample clock and advance it only by
                 # a same-domain interval. Never compare/add the absolute ROS
@@ -6669,6 +7392,14 @@ class RosBridgeNode(Node):
                 else:
                     sample_stamp_s = float(np.nextafter(
                         previous_sample_stamp, np.inf))
+                source_sequence = previous_source_sequence + 1
+                source_fault = ""
+                if (header_stamp_s is not None
+                        and previous_header_stamp is not None
+                        and header_stamp_s < previous_header_stamp):
+                    # Keep receipt-clock diagnostics available, but do not
+                    # launder a regressing source clock into a valid sample.
+                    source_fault = "source_time_regression"
             if not np.all(np.isfinite(dq)):
                 dq = None
                 previous_stamp = previous_sample_stamp
@@ -6726,6 +7457,9 @@ class RosBridgeNode(Node):
             # and the following contiguous frame resumes header dt.
             self.latest_joint_header_stamp_s = header_stamp_s
             self.latest_joint_sample_stamp_source = sample_stamp_source
+            self.latest_joint_source_sequence = source_sequence
+            self.latest_joint_repeated_source_sample = repeated_sample
+            self.latest_joint_source_fault = source_fault
             self.latest_joint_dq_source = dq_source
             self.latest_joint_ddq_source = ddq_source
 
@@ -8305,6 +9039,10 @@ class RosBridgeNode(Node):
             sample_dt_s = self.latest_joint_sample_dt_s
             sample_stamp_source = str(
                 self.latest_joint_sample_stamp_source)
+            source_sequence = int(self.latest_joint_source_sequence)
+            repeated_source_sample = bool(
+                self.latest_joint_repeated_source_sample)
+            source_fault = str(self.latest_joint_source_fault)
             header_stamp_s = self.latest_joint_header_stamp_s
             receipt_wall_s = self.latest_joint_stamp_wall
             header_receipt_lag_s = (
@@ -8320,6 +9058,9 @@ class RosBridgeNode(Node):
             "jointHeaderReceiptLagS": header_receipt_lag_s,
             "jointReceiptAgeS": age_s,
             "jointVelocitySource": dq_source,
+            "jointSourceSequence": source_sequence,
+            "jointRepeatedSourceSample": repeated_source_sample,
+            "jointSourceFault": source_fault,
             "jointAcceleration": (
                 None if ddq is None else _rounded_vector(ddq)),
             "jointAccelerationSource": ddq_source,
@@ -8696,6 +9437,18 @@ class PolicySafetyProbe:
         self.policy_ball_sample_age_s = 0.0
         self.policy_ball_sample_has_valid = False
         self.policy_ball_sample_source_stamp_s: float | None = None
+        self.policy_ball_handover_blend = BoundedHandoverBlend(
+            max_position_innovation_m=float(
+                cfg.high_ball_prediction_reacquisition_gate_m),
+            max_velocity_innovation_m_s=8.0,
+            duration_s=float(cfg.high_ball_reacquisition_velocity_blend_s),
+        )
+        self.policy_ball_handover_pending = False
+        self.last_policy_ball_handover_info: dict[str, Any] = {
+            "mode": str(cfg.policy_ball_handover_mode),
+            "state": "uninitialized",
+        }
+        self.previous_policy_action_for_handover: np.ndarray | None = None
         self.compensator = None
         self.compensation_error: str | None = None
         self.compensation_was_enabled = False
@@ -8783,54 +9536,31 @@ class PolicySafetyProbe:
         self.control_reset_request_id = 0
         self.reset_ball_rng = np.random.default_rng()
         self.recorder = AsyncProbeRecorder(cfg)
-        legacy_controller = MjxRLPolicyController(
-            str(cfg.model_path),
-            dt=cfg.control_dt,
-            robot_xml_path=str(cfg.robot_xml_path),
-            enable_delay_conditioning=(cfg.policy_obs_dim == 67),
-            use_valid_ball_obs_age=cfg.rl_use_valid_ball_obs_age,
-            observation_profile=OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
-        )
-        idealpd67_controller = Simcode2IdealPd67PolicyController(
-            str(cfg.simcode2_model_path),
-            dt=cfg.control_dt,
-            robot_xml_path=str(cfg.simcode2_policy_xml_path),
-            use_valid_ball_obs_age=cfg.rl_use_valid_ball_obs_age,
-        )
-        actuator67_controller = Simcode3Actuator67PolicyController(
-            str(cfg.simcode3_model_path),
-            dt=cfg.control_dt,
-            robot_xml_path=str(cfg.simcode3_policy_xml_path),
-            use_valid_ball_obs_age=True,
-        )
-        servo67_controller = Simcode4Servo67PolicyController(
-            str(cfg.simcode4_model_path),
-            dt=cfg.control_dt,
-            robot_xml_path=str(cfg.simcode4_policy_xml_path),
-        )
-        pure_actuator67_controller = Simcode5PureActuator67PolicyController(
-            str(cfg.simcode5_model_path),
-            dt=cfg.control_dt,
-            robot_xml_path=str(cfg.simcode5_policy_xml_path),
-        )
-        qvel67_controller = Simcode6Qvel67PolicyController(
-            str(cfg.simcode6_model_path),
-            dt=cfg.control_dt,
-            robot_xml_path=str(cfg.simcode6_policy_xml_path),
-        )
-        self.policy_controllers = {
-            OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: legacy_controller,
-            OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: idealpd67_controller,
-            OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67: actuator67_controller,
-            OBSERVATION_PROFILE_SIMCODE4_SERVO67: servo67_controller,
-            OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: (
-                pure_actuator67_controller),
-            OBSERVATION_PROFILE_SIMCODE6_QVEL67: qvel67_controller,
-        }
         self.active_policy_profile = normalize_observation_profile(
             cfg.policy_profile)
         self.policy_generation = 0
-        self.controller = self.policy_controllers[self.active_policy_profile]
+        self.controller = self._build_release_locked_policy_controller(
+            self.active_policy_profile)
+        self.active_policy_model = str(getattr(
+            self.controller, "policy_model_id", ""))
+        # Profiles remain release-locked.  The GPU0 profile additionally
+        # exposes its two explicitly hash-pinned actors and loads the alternate
+        # lazily when the operator selects it.
+        self.policy_controllers = {
+            self.active_policy_profile: self.controller,
+        }
+        self.policy_model_controllers = {
+            self.active_policy_model: self.controller,
+        } if self.active_policy_model else {}
+        self.policy_plant_matcher: PolicyPlantModelReference | None = None
+        self.last_policy_plant_matcher_info: dict[str, Any] = {
+            "mode": str(cfg.policy_plant_matcher_mode),
+            "initialized": False,
+        }
+        self.last_matcher_shadow_q = np.asarray(
+            self.controller.current_arm_cmd_q(), dtype=np.float64).copy()
+        self.last_matcher_pre_safety_q = self.last_matcher_shadow_q.copy()
+        self._init_policy_plant_matcher()
         self.racket_tracker = RacketBallTracker(
             kinematics=self.controller._compute_racket_pose_jacobians_base,
             nominal_q_rad=self.safe_q,
@@ -8950,6 +9680,122 @@ class PolicySafetyProbe:
         if self.cfg.backend_control_loop:
             self._start_backend_control_loop()
 
+    def _build_release_locked_policy_controller(
+        self,
+        profile: str,
+        policy_model: str | None = None,
+    ):
+        cfg = self.cfg
+        gpu0_model_paths = {
+            GPU0_RMP_MODEL_V85: cfg.simcode7_v85_model_path,
+            GPU0_RMP_MODEL_V91: cfg.simcode7_v91_model_path,
+        }
+        gpu0_model_path = (
+            cfg.simcode7_model_path
+            if policy_model is None
+            else gpu0_model_paths[_normalize_gpu0_rmp_model(policy_model)]
+        )
+        builders = {
+            OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: lambda: MjxRLPolicyController(
+                str(cfg.model_path),
+                dt=cfg.control_dt,
+                robot_xml_path=str(cfg.robot_xml_path),
+                enable_delay_conditioning=(cfg.policy_obs_dim == 67),
+                use_valid_ball_obs_age=cfg.rl_use_valid_ball_obs_age,
+                observation_profile=OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+            ),
+            OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: lambda: (
+                Simcode2IdealPd67PolicyController(
+                    str(cfg.simcode2_model_path),
+                    dt=cfg.control_dt,
+                    robot_xml_path=str(cfg.simcode2_policy_xml_path),
+                    use_valid_ball_obs_age=cfg.rl_use_valid_ball_obs_age,
+                )),
+            OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67: lambda: (
+                Simcode3Actuator67PolicyController(
+                    str(cfg.simcode3_model_path),
+                    dt=cfg.control_dt,
+                    robot_xml_path=str(cfg.simcode3_policy_xml_path),
+                    use_valid_ball_obs_age=True,
+                )),
+            OBSERVATION_PROFILE_SIMCODE4_SERVO67: lambda: (
+                Simcode4Servo67PolicyController(
+                    str(cfg.simcode4_model_path),
+                    dt=cfg.control_dt,
+                    robot_xml_path=str(cfg.simcode4_policy_xml_path),
+                )),
+            OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: lambda: (
+                Simcode5PureActuator67PolicyController(
+                    str(cfg.simcode5_model_path),
+                    dt=cfg.control_dt,
+                    robot_xml_path=str(cfg.simcode5_policy_xml_path),
+                )),
+            OBSERVATION_PROFILE_SIMCODE6_QVEL67: lambda: (
+                Simcode6Qvel67PolicyController(
+                    str(cfg.simcode6_model_path),
+                    dt=cfg.control_dt,
+                    robot_xml_path=str(cfg.simcode6_policy_xml_path),
+                )),
+            OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: lambda: (
+                Gpu0QvelRealRmpV85PolicyController(
+                    str(gpu0_model_path),
+                    dt=cfg.control_dt,
+                    robot_xml_path=str(cfg.simcode7_policy_xml_path),
+                )),
+        }
+        try:
+            return builders[normalize_observation_profile(profile)]()
+        except KeyError as exc:
+            raise RuntimeError(
+                f"no controller builder for release profile {profile!r}") from exc
+
+    def _init_policy_plant_matcher(self) -> None:
+        mode = PlantMatcherMode.parse(self.cfg.policy_plant_matcher_mode)
+        if self.active_policy_profile not in {
+                OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+                OBSERVATION_PROFILE_SIMCODE6_QVEL67}:
+            if mode is not PlantMatcherMode.OFF:
+                raise RuntimeError(
+                    "policy plant matcher is only defined for release-locked "
+                    "simcode5/simcode6 second-order plants")
+            return
+        env_cfg = dict(getattr(
+            self.controller, "_checkpoint_env_cfg", {}) or {})
+        target = JointPlantParameters.from_checkpoint_env_cfg(env_cfg)
+        fit_metadata, real, solver = load_real_plant_fit(
+            self.cfg.policy_plant_matcher_real_config)
+        release_contract = _policy_release_contract_payload()
+        release_hash_match = bool(
+            release_contract.get("validated", False)
+            and release_contract.get("policy_profile")
+            == self.active_policy_profile)
+        warm_q = np.asarray(
+            self.controller.current_arm_cmd_q(), dtype=np.float64).reshape(7)
+        self.policy_plant_matcher = PolicyPlantModelReference(
+            target_parameters=target,
+            real_parameters=real,
+            solver=solver,
+            mode=mode.value,
+            dt_s=self.cfg.control_dt,
+            warm_q=warm_q,
+            q_low=self.controller.arm_q_low,
+            q_high=self.controller.arm_q_high,
+            dq_limit=self.controller.arm_vel_limit_rad_s,
+            allow_apply=self.cfg.allow_policy_plant_matcher_apply,
+            release_hash_match=release_hash_match,
+            real_fit_metadata=fit_metadata,
+        )
+        self.last_policy_plant_matcher_info = {
+            "mode": mode.value,
+            "initialized": True,
+            "applyAuthorized": self.policy_plant_matcher.apply_authorized,
+            "realFitId": fit_metadata.get("fit_id"),
+            "realFitVersion": fit_metadata.get("fit_version"),
+            "provenanceStatus": fit_metadata.get("provenance_status"),
+            "applyEligible": bool(fit_metadata.get("apply_eligible", False)),
+            "holdoutMetrics": fit_metadata.get("holdout_metrics"),
+        }
+
     def reset(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload if isinstance(payload, dict) else {}
         preset_raw = (
@@ -8964,6 +9810,8 @@ class PolicySafetyProbe:
         with self.lock:
             if "policyProfile" in payload:
                 self._select_policy_profile(payload["policyProfile"])
+            if "policyModel" in payload:
+                self._select_policy_model(payload["policyModel"])
             try:
                 reset_request_id = int(payload.get(
                     "_controlResetRequestId", self.control_reset_request_id))
@@ -8986,6 +9834,13 @@ class PolicySafetyProbe:
             self.policy_reentry_reset_q = np.asarray(
                 reset_target_q, dtype=np.float32).copy()
             self.last_policy_execution_trace = None
+            self.current_policy_joint_sample = None
+            self.last_policy_joint_sample = None
+            self.policy_joint_sample_error = "joint_state_uninitialized"
+            self.previous_policy_action_for_handover = None
+            if self.policy_plant_matcher is not None:
+                self.policy_plant_matcher.initialized = False
+                self.policy_plant_matcher.previous_sample = None
             self._sync_policy_to_safe_pose(reset_target_q)
             reset_ball_pos, reset_ball_vel, reset_ball_contract = (
                 self._reset_ball_state(reset_target_q))
@@ -9000,6 +9855,7 @@ class PolicySafetyProbe:
                             ball_valid=False,
                             ball_obs_age_s=0.0,
                             policy_profile=self.active_policy_profile,
+                            policy_model=self.active_policy_model,
                             policy_generation=self.policy_generation,
                         )
                     else:
@@ -9160,7 +10016,9 @@ class PolicySafetyProbe:
     ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
         """Return the profile-specific reset ball contract."""
         velocity = np.zeros(3, dtype=np.float32)
-        if uses_corrected_67d_observation(self.active_policy_profile):
+        if (uses_corrected_67d_observation(self.active_policy_profile)
+                or self.active_policy_profile
+                == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
             env_cfg = dict(getattr(
                 self.controller, "_checkpoint_env_cfg", {}) or {})
             frame_getter = getattr(
@@ -9309,6 +10167,11 @@ class PolicySafetyProbe:
         self.controller.last_cmd_qvel = self.controller.arm_cmd_qvel.copy()
         self.controller.last_cmd_qacc = np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float32)
         self.controller.last_action = np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float32)
+        if (getattr(self, "active_policy_profile", "")
+                == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
+            self.controller.prev_action = np.zeros(
+                len(RIGHT_ARM_JOINTS), dtype=np.float32)
+            self.controller._gpu0_requires_measured_reset = True
         try:
             rpos_base, ok = self.controller._compute_racket_pose_base(q)
             if ok:
@@ -9456,21 +10319,27 @@ class PolicySafetyProbe:
         self.last_policy_dq_adapter_info = adapter.status()
 
     def _mark_policy_paused(self) -> None:
-        """Fence both policy histories at a non-policy control interval."""
+        """Fence real-policy histories at a non-policy control interval.
+
+        The simulation mirror is observational and cannot affect hardware.
+        A transient real-side hold must therefore not destroy its plant,
+        policy, or delay history.  Mirror resets are reserved for actual
+        policy-session boundaries such as an explicit reset or profile/model
+        switch.
+        """
         self.policy_needs_reentry_reset = True
-        self.sim_needs_policy_reset = True
         self._reset_policy_dq_adapter("policy_paused")
 
     def _select_policy_profile(self, requested_profile: object) -> bool:
-        """Atomically select the real actor/observation contract pair.
-
-        Both actors are preloaded at startup.  A profile change only swaps the
-        ready controller, fences all policy/compensator history, and advances a
-        generation used to reject stale asynchronous sim-mirror results.
-        """
+        """Reject runtime profile changes outside the validated release."""
         profile = normalize_observation_profile(requested_profile)
         if profile == self.active_policy_profile:
             return False
+        if profile not in self.policy_controllers:
+            raise RuntimeError(
+                f"runtime policy profile {profile!r} does not match validated "
+                f"release profile {self.active_policy_profile!r}; restart with "
+                "a matching POLICY_RELEASE_ID")
         reset_q = np.asarray(
             self._safety_limiter_reset_reference(), dtype=np.float32).reshape(-1)
         self.active_policy_profile = profile
@@ -9490,6 +10359,49 @@ class PolicySafetyProbe:
         self.sim_needs_policy_reset = True
         self.last_policy_execution_trace = None
         self._reset_policy_dq_adapter("policy_profile_changed")
+        self.last_control_mode = None
+        return True
+
+    def _select_policy_model(self, requested_model: object) -> bool:
+        """Switch between the two hash-pinned simcode7 actors."""
+        if self.active_policy_profile != (
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
+            return False
+        model_id = _normalize_gpu0_rmp_model(
+            requested_model,
+            self.active_policy_model or GPU0_RMP_MODEL_V85,
+        )
+        if model_id == self.active_policy_model:
+            return False
+        controller = self.policy_model_controllers.get(model_id)
+        if controller is None:
+            controller = self._build_release_locked_policy_controller(
+                self.active_policy_profile, model_id)
+            loaded_model_id = str(getattr(
+                controller, "policy_model_id", ""))
+            if loaded_model_id != model_id:
+                raise RuntimeError(
+                    "GPU0-QVEL/REAL-RMP selected model does not match its "
+                    f"approved checkpoint: requested={model_id}, "
+                    f"loaded={loaded_model_id or 'unknown'}")
+            self.policy_model_controllers[model_id] = controller
+        reset_q = np.asarray(
+            self._safety_limiter_reset_reference(), dtype=np.float32).reshape(-1)
+        self.active_policy_model = model_id
+        self.controller = controller
+        self.policy_controllers[self.active_policy_profile] = controller
+        self.policy_generation += 1
+        self.controller.reset()
+        self._sync_policy_to_safe_pose(reset_q)
+        self._reset_compensator_to_current_arm(reset_q)
+        self._reset_servo_target_planner(reset_q)
+        self._reset_policy_ball_sampling_contract()
+        self.compensation_was_enabled = False
+        self.policy_reentry_reset_q = reset_q.copy()
+        self.policy_needs_reentry_reset = True
+        self.sim_needs_policy_reset = True
+        self.last_policy_execution_trace = None
+        self._reset_policy_dq_adapter("policy_model_changed")
         self.last_control_mode = None
         return True
 
@@ -9575,6 +10487,8 @@ class PolicySafetyProbe:
             policy_obs_dim=self.cfg.policy_obs_dim,
             control_dt=self.cfg.control_dt,
             policy_profile=self.cfg.policy_profile,
+            policy_model=(
+                self.active_policy_model or GPU0_RMP_MODEL_V85),
             simcode2_model_path=self.cfg.simcode2_model_path,
             simcode2_policy_xml_path=self.cfg.simcode2_policy_xml_path,
             simcode2_sim_xml_path=self.cfg.simcode2_sim_xml_path,
@@ -9606,6 +10520,19 @@ class PolicySafetyProbe:
                 DEFAULT_SIMCODE6_POLICY_XML),
             simcode6_sim_xml_path=getattr(
                 self.cfg, "simcode6_sim_xml_path", DEFAULT_SIMCODE6_POLICY_XML),
+            simcode7_model_path=getattr(
+                self.cfg, "simcode7_model_path", DEFAULT_SIMCODE7_MODEL_PATH),
+            simcode7_v85_model_path=getattr(
+                self.cfg, "simcode7_v85_model_path",
+                DEFAULT_SIMCODE7_V85_MODEL_PATH),
+            simcode7_v91_model_path=getattr(
+                self.cfg, "simcode7_v91_model_path",
+                DEFAULT_SIMCODE7_V91_MODEL_PATH),
+            simcode7_policy_xml_path=getattr(
+                self.cfg, "simcode7_policy_xml_path",
+                DEFAULT_SIMCODE7_POLICY_XML),
+            simcode7_sim_xml_path=getattr(
+                self.cfg, "simcode7_sim_xml_path", DEFAULT_SIMCODE7_POLICY_XML),
             backend=backend,
             frame_rate_hz=self.cfg.sim_frame_rate_hz,
             render_width=self.cfg.sim_render_width,
@@ -9629,7 +10556,13 @@ class PolicySafetyProbe:
         )
         self.sim_base_config = sim_cfg
         sim_cfg = sim_mirror_config_for_policy_profile(
-            sim_cfg, self.active_policy_profile)
+            replace(
+                sim_cfg,
+                policy_model=(
+                    self.active_policy_model or GPU0_RMP_MODEL_V85),
+            ),
+            self.active_policy_profile,
+        )
         if bool(self.cfg.sim_subprocess):
             try:
                 # Keep the unresolved legacy-primary + simcode2-alternate
@@ -9694,6 +10627,8 @@ class PolicySafetyProbe:
             "backend": str(getattr(self.cfg, "sim_backend", "mujoco")),
             "policyProfile": str(getattr(
                 self, "active_policy_profile", self.cfg.policy_profile)),
+            "policyModel": str(getattr(
+                self, "active_policy_model", GPU0_RMP_MODEL_V85)),
             "policyGeneration": int(getattr(self, "policy_generation", 0)),
             "error": reason or self.sim_mirror_error,
         }
@@ -9752,18 +10687,29 @@ class PolicySafetyProbe:
             return payload
         try:
             if (not isinstance(self.sim_mirror, SimMirrorSubprocess)
-                    and normalize_observation_profile(getattr(
+                    and (normalize_observation_profile(getattr(
                         getattr(self.sim_mirror, "cfg", None),
                         "policy_profile",
                         OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
-                    )) != self.active_policy_profile):
+                    )) != self.active_policy_profile
+                    or str(getattr(
+                        getattr(self.sim_mirror, "cfg", None),
+                        "policy_model", GPU0_RMP_MODEL_V85,
+                    )) != str(
+                        self.active_policy_model or GPU0_RMP_MODEL_V85))):
                 old_mirror = self.sim_mirror
                 try:
                     old_mirror.close()
                 except Exception:
                     pass
                 active_cfg = sim_mirror_config_for_policy_profile(
-                    self.sim_base_config, self.active_policy_profile)
+                    replace(
+                        self.sim_base_config,
+                        policy_model=(
+                            self.active_policy_model or GPU0_RMP_MODEL_V85),
+                    ),
+                    self.active_policy_profile,
+                )
                 self.sim_mirror = _make_sim_mirror(active_cfg)
                 self.sim_needs_policy_reset = True
             if self.sim_needs_policy_reset:
@@ -9784,6 +10730,7 @@ class PolicySafetyProbe:
                             ball_valid=bool(ball_valid),
                             ball_obs_age_s=float(max(0.0, age_s)),
                             policy_profile=self.active_policy_profile,
+                            policy_model=self.active_policy_model,
                             policy_generation=self.policy_generation,
                         )
                     else:
@@ -9811,6 +10758,7 @@ class PolicySafetyProbe:
                     camera_stamp_s=camera_stamp_s,
                     control_mode=str(control_mode),
                     policy_profile=self.active_policy_profile,
+                    policy_model=self.active_policy_model,
                     policy_generation=self.policy_generation,
                 )
                 self.recorder.record_sim_control_samples(
@@ -9840,6 +10788,7 @@ class PolicySafetyProbe:
                     "inputAgeS": float(max(0.0, age_s)),
                     "controlMode": str(control_mode),
                     "policyProfile": str(self.active_policy_profile),
+                    "policyModel": str(self.active_policy_model),
                     "policyGeneration": int(self.policy_generation),
                     "runtimeConfigMatch": _sim_runtime_config_matches(
                         self.sim_mirror.cfg,
@@ -12530,11 +13479,20 @@ class PolicySafetyProbe:
         except Exception:
             feedback_q = None
         hold_q = self._right_arm_joint_vector_or_none(feedback_q)
+        requires_timed_feedback = bool(
+            getattr(self, "active_policy_profile", "")
+            == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+        maximum_arm_age_s = (
+            Gpu0QvelRealRmpV85PolicyController.MAXIMUM_JOINT_FEEDBACK_AGE_S
+            if requires_timed_feedback
+            else 0.05
+        )
         fresh = bool(
             hold_q is not None
-            and (feedback_age_s is None
-                 or (math.isfinite(float(feedback_age_s))
-                     and float(feedback_age_s) <= 0.05)))
+            and ((feedback_age_s is None and not requires_timed_feedback)
+                 or (feedback_age_s is not None
+                     and math.isfinite(float(feedback_age_s))
+                     and float(feedback_age_s) <= maximum_arm_age_s)))
         if not fresh or hold_q is None:
             self.last_command_arm = {
                 "armed": False,
@@ -12881,6 +13839,31 @@ class PolicySafetyProbe:
         if not options.publish_commands:
             self.compensation_was_enabled = False
             return self._publish_hold_on_command_disable()
+        dq_mode = PolicyDqMode.parse(getattr(
+            getattr(self, "cfg", None),
+            "policy_dq_mode",
+            PolicyDqMode.RAW_COHERENT.value,
+        ))
+        if (apply_compensation
+                and dq_mode is PolicyDqMode.LEGACY_DQ_ONLY_ABLATION):
+            impact_limit = int(getattr(
+                self.cfg, "incoherent_dq_ablation_max_impacts", 0))
+            impact_count = int(getattr(
+                self, "incoherent_dq_ablation_inferred_impacts", 0))
+            allowed = bool(getattr(
+                self.cfg, "allow_incoherent_dq_ablation", False))
+            self.last_incoherent_dq_ablation_gate = {
+                "allowed": allowed,
+                "impactLimit": impact_limit,
+                "inferredImpactCount": impact_count,
+                "observationCoherence": "incoherent_legacy_ablation",
+            }
+            if not allowed or impact_limit <= 0 or impact_count >= impact_limit:
+                self.compensation_was_enabled = False
+                self.last_incoherent_dq_ablation_gate["blocked"] = True
+                self.last_incoherent_dq_ablation_gate["reason"] = (
+                    "explicit allow and positive remaining impact limit required")
+                return self._publish_hold_on_command_disable()
         if not self.command_stream_active:
             self.compensation_was_enabled = False
             return self._arm_command_stream_from_feedback()
@@ -12935,6 +13918,37 @@ class PolicySafetyProbe:
             )
         else:
             self.compensation_was_enabled = False
+        matcher_proposed = False
+        matcher = getattr(self, "policy_plant_matcher", None)
+        matcher_mode = PlantMatcherMode.parse(getattr(
+            self.cfg, "policy_plant_matcher_mode", PlantMatcherMode.OFF.value))
+        if (matcher is not None
+                and matcher_mode is not PlantMatcherMode.OFF
+                and apply_compensation
+                and str(getattr(options, "control_mode", "")) == "policy"):
+            sample = getattr(self, "current_policy_joint_sample", None)
+            try:
+                if sample is None:
+                    raise PlantMatcherFailClosed("joint_state_uninitialized")
+                proposal = matcher.propose(nominal_q, sample)
+                self.last_matcher_shadow_q = np.asarray(
+                    proposal.matcher_shadow_q, dtype=np.float64).copy()
+                self.last_matcher_pre_safety_q = np.asarray(
+                    proposal.selected_pre_safety_q, dtype=np.float64).copy()
+                self.last_policy_plant_matcher_info = dict(
+                    proposal.diagnostics)
+                raw = self.last_matcher_pre_safety_q.copy()
+                matcher_proposed = True
+            except (PlantMatcherFailClosed, TypeError, ValueError) as exc:
+                self.last_policy_plant_matcher_info = {
+                    "mode": matcher_mode.value,
+                    "failClosed": True,
+                    "reason": str(exc),
+                }
+                return self._publish_hold_on_command_disable()
+        else:
+            self.last_matcher_shadow_q = nominal_q.copy()
+            self.last_matcher_pre_safety_q = raw.copy()
         self.last_servo_drive_model_advanced = False
         if simcode4_upstream_servo:
             # Deployable hardware order when MCControlNode/the joint drive does
@@ -12952,10 +13966,6 @@ class PolicySafetyProbe:
             ).reshape(-1)
             self.last_servo_planner_output_q = raw.copy()
         self.last_compensated_reference = raw.copy()
-        workspace_mode = _workspace_safety_mode(
-            options.workspace_safety_mode,
-            default=self.cfg.workspace_safety_mode,
-        )
         # The workspace filter is downstream of inverse compensation, so an
         # intervention still has to propagate through the real transport
         # delay and actuator lag.  Keep the currently applied runtime plant
@@ -12977,25 +13987,60 @@ class PolicySafetyProbe:
             )),
         )
         publish_profile_name = str(profile).strip().lower()
-        parking_profile = publish_profile_name in {
-            "parking", "park", "safe", "reset", "failsafe"}
-        use_limiter = (
-            bool(self.cfg.enable_safety_limiter)
-            or publish_profile_name != "normal")
-        if use_limiter:
-            if (parking_profile
-                    and publish_profile_name != "reset"
-                    and workspace_mode != "off"):
-                safe = self._filter_parking_command_with_workspace_guard(
-                    raw, profile=profile)
-            else:
-                safe = self.safety_limiter.filter(raw, profile=profile)
+        # Policy, hold, parking, and failsafe commands have no route into
+        # RightArmCommandSafetyLimiter.  This is intentionally not a runtime
+        # option: mode transitions must never create hidden limiter velocity.
+        # Reset is the only exception and is handled earlier by
+        # _publish_soft_workspace_reset_command().
+        safe = raw.copy()
+        # V85 keeps its own persistent q_ref, so any remaining upstream
+        # matcher/compensation rewrite of an *executed actor* target would
+        # desynchronise the next observation's q_ref_error and must fail
+        # closed. Hold/reset targets do not come from that actor state.
+        gpu0_actor_boundary_guard = bool(
+            profile_name == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+            and publish_profile_name == "normal"
+            and str(getattr(options, "control_mode", "policy")) == "policy"
+        )
+        if gpu0_actor_boundary_guard:
+            delta = np.asarray(safe, dtype=np.float64) - nominal_q
+            intervened = bool(np.max(np.abs(delta)) > 1e-6)
+            streak = int(getattr(
+                self, "gpu0_rmp_safety_intervention_streak", 0))
+            streak = streak + 1 if intervened else 0
+            self.gpu0_rmp_safety_intervention_streak = streak
+            self.last_gpu0_rmp_boundary_info = {
+                "intervened": intervened,
+                "consecutiveTicks": streak,
+                "maxAbsCorrectionRad": float(np.max(np.abs(delta))),
+                "policyQref": _rounded_vector(nominal_q),
+                "safeTarget": _rounded_vector(safe),
+                "failClosed": bool(streak >= 3),
+            }
+            if streak >= 3:
+                # A persistent rewrite means the physical path no longer
+                # matches the V85 q_ref state. Hold measured position and
+                # require an explicit operator re-arm.
+                held = self._publish_hold_on_command_disable()
+                self._mark_policy_paused()
+                return held
         else:
-            safe = raw.copy()
-            self.safety_limiter.observe(safe)
+            self.gpu0_rmp_safety_intervention_streak = 0
         self.ros_bridge.publish_right_arm_command(safe)
         self.last_published_safe_reference = np.asarray(
             safe, dtype=np.float64).copy()
+        if matcher_proposed and matcher is not None:
+            try:
+                matcher.observe_published(safe)
+            except (PlantMatcherFailClosed, TypeError, ValueError) as exc:
+                # Publishing has already succeeded this tick. Fence the next
+                # tick to a measured hold and expose the exact failure.
+                self.last_policy_plant_matcher_info = {
+                    **dict(self.last_policy_plant_matcher_info),
+                    "postPublishModelFault": str(exc),
+                    "failClosedNextTick": True,
+                }
+                self.command_stream_active = False
         if (getattr(self, "compensator", None) is not None
                 and getattr(self, "compensation_was_enabled", False)):
             try:
@@ -13177,8 +14222,13 @@ class PolicySafetyProbe:
             sleep_s = next_t - time.perf_counter()
             if sleep_s > 0.0:
                 time.sleep(sleep_s)
-            else:
-                next_t = time.perf_counter()
+            elif sleep_s <= -dt:
+                # Drop whole missed periods only when more than one complete
+                # control slot late.  A small diagnostic-induced overrun is
+                # caught up immediately instead of permanently shifting the
+                # 200 Hz schedule by another full 5 ms.
+                missed = int((-sleep_s) // dt)
+                next_t += missed * dt
 
     def _control_loop_hz(self) -> float:
         if not self.control_loop_times:
@@ -14156,11 +15206,15 @@ class PolicySafetyProbe:
             "racket_tracking", "mpc_juggle"}
         corrected_policy_age = (
             options.control_mode == "policy"
-            and uses_corrected_67d_observation(getattr(
+            and (uses_corrected_67d_observation(getattr(
                 options,
                 "policy_profile",
                 OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
-            ))
+            )) or normalize_observation_profile(getattr(
+                options,
+                "policy_profile",
+                OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+            )) == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
         )
         if ((strict_camera_mode or corrected_policy_age)
                 and _is_sensor_ball_source(options.ball_source)):
@@ -14304,11 +15358,13 @@ class PolicySafetyProbe:
             OBSERVATION_PROFILE_SIMCODE4_SERVO67,
             OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
             OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+            OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
         }
         if (bool(getattr(
                     options, "camera_control_time_compensation", False))
                 and getattr(options, "ball_source", "") == "camera"
-                and not bool(getattr(options, "use_ball_estimator", False))):
+                and not bool(getattr(options, "use_ball_estimator", False))
+                and profile != OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
             # This experiment explicitly replaces the profile-specific
             # zero-order hold: the same trusted camera frame is propagated to
             # each 200 Hz policy tick by the bounded camera trajectory model.
@@ -14317,7 +15373,9 @@ class PolicySafetyProbe:
             return pos, vel, bool(valid), age_s
         if (profile not in sampled_profiles
                 or getattr(options, "control_mode", "policy") != "policy"
-                or bool(getattr(options, "use_ball_estimator", False))):
+                or (bool(getattr(options, "use_ball_estimator", False))
+                    and profile
+                    != OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)):
             self.policy_ball_sample_profile = None
             self.policy_ball_sample_source_stamp_s = None
             return pos, vel, bool(valid), age_s
@@ -14347,15 +15405,11 @@ class PolicySafetyProbe:
             )
 
         step = int(self.policy_ball_sample_step)
-        if step == 0:
-            refresh = True
-        else:
-            # Deterministic fractional sampling also covers rates that are not
-            # integer divisors of the 200 Hz control clock (for example 90Hz).
-            sample_rate_hz = float(getattr(
-                options, "ball_observation_rate_hz", 60.0))
-            period = sample_rate_hz * float(self.cfg.control_dt)
-            refresh = math.floor(step * period) > math.floor((step - 1) * period)
+        sample_rate_hz = float(getattr(
+            options, "ball_observation_rate_hz", 60.0))
+        scheduled_refresh = is_fractional_refresh(
+            step, sample_rate_hz, float(self.cfg.control_dt))
+        refresh = scheduled_refresh
         source_stamp = None
         if source_timestamp_s is not None:
             try:
@@ -14371,12 +15425,62 @@ class PolicySafetyProbe:
             and (previous_source_stamp is None
                  or abs(source_stamp - float(previous_source_stamp))
                  > _CAMERA_FRAME_TIMESTAMP_DUPLICATE_TOLERANCE_S))
-        if bool(force_fresh_source) and fresh_source:
+        handover_mode = PolicyBallHandoverMode.parse(getattr(
+            options,
+            "policy_ball_handover_mode",
+            PolicyBallHandoverMode.LEGACY_FORCE_FRESH.value,
+        ))
+        forced_refresh = False
+        if (profile != OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                and bool(force_fresh_source) and fresh_source
+                and handover_mode is PolicyBallHandoverMode.LEGACY_FORCE_FRESH):
             # During predictor->camera handover, every *new camera frame* must
             # be visible to the policy.  This does not enable 90->200
             # propagation: repeated 200 Hz ticks still hold the same sample.
             refresh = True
+            forced_refresh = not scheduled_refresh
+        elif (bool(force_fresh_source) and fresh_source
+                and handover_mode
+                is PolicyBallHandoverMode.STRICT_FRACTIONAL_CONTINUOUS):
+            # Remember the event, but never bypass the 90 Hz schedule.
+            self.policy_ball_handover_pending = True
         sample_available = bool(refresh and valid)
+        handover_details: dict[str, Any] = {}
+        strict_handover = bool(
+            handover_mode
+            is PolicyBallHandoverMode.STRICT_FRACTIONAL_CONTINUOUS
+            and sample_available
+            and self.policy_ball_sample_has_valid
+            and (self.policy_ball_handover_pending
+                 or self.policy_ball_handover_blend.active))
+        if strict_handover:
+            if (self.policy_ball_handover_pending
+                    and not self.policy_ball_handover_blend.active):
+                handover_details = self.policy_ball_handover_blend.begin(
+                    self.policy_ball_sample_pos,
+                    self.policy_ball_sample_vel,
+                    pos,
+                    vel,
+                )
+                if not handover_details.get("accepted", False):
+                    # Keep the prior predictor/held state on invalid or
+                    # out-of-gate camera innovation.
+                    sample_available = False
+                else:
+                    self.policy_ball_handover_pending = False
+            if sample_available and self.policy_ball_handover_blend.active:
+                blended_pos, blended_vel, blend_info = (
+                    self.policy_ball_handover_blend.scheduled_step(
+                        self.policy_ball_sample_pos,
+                        self.policy_ball_sample_vel,
+                        1.0 / max(sample_rate_hz, 1e-9),
+                    ))
+                pos = blended_pos.astype(np.float32)
+                vel = blended_vel.astype(np.float32)
+                handover_details = {
+                    **handover_details,
+                    "blend": blend_info,
+                }
         if sample_available:
             self.policy_ball_sample_pos = np.asarray(
                 pos, dtype=np.float32).reshape(3).copy()
@@ -14391,14 +15495,35 @@ class PolicySafetyProbe:
             self.policy_ball_sample_sequence = int(getattr(
                 self, "policy_ball_sample_sequence", 0)) + 1
         elif self.policy_ball_sample_has_valid:
-            if profile == OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67:
+            if profile in {
+                    OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
+                    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85}:
                 self.policy_ball_sample_age_s += float(self.cfg.control_dt)
             else:
                 # simcode4/5/6 have no missing/dropout branch and use
                 # ball_obs_age_tracks_stale=False, so held samples keep
                 # obs[49] and the contact-time age advancement at exactly zero.
                 self.policy_ball_sample_age_s = 0.0
+        if (profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                and self.policy_ball_sample_age_s
+                > Gpu0QvelRealRmpV85PolicyController.LOST_BALL_TIMEOUT_S):
+            self.policy_ball_sample_has_valid = False
         self.policy_ball_sample_step = step + 1
+        self.last_policy_ball_handover_info = {
+            "mode": handover_mode.value,
+            "sourceTimestampS": source_stamp,
+            "freshSource": fresh_source,
+            "scheduledRefresh": scheduled_refresh,
+            "forcedRefresh": forced_refresh,
+            "sampleAccepted": sample_available,
+            "state": (
+                "reacquired_blend"
+                if strict_handover and sample_available else
+                "innovation_rejected_hold"
+                if strict_handover else
+                "fresh" if sample_available else "held"),
+            **handover_details,
+        }
         return (
             self.policy_ball_sample_pos.copy(),
             self.policy_ball_sample_vel.copy(),
@@ -14414,6 +15539,20 @@ class PolicySafetyProbe:
         self.policy_ball_sample_age_s = 0.0
         self.policy_ball_sample_has_valid = False
         self.policy_ball_sample_source_stamp_s = None
+        self.policy_ball_handover_pending = False
+        blend = getattr(self, "policy_ball_handover_blend", None)
+        if blend is not None:
+            blend.active = False
+            blend.target_position = None
+            blend.target_velocity = None
+        self.last_policy_ball_handover_info = {
+            "mode": str(getattr(
+                getattr(self, "cfg", None),
+                "policy_ball_handover_mode",
+                PolicyBallHandoverMode.LEGACY_FORCE_FRESH.value,
+            )),
+            "state": "reset",
+        }
 
     def _raw_measurement_age_s(
         self,
@@ -14423,13 +15562,22 @@ class PolicySafetyProbe:
         *,
         fail_closed: bool = False,
     ) -> float:
+        strict_gpu0_timestamp = bool(
+            getattr(options, "control_mode", "policy") == "policy"
+            and normalize_observation_profile(getattr(
+                options,
+                "policy_profile",
+                OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+            )) == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+            and _is_sensor_ball_source(getattr(options, "ball_source", ""))
+        )
         unavailable_age_s = (
             max(
                 float(self.cfg.ball_lost_timeout_s),
                 float(self.cfg.racket_tracking_max_ball_age_s)
                 + float(self.cfg.control_dt),
             )
-            if fail_closed else 0.0
+            if fail_closed or strict_gpu0_timestamp else 0.0
         )
         if not valid:
             return self.cfg.ball_lost_timeout_s
@@ -14437,10 +15585,15 @@ class PolicySafetyProbe:
                 or not math.isfinite(float(measurement_stamp_s))
                 or float(measurement_stamp_s) <= 0.0):
             return unavailable_age_s
-        if options.ball_source != "camera" or self.ros_bridge is None:
+        if (not _is_sensor_ball_source(options.ball_source)
+                or self.ros_bridge is None):
             return unavailable_age_s
         try:
-            return max(0.0, self.ros_bridge.now_sec() - float(measurement_stamp_s))
+            now_s = float(self.ros_bridge.now_sec())
+            stamp_s = float(measurement_stamp_s)
+            if strict_gpu0_timestamp and stamp_s > now_s + 1e-6:
+                return unavailable_age_s
+            return max(0.0, now_s - stamp_s)
         except Exception:
             return unavailable_age_s
 
@@ -14633,8 +15786,10 @@ class PolicySafetyProbe:
         float | None,
         dict[str, Any],
     ]:
-        """Get one coherent feedback sample, retaining old bridge compatibility."""
+        """Capture one immutable q/dq sample for the complete actor tick."""
         if self.ros_bridge is None:
+            self.current_policy_joint_sample = None
+            self.policy_joint_sample_error = "joint_state_uninitialized"
             return None, None, None, "local_command", None, {}
         timing_getter = getattr(
             self.ros_bridge,
@@ -14642,25 +15797,100 @@ class PolicySafetyProbe:
             None,
         )
         if callable(timing_getter):
-            return timing_getter()
-        coherent_getter = getattr(
-            self.ros_bridge, "get_joint_feedback_coherent", None)
-        if callable(coherent_getter):
+            q, dq, age_s, source, sample_stamp_s, timing = timing_getter()
+            timing = dict(timing or {})
+        else:
+            coherent_getter = getattr(
+                self.ros_bridge, "get_joint_feedback_coherent", None)
+        if not callable(timing_getter) and callable(coherent_getter):
             q, dq, age_s, source, sample_stamp_s = coherent_getter()
-            return q, dq, age_s, source, sample_stamp_s, {
+            timing = {
                 "jointSampleStampS": sample_stamp_s,
                 "jointReceiptAgeS": age_s,
                 "jointVelocitySource": source,
             }
-        # Test doubles and older out-of-tree bridges may only implement the
-        # original four-field freshness API. They have no source timestamp, so
-        # the controller deliberately stays on its policy-clock observation
-        # path rather than inventing one.
-        q, dq, age_s, source = self.ros_bridge.get_joint_feedback_with_age()
-        return q, dq, age_s, source, None, {
-            "jointReceiptAgeS": age_s,
-            "jointVelocitySource": source,
-        }
+        elif not callable(timing_getter):
+            # Test doubles and older out-of-tree bridges may only implement
+            # the original freshness API. No source stamp is invented.
+            q, dq, age_s, source = self.ros_bridge.get_joint_feedback_with_age()
+            sample_stamp_s = None
+            timing = {
+                "jointReceiptAgeS": age_s,
+                "jointVelocitySource": source,
+            }
+
+        previous = getattr(self, "last_policy_joint_sample", None)
+        sample = None
+        error = str(timing.get("jointSourceFault", "") or "") or None
+        if (q is None or dq is None or age_s is None
+                or sample_stamp_s is None):
+            error = error or "joint_state_uninitialized"
+        else:
+            raw_sequence = timing.get("jointSourceSequence")
+            try:
+                sequence = int(raw_sequence)
+            except (TypeError, ValueError):
+                # Compatibility bridges have no sequence; derive only from
+                # exact source-stamp equality without changing the stamp.
+                sequence = (
+                    0 if previous is None
+                    else previous.source_sequence + int(
+                        float(sample_stamp_s) != previous.source_stamp_s))
+            repeated = bool(
+                previous is not None
+                and sequence == previous.source_sequence)
+            try:
+                sample = PolicyJointSample(
+                    q_raw=q,
+                    dq_raw=dq,
+                    source_stamp_s=float(sample_stamp_s),
+                    source_sequence=sequence,
+                    receipt_age_s=float(age_s),
+                    repeated_source_sample=repeated,
+                    velocity_source=str(source),
+                    source_clock=str(timing.get(
+                        "jointSampleStampSource", "unknown")),
+                )
+            except (TypeError, ValueError) as exc:
+                error = error or f"invalid_joint_sample:{exc}"
+            if sample is not None and error is None:
+                gpu0_real_rmp_profile = bool(
+                    getattr(self, "active_policy_profile", "")
+                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+                maximum_age_s = (
+                    Gpu0QvelRealRmpV85PolicyController.MAXIMUM_JOINT_FEEDBACK_AGE_S
+                    if gpu0_real_rmp_profile else 0.05)
+                error = sample.transition_error(
+                    previous,
+                    max_receipt_age_s=maximum_age_s,
+                    # The actor consumes the newest atomic JointState sample;
+                    # it does not integrate every ROS subscription callback.
+                    # If the 200 Hz timer runs after two fresh messages, the
+                    # skipped older message is not corrupt feedback and must
+                    # not reset the persistent GPU0 q_ref history.
+                    allow_source_sequence_gap=gpu0_real_rmp_profile,
+                )
+            if sample is not None:
+                skipped_source_samples = (
+                    0 if previous is None else max(
+                        0,
+                        sample.source_sequence
+                        - previous.source_sequence - 1,
+                    )
+                )
+                self.last_policy_joint_sample = sample
+                timing.update({
+                    "jointSourceSequence": sample.source_sequence,
+                    "jointSourceSamplesSkipped": skipped_source_samples,
+                    "jointRepeatedSourceSample": (
+                        sample.repeated_source_sample),
+                    "jointObservationContract": "PolicyJointSample/v1",
+                    "jointObservationCoherent": True,
+                })
+        self.current_policy_joint_sample = sample
+        self.policy_joint_sample_error = error
+        timing["jointSampleControlError"] = error
+        return q, dq, age_s, source, sample_stamp_s, timing
 
     def _joint_velocity_observation_for_policy(
         self,
@@ -14670,11 +15900,38 @@ class PolicySafetyProbe:
     ) -> tuple[np.ndarray | None, dict[str, Any]]:
         """Adapt only the actor's dq slice; never mutate raw control feedback."""
         adapter = getattr(self, "policy_dq_adapter", None)
+        configured_mode = getattr(
+            getattr(self, "cfg", None), "policy_dq_mode", None)
+        if configured_mode is None:
+            # Compatibility for historical unit fixtures that predate the
+            # release field; live configuration always supplies the enum.
+            configured_mode = PolicyDqMode.LEGACY_DQ_ONLY_ABLATION.value
+        dq_mode = PolicyDqMode.parse(configured_mode)
+        if dq_mode is PolicyDqMode.RAW_COHERENT:
+            raw = (
+                None if raw_dq is None
+                else np.asarray(raw_dq, dtype=np.float32).reshape(7).copy())
+            info = (
+                adapter.bypass_payload("raw_coherent_mode", raw)
+                if adapter is not None else {
+                    "configuredEnabled": False,
+                    "active": False,
+                    "reason": "raw_coherent_mode",
+                })
+            info.update({
+                "policyDqMode": dq_mode.value,
+                "observationCoherence": "coherent",
+                "runtimeEnabled": False,
+            })
+            self.last_policy_dq_adapter_info = info
+            return raw, info
         if adapter is None:
             return raw_dq, {
                 "configuredEnabled": False,
                 "active": False,
                 "reason": "adapter_unavailable",
+                "policyDqMode": dq_mode.value,
+                "observationCoherence": "incoherent_legacy_ablation",
             }
         runtime_enabled = (
             bool(adapter.config.enabled) if enabled is None else bool(enabled))
@@ -14698,6 +15955,8 @@ class PolicySafetyProbe:
             info = adapter.bypass_payload(
                 "only_enabled_for_simcode5_pure_actuator67", raw_dq)
             info["runtimeEnabled"] = runtime_enabled
+            info["policyDqMode"] = dq_mode.value
+            info["observationCoherence"] = "incoherent_legacy_ablation"
             self.last_policy_dq_adapter_info = info
             return np.asarray(raw_dq, dtype=np.float32).copy(), info
         policy_dq, info = adapter.update(
@@ -14706,6 +15965,8 @@ class PolicySafetyProbe:
             enabled=runtime_enabled,
         )
         info["policyProfile"] = profile
+        info["policyDqMode"] = dq_mode.value
+        info["observationCoherence"] = "incoherent_legacy_ablation"
         self.last_policy_dq_adapter_info = info
         return policy_dq, info
 
@@ -15204,6 +16465,11 @@ class PolicySafetyProbe:
                     "active_policy_profile",
                     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
                 ),
+            ))
+            self._select_policy_model(getattr(
+                options,
+                "policy_model",
+                getattr(self, "active_policy_model", GPU0_RMP_MODEL_V85),
             ))
         active_policy_profile = getattr(
             self,
@@ -15836,14 +17102,32 @@ class PolicySafetyProbe:
                     or plan.diagnostics.get("state", "juggling hold"))
                 return "mpc_juggle_hold", reason, {}, age_s, False
         else:
-            if (uses_corrected_67d_observation(getattr(
+            joint_sample_error = getattr(
+                self, "policy_joint_sample_error", None)
+            measured_feedback_profile = bool(
+                uses_corrected_67d_observation(getattr(
                     self, "active_policy_profile",
                     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT))
-                    and options.publish_commands
+                or self.active_policy_profile
+                == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+            maximum_feedback_age_s = (
+                Gpu0QvelRealRmpV85PolicyController.MAXIMUM_JOINT_FEEDBACK_AGE_S
+                if self.active_policy_profile
+                == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                else 0.05
+            )
+            feedback_is_mandatory = bool(
+                options.publish_commands
+                or (self.active_policy_profile
+                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                    and options.use_ros_state))
+            if (measured_feedback_profile
+                    and feedback_is_mandatory
                     and (arm_q is None
                          or arm_dq is None
                          or arm_feedback_age_s is None
-                         or arm_feedback_age_s > 0.05)):
+                         or arm_feedback_age_s > maximum_feedback_age_s
+                         or joint_sample_error is not None)):
                 hold_q = (
                     arm_q if arm_q is not None
                     else self.controller.current_arm_cmd_q())
@@ -15854,9 +17138,25 @@ class PolicySafetyProbe:
                     else f"{arm_feedback_age_s:.3f}s")
                 reason = (
                     f"fresh q/dq feedback required for {self.active_policy_profile} "
-                    f"(age={age_text}, dq={arm_dq_source})")
+                    f"(age={age_text}, dq={arm_dq_source}, "
+                    f"sample={joint_sample_error or 'ok'})")
                 self.last_control_mode = "policy"
                 return "policy_feedback_hold", reason, {}, age_s, False
+            if (self.active_policy_profile
+                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                    and (not valid or age_s
+                         > Gpu0QvelRealRmpV85PolicyController.LOST_BALL_TIMEOUT_S)):
+                hold_q = (
+                    arm_q if arm_q is not None
+                    else self.controller.current_arm_cmd_q())
+                self._sync_policy_to_safe_pose(hold_q)
+                self._mark_policy_paused()
+                reason = (
+                    "GPU0-QVEL/REAL-RMP ball state invalid"
+                    if not valid else
+                    f"GPU0-QVEL/REAL-RMP ball state stale ({age_s:.3f}s)")
+                self.last_control_mode = "policy"
+                return "policy_ball_state_hold", reason, {}, age_s, False
             if self.last_control_mode != "policy":
                 self.racket_tracker.deactivate("policy_mode")
                 self.juggle_tracker.deactivate("policy_mode")
@@ -15864,6 +17164,11 @@ class PolicySafetyProbe:
                 self.last_juggle_info = dict(
                     self.juggle_controller.last_diagnostics)
                 self.policy_needs_reentry_reset = True
+                # Entering policy from another high-level controller starts a
+                # new mirror session.  Unlike a transient feedback/ball hold,
+                # this is a real strategy boundary and may safely reset the
+                # independent mirror before its first policy tick.
+                self.sim_needs_policy_reset = True
             if self.policy_needs_reentry_reset:
                 self._reset_real_policy_for_sim_reentry()
             self.last_control_mode = "policy"
@@ -15873,6 +17178,16 @@ class PolicySafetyProbe:
                     arm_sample_stamp_s,
                     options.enable_policy_dq_adapter,
                 ))
+            if (self.active_policy_profile
+                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                    and not options.publish_commands):
+                if arm_q is None:
+                    arm_q = self.controller.current_arm_cmd_q()
+                if policy_arm_dq is None:
+                    policy_arm_dq = np.asarray(
+                        self.controller.arm_cmd_qvel,
+                        dtype=np.float32,
+                    ).copy()
             self._predict_policy_with_feedback(
                 ball_pos,
                 ball_vel,
@@ -15932,6 +17247,21 @@ class PolicySafetyProbe:
                 "policyDqAdapter": dict(policy_dq_adapter_info),
                 "contactActionShield": dict(
                     self.last_contact_action_shield_info),
+            }
+            current_action = np.asarray(
+                policy_obs_action.get(
+                    "executed_action", policy_obs_action["action"]),
+                dtype=np.float64,
+            ).reshape(-1)
+            previous_action = getattr(
+                self, "previous_policy_action_for_handover", None)
+            action_jump = (
+                None if previous_action is None
+                else float(np.linalg.norm(current_action - previous_action)))
+            self.previous_policy_action_for_handover = current_action.copy()
+            self.last_policy_ball_handover_info = {
+                **dict(self.last_policy_ball_handover_info),
+                "actorActionJumpL2": action_jump,
             }
         racket_pos, racket_quat, fk_ok = (
             self._workspace_safety_racket_pose(options))
@@ -16361,6 +17691,12 @@ class PolicySafetyProbe:
         )
         policy_profile = normalize_observation_profile(
             payload.get("policyProfile", self.cfg.policy_profile))
+        policy_model = _normalize_gpu0_rmp_model(
+            payload.get(
+                "policyModel",
+                getattr(self, "active_policy_model", GPU0_RMP_MODEL_V85),
+            )
+        )
         default_observation_scales = _default_policy_observation_scales(
             self.cfg.policy_obs_dim,
             self.cfg.policy_dq_observation_scale,
@@ -16370,6 +17706,10 @@ class PolicySafetyProbe:
                 "policyObservationScales", default_observation_scales),
             self.cfg.policy_obs_dim,
         )
+        if policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+            # V85 was trained without any actor-input rescaling.
+            policy_observation_scales = tuple(
+                1.0 for _ in range(self.cfg.policy_obs_dim))
         rl_use_valid_ball_obs_age = _policy_uses_valid_ball_obs_age(
             policy_profile,
             bool(payload.get(
@@ -16561,6 +17901,12 @@ class PolicySafetyProbe:
         )
         if publish_commands:
             use_ros_state = True
+        elif (policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                and self.ros_bridge is not None):
+            # Real shadow mode must exercise the same measured q/dq contract
+            # as command publication; only the ROS-free browser smoke path may
+            # use the local command state.
+            use_ros_state = True
         ball_source = str(payload.get("ballSource", "drag")).strip().lower()
         if ball_source not in ("drag", "camera", "mocap"):
             ball_source = "drag"
@@ -16585,6 +17931,8 @@ class PolicySafetyProbe:
             # even when the UI switches to simcode6 after another profile was
             # launched with a different experiment-wide camera rate.
             obs_rate = 60.0
+        elif policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+            obs_rate = 90.0
         comp_mode = str(payload.get(
             "compensationMode", self.cfg.compensation_mode)).strip().lower()
         comp_mode = comp_mode.replace("-", "_")
@@ -17041,11 +18389,20 @@ class PolicySafetyProbe:
                 self.cfg.vertical_contact_max_racket_upward_speed_m_s,
                 min_value=0.0, max_value=3.0),
         )
+        if policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+            # Any post-actor rewrite changes persistent q_ref and therefore
+            # corrupts the next observation's q_ref-q term.
+            contact_action_shield = replace(
+                contact_action_shield,
+                enabled=False,
+                vertical_energy_enabled=False,
+            )
         enable_compensation = bool(payload.get(
             "enableCompensation", self.cfg.enable_compensation))
         if policy_profile in {
                 OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
-                OBSERVATION_PROFILE_SIMCODE6_QVEL67}:
+                OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85}:
             # Hardware is the checkpoint's actuator plant.  Applying any
             # software compensation here would duplicate the modeled joint
             # dynamics and invalidate both commands and observation history.
@@ -17054,6 +18411,7 @@ class PolicySafetyProbe:
         return RuntimeOptions(
             control_mode=control_mode,
             policy_profile=policy_profile,
+            policy_model=policy_model,
             enable_policy_dq_adapter=bool(payload.get(
                 "enablePolicyDqAdapter",
                 self.cfg.enable_policy_dq_adapter,
@@ -17177,6 +18535,11 @@ class PolicySafetyProbe:
                 "optimizedBallPredictionInitialState",
                 self.cfg.enable_optimized_ball_prediction_initial_state)),
             ball_observation_rate_hz=obs_rate,
+            policy_ball_handover_mode=PolicyBallHandoverMode.parse(
+                payload.get(
+                    "policyBallHandoverMode",
+                    self.cfg.policy_ball_handover_mode,
+                )).value,
             ball_source=ball_source,
             camera=camera_options,
         )
@@ -17531,6 +18894,101 @@ class PolicySafetyProbe:
             cam_pos, cam_vel, cam_valid, "camera", camera_feedback,
             camera_stamp_s, camera_measurement)
 
+    def _contact_identification_payload(
+        self,
+        *,
+        measured_ball_pos: np.ndarray,
+        measured_ball_vel: np.ndarray,
+        raw_valid: bool,
+        age_s: float,
+        camera_measurement: dict[str, Any] | None,
+        policy_action: np.ndarray,
+        policy_executed_action: np.ndarray,
+    ) -> dict[str, Any]:
+        """Minimum honest contact-identification log; no synthetic sensors."""
+        sample = getattr(self, "current_policy_joint_sample", None)
+        payload: dict[str, Any] = {
+            "inferredContact": bool(
+                isinstance(camera_measurement, dict)
+                and camera_measurement.get("velocity_impact_detected", False)),
+            "contactDetector": "inferred_camera_velocity_impact",
+            "sourceStampS": None if sample is None else sample.source_stamp_s,
+            "sourceSequence": None if sample is None else sample.source_sequence,
+            "rawJointPosition": None if sample is None else _rounded_vector(
+                sample.q_raw),
+            "rawJointVelocity": None if sample is None else _rounded_vector(
+                sample.dq_raw),
+            "freshMeasuredBallPosition": _rounded_vector(measured_ball_pos),
+            "freshMeasuredBallVelocity": _rounded_vector(measured_ball_vel),
+            "measuredBallValid": bool(raw_valid),
+            "measuredBallAgeS": round(float(age_s), 6),
+            # The complete dictionaries are already present once in this same
+            # control sample.  Do not duplicate several KB at 200 Hz.
+            "estimatorStateRef": "estimator",
+            "predictorStateRef": "highBallOcclusionPrediction",
+            "policyRawAction": _rounded_vector(policy_action),
+            "policyClippedAction": _rounded_vector(policy_executed_action),
+            "commandLayers": {
+                "policyQcmd": _rounded_vector(getattr(
+                    self, "last_policy_nominal_reference",
+                    self.controller.current_arm_cmd_q())),
+                "matcherShadowQ": _rounded_vector(getattr(
+                    self, "last_matcher_shadow_q",
+                    self.controller.current_arm_cmd_q())),
+                "preSafetyQ": _rounded_vector(getattr(
+                    self, "last_matcher_pre_safety_q",
+                    self.controller.current_arm_cmd_q())),
+                "publishedQ": _rounded_vector(getattr(
+                    self, "last_published_safe_reference",
+                    self.controller.current_arm_cmd_q())),
+            },
+            "wristForceTorque": {
+                "available": False,
+                "value": None,
+                "reason": "no_wrist_force_torque_interface_configured",
+            },
+            "highSpeedCamera": {
+                "available": False,
+                "value": None,
+                "reason": "no_high_speed_camera_interface_configured",
+            },
+        }
+        if sample is None:
+            payload["kinematicsValid"] = False
+            payload["kinematicsReason"] = "joint_sample_unavailable"
+            return payload
+        try:
+            position, quaternion, jacobian_linear, jacobian_angular, fk_ok = (
+                self.controller._compute_racket_pose_jacobians_base(
+                    sample.q_raw.astype(np.float32)))
+            if not fk_ok:
+                raise RuntimeError("racket FK/Jacobian unavailable")
+            position = np.asarray(position, dtype=np.float64).reshape(3)
+            quaternion = np.asarray(quaternion, dtype=np.float64).reshape(4)
+            jacobian_linear = np.asarray(
+                jacobian_linear, dtype=np.float64).reshape(3, 7)
+            jacobian_angular = np.asarray(
+                jacobian_angular, dtype=np.float64).reshape(3, 7)
+            linear_velocity = jacobian_linear @ sample.dq_raw
+            angular_velocity = jacobian_angular @ sample.dq_raw
+            payload.update({
+                "kinematicsValid": True,
+                "racketPosition": _rounded_vector(position),
+                "racketQuaternionXyzw": _rounded_vector(quaternion),
+                "racketFaceNormal": _rounded_vector(
+                    racket_normal_from_quaternion_xyzw(quaternion)),
+                "racketLinearVelocity": _rounded_vector(linear_velocity),
+                "racketAngularVelocity": _rounded_vector(angular_velocity),
+                "contactOffsetEstimate": _rounded_vector(
+                    np.asarray(measured_ball_pos, dtype=np.float64) - position),
+                "kinematicsSourceStampS": sample.source_stamp_s,
+                "velocityEquation": "J(q_raw)@dq_raw",
+            })
+        except Exception as exc:  # noqa: BLE001 - telemetry stays honest.
+            payload["kinematicsValid"] = False
+            payload["kinematicsReason"] = str(exc)
+        return payload
+
     def _record_control_sample(
         self,
         *,
@@ -17609,20 +19067,19 @@ class PolicySafetyProbe:
             if bool(high_occlusion_payload.get("predicted", False))
             else estimator_payload
         )
+        # Do not run extra FK solely for telemetry in the 200 Hz command
+        # path.  policyObs already contains the exact tick-start racket pose;
+        # command FK can be reconstructed offline from command.position.
         command_racket = None
         command_racket_fk_ok = False
-        try:
-            command_ee, _command_quat, command_fk_ok = (
-                self.controller._compute_racket_pose_quat_base(
-                    np.asarray(cmd["position"], dtype=np.float32)))
-            command_racket_fk_ok = bool(command_fk_ok)
-            if command_racket_fk_ok:
-                command_racket = _rounded_vector(command_ee)
-        except Exception:
-            command_racket = None
         ros_light: dict[str, Any] = {"enabled": bool(self.ros_bridge is not None)}
         if self.ros_bridge is not None:
-            feedback_timing = self.ros_bridge.feedback_snapshot()
+            # Inference already captured the exact atomic feedback timing.
+            # Re-reading the ROS bridge here races a newer callback and copies
+            # Cartesian diagnostics that are irrelevant to this policy tick.
+            feedback_timing = (
+                trace.get("jointFeedbackTiming", {})
+                if trace is not None else {})
             for key in (
                 "jointSampleStampS",
                 "jointSampleDtS",
@@ -17632,44 +19089,57 @@ class PolicySafetyProbe:
                 "jointVelocitySource",
                 "jointAcceleration",
                 "jointAccelerationSource",
+                "jointSourceSequence",
+                "jointSourceSamplesSkipped",
+                "jointRepeatedSourceSample",
+                "jointSourceFault",
+                "jointSampleControlError",
             ):
                 ros_light[key] = feedback_timing.get(key)
-            q_fb, dq_fb = self.ros_bridge.get_joint_feedback()
-            cart_pos, cart_quat, cart_psi = self.ros_bridge.get_cart_feedback()
-            ros_light.update({
-                "jointPosition": None if q_fb is None else _rounded_vector(q_fb),
-                "jointVelocity": None if dq_fb is None else _rounded_vector(dq_fb),
-                "cartPosition": None if cart_pos is None else _rounded_vector(cart_pos),
-                "cartQuatXyzw": None if cart_quat is None else _rounded_vector(cart_quat),
-                "cartPsi": None if cart_psi is None else round(float(cart_psi), 6),
-            })
-            if q_fb is not None:
-                try:
-                    joint_ee, _joint_quat, joint_fk_ok = (
-                        self.controller._compute_racket_pose_quat_base(
-                            np.asarray(q_fb, dtype=np.float32)))
-                    ros_light["jointEe"] = (
-                        _rounded_vector(joint_ee) if joint_fk_ok else None)
-                    ros_light["jointEeFkOk"] = bool(joint_fk_ok)
-                except Exception as exc:  # noqa: BLE001 - telemetry only.
-                    ros_light["jointEe"] = None
-                    ros_light["jointEeFkOk"] = False
-                    ros_light["jointEeError"] = str(exc)
-        # A callback can arrive between policy inference and recording. Prefer
-        # the timing captured atomically with the exact q/dq consumed by this
-        # policy step, rather than labelling policyObs with a newer ROS sample.
-        if trace is not None and self.ros_bridge is not None:
-            _overlay_policy_trace_joint_feedback(
-                ros_light, trace, policy_obs)
+            joint_sample = getattr(self, "current_policy_joint_sample", None)
+            if joint_sample is not None:
+                ros_light["jointPosition"] = _rounded_vector(joint_sample.q_raw)
+                ros_light["jointVelocity"] = _rounded_vector(joint_sample.dq_raw)
+                ros_light["jointSampleStampS"] = joint_sample.source_stamp_s
+                ros_light["jointSourceSequence"] = joint_sample.source_sequence
+                ros_light["jointReceiptAgeS"] = joint_sample.receipt_age_s
+                ros_light["jointVelocitySource"] = joint_sample.velocity_source
+        servo_planner_payload: dict[str, Any] = {"enabled": False}
+        if (normalize_observation_profile(options.policy_profile)
+                == OBSERVATION_PROFILE_SIMCODE4_SERVO67):
+            servo_enabled = bool(getattr(
+                self.cfg, "simcode4_real_servo_planner", False))
+            servo_planner_payload = {
+                "enabled": servo_enabled,
+                "softwareApplied": servo_enabled,
+                "plantOrderMatchesCheckpoint": bool(getattr(
+                    self,
+                    "last_simcode4_plant_order_matches_checkpoint",
+                    False)),
+                "publishBlockedReason": str(getattr(
+                    self, "last_simcode4_publish_block_reason", "")),
+                "inputPosition": (
+                    None if getattr(
+                        self, "last_servo_planner_input_q", None) is None
+                    else _rounded_vector(self.last_servo_planner_input_q)),
+                "outputPosition": (
+                    None if getattr(
+                        self, "last_servo_planner_output_q", None) is None
+                    else _rounded_vector(self.last_servo_planner_output_q)),
+                "outputVelocity": _rounded_vector(getattr(
+                    self.servo_target_planner, "last_vel",
+                    np.zeros(7, dtype=np.float64))),
+                "feasible": bool(getattr(
+                    self.servo_target_planner, "last_feasible", False)),
+            }
         sample = {
-            "schemaVersion": 9,
+            "schemaVersion": RECORDING_SCHEMA_VERSION,
             "sourceSeq": int(source_seq),
             "sourceTimeS": round(float(source_time_s), 9),
             "ballObservationSeq": int(ball_observation_seq),
             "cameraStampS": camera_stamp_s,
-            "cameraMeasurement": (
-                None if camera_measurement is None
-                else dict(camera_measurement)),
+            "cameraMeasurement": _camera_measurement_payload(
+                camera_measurement),
             "wallTimeS": round(float(time.time()), 6),
             "time": round(float(self.now_s), 6),
             "tick": int(self.control_loop_tick),
@@ -17718,16 +19188,33 @@ class PolicySafetyProbe:
             "age": round(float(age_s), 6),
             "noiseStdM": round(float(noise_std_m), 6),
             "policyObs": _rounded_vector(policy_obs),
-            "policyObsUnscaled": _rounded_vector(policy_obs_unscaled),
-            "policyDqAdapter": dict(
+            "policyDqAdapter": _compact_inactive_diagnostic(
                 trace.get("policyDqAdapter", self.last_policy_dq_adapter_info)
                 if trace is not None
                 else self.last_policy_dq_adapter_info),
+            "policyJointSample": (
+                None if getattr(self, "current_policy_joint_sample", None) is None
+                else self.current_policy_joint_sample.payload()),
             "policyBallObservation": _float32_vector(
                 policy_obs[20:26]),
             "policyAction": _rounded_vector(policy_action),
             "policyExecutedAction": _rounded_vector(
                 policy_executed_action),
+            # Contact kinematics are derived offline from policyJointSample.
+            # Computing two Jacobians plus FK here previously ran inside every
+            # 5 ms control period and duplicated q/dq/action/command fields.
+            "contactIdentification": {
+                "inferredContact": bool(
+                    isinstance(camera_measurement, dict)
+                    and camera_measurement.get(
+                        "velocity_impact_detected", False)),
+                "contactDetector": "inferred_camera_velocity_impact",
+                "sourceSequence": (
+                    None if getattr(
+                        self, "current_policy_joint_sample", None) is None
+                    else self.current_policy_joint_sample.source_sequence),
+                "kinematics": "offline_from_policyJointSample",
+            },
             "rawPolicyCommand": {
                 "position": _rounded_vector(
                     trace.get("rawPosition", policy_cmd["position"])
@@ -17751,96 +19238,48 @@ class PolicySafetyProbe:
                 "compensatedReferencePosition": _rounded_vector(getattr(
                     self, "last_compensated_reference",
                     policy_cmd["position"])),
+                "matcherShadowPosition": _rounded_vector(getattr(
+                    self, "last_matcher_shadow_q", policy_cmd["position"])),
+                "preSafetyPosition": _rounded_vector(getattr(
+                    self, "last_matcher_pre_safety_q", policy_cmd["position"])),
                 "publishedSafePosition": _rounded_vector(getattr(
                     self, "last_published_safe_reference",
                     policy_cmd["position"])),
                 "published": bool(command_published),
-                "hardWorkspaceStop": self._hard_workspace_stop_payload(),
-                "softWorkspaceReset": self._soft_workspace_reset_payload(),
-                "resetRecovery": self._reset_recovery_payload(),
-                "contactActionShield": dict(
+                "hardWorkspaceStop": _compact_inactive_diagnostic(
+                    self._hard_workspace_stop_payload()),
+                "softWorkspaceReset": _compact_inactive_diagnostic(
+                    self._soft_workspace_reset_payload()),
+                "resetRecovery": _compact_inactive_diagnostic(
+                    self._reset_recovery_payload()),
+                "contactActionShield": _compact_inactive_diagnostic(
                     self.last_contact_action_shield_info),
+                "gpu0RealRmpBoundary": _compact_inactive_diagnostic(getattr(
+                    self, "last_gpu0_rmp_boundary_info", {})),
+                "policyPlantMatcher": dict(
+                    self.last_policy_plant_matcher_info),
                 "compensation": self._compensation_payload(
                     self._real_compensation_options(options)),
-                "servoPlanner": {
-                    "enabled": bool(
-                        normalize_observation_profile(options.policy_profile)
-                        == OBSERVATION_PROFILE_SIMCODE4_SERVO67
-                        and getattr(
-                            self.cfg, "simcode4_real_servo_planner", False)),
-                    "executionOwner": (
-                        "upper_software"
-                        if getattr(
-                            self.cfg, "simcode4_real_servo_planner", False)
-                        else "disabled"),
-                    "softwareApplied": bool(
-                        normalize_observation_profile(options.policy_profile)
-                        == OBSERVATION_PROFILE_SIMCODE4_SERVO67
-                        and getattr(
-                            self.cfg, "simcode4_real_servo_planner", False)),
-                    "checkpointPlantOrder": "fopdt_then_servo_planner",
-                    "deployedPlantOrder": (
-                        "servo_planner_then_physical_fopdt"
-                        if getattr(
-                            self.cfg, "simcode4_real_servo_planner", False)
-                        else "compensated_angle_then_physical_joint"),
-                    "plantOrderMatchesCheckpoint": bool(getattr(
-                        self,
-                        "last_simcode4_plant_order_matches_checkpoint",
-                        False)),
-                    "publishBlockedReason": str(getattr(
-                        self, "last_simcode4_publish_block_reason", "")),
-                    "driveModelAdvanced": False,
-                    "inputPosition": (
-                        None if getattr(
-                            self, "last_servo_planner_input_q", None) is None
-                        else _rounded_vector(
-                            self.last_servo_planner_input_q)),
-                    "outputPosition": (
-                        None if getattr(
-                            self, "last_servo_planner_output_q", None) is None
-                        else _rounded_vector(
-                            self.last_servo_planner_output_q)),
-                    "outputVelocity": _rounded_vector(getattr(
-                        self.servo_target_planner, "last_vel",
-                        np.zeros(7, dtype=np.float64))),
-                    "feasible": bool(getattr(
-                        self.servo_target_planner, "last_feasible", False)),
-                    "feedbackSource": "actual_joint_state",
-                    "velocityScale": 1.0,
-                    "accelerationScale": 0.8,
-                },
+                "servoPlanner": servo_planner_payload,
             },
             "runtime": {
                 "controlMode": str(options.control_mode),
                 "policyProfile": str(options.policy_profile),
                 "activePolicyProfile": str(self.active_policy_profile),
+                "policyModel": str(options.policy_model),
+                "activePolicyModel": str(self.active_policy_model),
                 "policyGeneration": int(self.policy_generation),
-                "policyContract": _policy_runtime_contract(self.controller),
-                "policyObservationScales": [round(float(value), 6)
-                    for value in options.policy_observation_scales],
-                "policyObservationScaleIndices": [index for index, value in
-                    enumerate(options.policy_observation_scales)
-                    if abs(float(value) - 1.0) > 1e-7],
                 "enablePolicyDqAdapter": bool(
                     options.enable_policy_dq_adapter),
-                "policyDqAdapter": dict(
-                    self.last_policy_dq_adapter_info),
+                "policyDqMode": str(self.cfg.policy_dq_mode),
+                "observationCoherence": (
+                    "coherent"
+                    if self.cfg.policy_dq_mode
+                    == PolicyDqMode.RAW_COHERENT.value
+                    else "incoherent_legacy_ablation"),
+                "incoherentDqAblationGate": dict(getattr(
+                    self, "last_incoherent_dq_ablation_gate", {})),
                 "resetInitialPose": str(self.reset_initial_pose_id),
-                "resetInitialJointPosition": _rounded_vector(
-                    self._current_reset_pose_q()),
-                "resetInitialJointPositionDeg": _rounded_vector(
-                    np.rad2deg(self._current_reset_pose_q()), 3),
-                "resetBall": dict(getattr(
-                    self, "reset_ball_contract", {}) or {}),
-                "racketTrackingHeightOffsetM": round(
-                    float(options.racket_tracking_height_offset_m), 6),
-                "racketTrackingUseMpc": bool(
-                    options.racket_tracking_use_mpc),
-                "racketMpc": options.racket_mpc_tuning.diagnostics(),
-                "juggleRunRequested": bool(
-                    options.juggle_run_requested),
-                "juggleStartNonce": int(options.juggle_start_nonce),
                 "useRosState": bool(options.use_ros_state),
                 "publishCommands": bool(options.publish_commands),
                 "enableCompensation": bool(options.enable_compensation),
@@ -17852,45 +19291,46 @@ class PolicySafetyProbe:
                     if options.estimator_hybrid_ekf9 else "legacy_kf6"),
                 "estimatorPrediction": bool(options.estimator_prediction),
                 "estimatorOutputMode": str(options.estimator_output_mode),
-                "estimatorReleaseGatedDynamics": bool(
-                    options.estimator_release_gated_dynamics),
                 "highBallOcclusionPrediction": bool(
                     options.high_ball_occlusion_prediction),
-                "sensorDepthAnomalyPrediction": bool(
-                    options.sensor_depth_anomaly_prediction),
-                "cameraControlTimeCompensation": bool(
-                    options.camera_control_time_compensation),
-                "cameraReacquisitionSmoothing": bool(
-                    options.camera_reacquisition_smoothing),
-                "optimizedBallPredictionInitialState": bool(
-                    options.optimized_ball_prediction_initial_state),
                 "releaseGate": bool(options.enable_ball_release_gate),
                 "releaseUseEstimatorState": bool(
                     options.ball_release_use_estimator_state),
                 "ballObservationRateHz": round(
                     float(options.ball_observation_rate_hz), 6),
+                "policyBallHandoverMode": str(
+                    options.policy_ball_handover_mode),
                 "workspaceSafetyMode": str(options.workspace_safety_mode),
-                "donePredictionHorizonS": round(
-                    float(options.done_prediction_horizon_s), 6),
-                "donePredictionDtS": round(
-                    float(options.done_prediction_dt_s), 6),
-                "donePredictionMarginM": round(
-                    float(options.done_prediction_margin_m), 6),
-                "donePredictionOrientationMarginRad": round(
-                    float(options.done_prediction_orientation_margin_rad), 6),
-                "contactActionShield": (
-                    options.contact_action_shield.payload()),
             },
-            "tracking": dict(self.last_tracking_info),
-            "juggle": dict(self.last_juggle_info),
-            "estimator": dict(self.last_estimator_info),
-            "highBallOcclusionPrediction": dict(
+            "tracking": (
+                dict(self.last_tracking_info)
+                if str(options.control_mode) == "racket_tracking" else {}),
+            "juggle": (
+                dict(self.last_juggle_info)
+                if str(options.control_mode) == "mpc_juggle" else {}),
+            "estimator": _compact_inactive_diagnostic(
+                self.last_estimator_info),
+            "highBallOcclusionPrediction": _compact_inactive_diagnostic(
                 self.last_high_ball_occlusion_info),
+            "policyBallHandover": dict(
+                self.last_policy_ball_handover_info),
             "releaseGate": dict(self.last_release_gate_info),
             "ros": ros_light,
-            "simSyncLatest": dict(
-                (self.latest_sim_snapshot or {}).get("sync") or {}),
         }
+        scale_indices = [
+            index for index, value in enumerate(
+                options.policy_observation_scales)
+            if abs(float(value) - 1.0) > 1e-7
+        ]
+        if scale_indices:
+            sample["runtime"]["policyObservationScales"] = [
+                round(float(value), 6)
+                for value in options.policy_observation_scales
+            ]
+            sample["runtime"]["policyObservationScaleIndices"] = scale_indices
+        if not np.array_equal(policy_obs_unscaled, policy_obs):
+            sample["policyObsUnscaled"] = _rounded_vector(
+                policy_obs_unscaled)
         self.recorder.record_control_sample(sample)
 
     def _run_control_tick_locked(
@@ -17914,6 +19354,15 @@ class PolicySafetyProbe:
         ) = self._select_ball_source(
             drag_ball_pos, drag_ball_vel, drag_valid, options,
             include_feedback=make_snapshot)
+        inferred_impact = bool(
+            isinstance(camera_measurement, dict)
+            and camera_measurement.get("velocity_impact_detected", False))
+        previous_inferred_impact = bool(getattr(
+            self, "_previous_inferred_contact_flag", False))
+        if inferred_impact and not previous_inferred_impact:
+            self.incoherent_dq_ablation_inferred_impacts = int(getattr(
+                self, "incoherent_dq_ablation_inferred_impacts", 0)) + 1
+        self._previous_inferred_contact_flag = inferred_impact
         measured_p, measured_v = self._apply_ball_noise(
             ball_pos, ball_vel, valid, noise_std_m)
         (
@@ -17943,6 +19392,7 @@ class PolicySafetyProbe:
                     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
                     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
                     OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+                    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                 }):
             self._reset_policy_ball_sampling_contract()
         obs_p, obs_v, control_valid, age_override_s = (
@@ -18373,6 +19823,10 @@ class PolicySafetyProbe:
                 "controlMode": str(self.cfg.default_control_mode),
                 "policyProfile": str(self.cfg.policy_profile),
                 "activePolicyProfile": str(self.active_policy_profile),
+                "policyModel": str(getattr(
+                    self, "active_policy_model", GPU0_RMP_MODEL_V85)),
+                "activePolicyModel": str(getattr(
+                    self, "active_policy_model", GPU0_RMP_MODEL_V85)),
                 "policyGeneration": int(self.policy_generation),
                 "policyContract": _policy_runtime_contract(self.controller),
                 "policyObservationScales": list(
@@ -18470,6 +19924,8 @@ class PolicySafetyProbe:
                 "controlMode": str(runtime_options.control_mode),
                 "policyProfile": str(runtime_options.policy_profile),
                 "activePolicyProfile": str(self.active_policy_profile),
+                "policyModel": str(runtime_options.policy_model),
+                "activePolicyModel": str(self.active_policy_model),
                 "policyGeneration": int(self.policy_generation),
                 "policyContract": _policy_runtime_contract(self.controller),
                 "policyObservationScales": [round(float(value), 6)
@@ -18905,6 +20361,15 @@ class PolicySafetyProbe:
                 self.cfg.simcode6_policy_xml_path,
                 self.cfg.simcode6_sim_xml_path,
             ),
+            OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: (
+                (
+                    self.cfg.simcode7_v91_model_path
+                    if self.active_policy_model == GPU0_RMP_MODEL_V91
+                    else self.cfg.simcode7_v85_model_path
+                ),
+                self.cfg.simcode7_policy_xml_path,
+                self.cfg.simcode7_sim_xml_path,
+            ),
         }
         (
             active_model_path,
@@ -19044,6 +20509,20 @@ class PolicySafetyProbe:
                 "mpcDeltaWeight": 0.0,
                 "mpcMaxDeltaRad": 0.0,
             },
+            OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: {
+                "mode": "none",
+                "delayMs": 0.0,
+                "tauS": 0.0,
+                "gain": 1.0,
+                "mpcBeta": 0.0,
+                "mpcDelayScale": 1.0,
+                "mpcTauScale": 1.0,
+                "mpcHorizonSteps": 1,
+                "mpcTrackingWeight": 0.0,
+                "mpcNominalWeight": 0.0,
+                "mpcDeltaWeight": 0.0,
+                "mpcMaxDeltaRad": 0.0,
+            },
         }
         # Preserve explicit launch overrides for the profile used at startup;
         # the inactive profile retains its own known-good defaults.
@@ -19056,6 +20535,7 @@ class PolicySafetyProbe:
         }
         margin = 0.18
         return {
+            "policyRelease": _policy_release_contract_payload(),
             "controlRateHz": self.cfg.control_rate_hz,
             "backendControlLoop": bool(self.cfg.backend_control_loop),
             "backendSnapshotRateHz": self.cfg.backend_snapshot_rate_hz,
@@ -19120,6 +20600,22 @@ class PolicySafetyProbe:
                 "profiles": list(OBSERVATION_PROFILES),
                 "defaultProfile": str(self.cfg.policy_profile),
                 "activeProfile": str(self.active_policy_profile),
+                "modelOptions": [
+                    {
+                        "id": GPU0_RMP_MODEL_V85,
+                        "label": "V85 (original)",
+                        "path": str(self.cfg.simcode7_v85_model_path),
+                    },
+                    {
+                        "id": GPU0_RMP_MODEL_V91,
+                        "label": "V91 (new)",
+                        "path": str(self.cfg.simcode7_v91_model_path),
+                    },
+                ],
+                "defaultModel": str(
+                    self.active_policy_model or GPU0_RMP_MODEL_V85),
+                "activeModel": str(
+                    self.active_policy_model or GPU0_RMP_MODEL_V85),
                 "generation": int(self.policy_generation),
                 "modelPath": str(active_model_path),
                 "policyXmlPath": str(active_policy_xml_path),
@@ -20117,7 +21613,12 @@ HTML_TEMPLATE = r"""<!doctype html>
           <option value="simcode4_servo67" disabled>simcode4 compensation (disabled)</option>
           <option value="simcode5_pure_actuator67">simcode5 pure actuator (direct real command)</option>
           <option value="simcode6_qvel67">simcode6 qvel (direct real command)</option>
+          <option value="gpu0_qvel_real_rmp_v85">GPU0-QVEL/REAL-RMP</option>
         </select>
+      </div>
+      <div class="row" id="policyModelRow">
+        <label for="policyModel">RL model</label>
+        <select id="policyModel"></select>
       </div>
       <div class="section-title">Policy Observation Scale</div>
       <div class="section-note">每个维度独立保存：实际 actor 输入 = 原始观测 × 对应 scale。切换维度不会清除已设置的其他 scale。</div>
@@ -20342,6 +21843,10 @@ let simFrameLoading = false;
 let simFrameRequestAt = 0;
 let lastSimRequestAt = 0;
 let lastRenderAt = 0;
+// View geometry is intentionally latched.  Runtime snapshots may re-anchor
+// safety state while the robot follows the ball; applying those values every
+// tick makes the 2D/3D frame appear to chase the ball.
+let geometrySyncPending = false;
 let recordingActive = false;
 let recordingBusy = false;
 let recordingRunDir = '';
@@ -20409,6 +21914,8 @@ const mocapMarkerIdEl = document.getElementById('mocapMarkerId');
 const mocapMarkerRowEl = document.getElementById('mocapMarkerRow');
 const controlModeEl = document.getElementById('controlMode');
 const policyProfileEl = document.getElementById('policyProfile');
+const policyModelEl = document.getElementById('policyModel');
+const policyModelRowEl = document.getElementById('policyModelRow');
 const policyObservationScaleTargetEl = document.getElementById('policyObservationScaleTarget');
 const policyObservationScaleResetEl = document.getElementById('policyObservationScaleReset');
 let policyObservationScales = [];
@@ -20647,7 +22154,8 @@ function applyCompensationProfileDefaults(profile) {
   setNumberValue(inputs.compMpcNominalWeight, defaults.mpcNominalWeight, 2);
   setNumberValue(inputs.compMpcDeltaWeight, defaults.mpcDeltaWeight, 2);
   setNumberValue(inputs.compMpcMaxDeltaRad, defaults.mpcMaxDeltaRad, 3);
-  if (['simcode5_pure_actuator67', 'simcode6_qvel67'].includes(profile)) {
+  if (['simcode5_pure_actuator67', 'simcode6_qvel67',
+       'gpu0_qvel_real_rmp_v85'].includes(profile)) {
     flowEls.enableCompensation.checked = false;
   }
 }
@@ -20656,6 +22164,11 @@ function setControlDisabled(el, disabled) {
   el.disabled = disabled;
   const row = el.closest('.checkrow') || el.closest('.row') || el.parentElement;
   if (row) row.classList.toggle('disabled', disabled);
+}
+function syncPolicyModelControl() {
+  const enabled = policyProfileEl.value === 'gpu0_qvel_real_rmp_v85';
+  policyModelEl.disabled = !enabled;
+  policyModelRowEl.classList.toggle('disabled', !enabled);
 }
 function setResetInitialPoseOptions() {
   const defaults = CONFIG.resetInitialPoses || {};
@@ -20729,13 +22242,15 @@ function syncEstimatorModeControl() {
     setControlDisabled(el, impactResetOff);
   }
   const ageLockedTrueProfile = [
-    'simcode2_idealpd67', 'simcode3_actuator67'
+    'simcode2_idealpd67', 'simcode3_actuator67',
+    'gpu0_qvel_real_rmp_v85'
   ].includes(policyProfileEl.value);
   const ageLockedFalseProfile = [
     'simcode4_servo67', 'simcode5_pure_actuator67', 'simcode6_qvel67'
   ].includes(policyProfileEl.value);
   const directPhysicalActuatorProfile = (
-    ['simcode5_pure_actuator67', 'simcode6_qvel67'].includes(
+    ['simcode5_pure_actuator67', 'simcode6_qvel67',
+     'gpu0_qvel_real_rmp_v85'].includes(
       policyProfileEl.value));
   const simcode5DqAdapterProfile = (
     policyProfileEl.value === 'simcode5_pure_actuator67');
@@ -20813,7 +22328,9 @@ function syncEstimatorModeControl() {
       inputs.workspaceSafetyMode.value));
   const compensationOff = (
     flowEls.enableCompensation.disabled || !flowEls.enableCompensation.checked);
-  const contactShieldUnavailable = controlModeEl.value !== 'policy';
+  const contactShieldUnavailable = (
+    controlModeEl.value !== 'policy'
+    || policyProfileEl.value === 'gpu0_qvel_real_rmp_v85');
   setControlDisabled(
     flowEls.enableContactActionShield, contactShieldUnavailable);
   setControlDisabled(
@@ -21164,6 +22681,21 @@ function setRuntimeDefaults() {
   const policyDefaults = CONFIG.policy || {};
   const dqAdapterDefaults = policyDefaults.dqAdapter || {};
   policyProfileEl.value = policyDefaults.defaultProfile || 'legacy_bug_compatible';
+  policyModelEl.replaceChildren();
+  const policyModels = Array.isArray(policyDefaults.modelOptions)
+    ? policyDefaults.modelOptions : [];
+  for (const model of policyModels) {
+    const option = document.createElement('option');
+    option.value = model.id || 'v85';
+    option.textContent = model.label || option.value;
+    option.title = model.path || '';
+    policyModelEl.appendChild(option);
+  }
+  policyModelEl.value = policyDefaults.defaultModel || 'v85';
+  if (!policyModelEl.value && policyModelEl.options.length) {
+    policyModelEl.selectedIndex = 0;
+  }
+  syncPolicyModelControl();
   const observationNames = Array.isArray(policyDefaults.observationNames)
     ? policyDefaults.observationNames : [];
   observationNames.forEach((name, index) => {
@@ -21391,9 +22923,17 @@ controlModeEl.addEventListener('change', () => {
 });
 policyProfileEl.addEventListener('change', () => {
   juggleRunRequested = false;
+  geometrySyncPending = true;
   renderJuggleStartControl('disarmed after RL profile change');
   applyCompensationProfileDefaults(policyProfileEl.value);
+  syncPolicyModelControl();
   syncEstimatorModeControl();
+  drawAll();
+});
+policyModelEl.addEventListener('change', () => {
+  juggleRunRequested = false;
+  geometrySyncPending = true;
+  renderJuggleStartControl('disarmed after RL model change');
   drawAll();
 });
 function selectedObservationScaleIndex() {
@@ -23037,6 +24577,7 @@ async function step() {
         999),
       controlMode: controlModeEl.value || 'policy',
       policyProfile: policyProfileEl.value || 'legacy_bug_compatible',
+      policyModel: policyModelEl.value || 'v85',
       enablePolicyDqAdapter: (
         flowEls.enablePolicyDqAdapter.checked
         && !flowEls.enablePolicyDqAdapter.disabled),
@@ -23287,7 +24828,10 @@ async function step() {
       payload.recordingView = buildRecordingView('sample', false);
     }
     latest = await postJson('/step', payload);
-    updateConfigGeometryFromSnapshot(latest);
+    if (geometrySyncPending) {
+      updateConfigGeometryFromSnapshot(latest);
+      geometrySyncPending = false;
+    }
     if (latest.observedBall) {
       observedBall = {x: latest.observedBall[0], y: latest.observedBall[1], z: latest.observedBall[2]};
     } else {
@@ -23423,7 +24967,7 @@ async function step() {
 	    readoutEl.innerHTML = [
 	      `runtime: ${ros.enabled ? `${ros.useState ? 'ros-state' : 'local-state'} / ${ros.publishCommands ? 'publish' : 'dry-run'}` : 'local only'} proc=${CONFIG.controlSubprocess ? 'subproc' : 'inline'} ui=${fmt(STEP_RATE_HZ, 0)}Hz display=${fmt(DISPLAY_RATE_HZ, 0)}Hz`,
 	      `controller: selected=${controlModeEl.value || 'policy'} applied=${runtime.controlMode || 'waiting'}${latest.controlModePending ? ' (PENDING)' : ''}`,
-	      `RL profile: selected=${policyProfileEl.value || 'legacy_bug_compatible'} active=${runtime.activePolicyProfile || 'waiting'} generation=${runtime.policyGeneration ?? 0}`,
+	      `RL profile: selected=${policyProfileEl.value || 'legacy_bug_compatible'} active=${runtime.activePolicyProfile || 'waiting'} model=${policyModelEl.value || 'v85'}/${runtime.activePolicyModel || 'waiting'} generation=${runtime.policyGeneration ?? 0}`,
 	      `obs scale: editing=obs[${selectedScaleIndex}] × ${selectedScaleIndex >= 0 ? fmt(policyObservationScales[selectedScaleIndex], 3) : 'none'} configured={${configuredScaleBits.join(', ') || 'all 1'}} applied={${appliedScaleValues.length ? (appliedScaleBits.join(', ') || 'all 1') : 'waiting'}}`,
 	      `policy dq adapter: selected=${flowEls.enablePolicyDqAdapter.checked && !flowEls.enablePolicyDqAdapter.disabled ? 'on' : 'off'} applied=${dqAdapterBits}`,
 	      `reset pose: selected=${resetInitialPoseEl.value || 'default_1'} applied=${resetPose}`,
@@ -23485,11 +25029,13 @@ document.getElementById('reset').addEventListener('click', async () => {
   syncEstimatorModeControl();
   const data = await postJson('/reset', {
     resetInitialPose: resetInitialPoseEl.value || 'default_1',
-    policyProfile: policyProfileEl.value || 'legacy_bug_compatible'
+    policyProfile: policyProfileEl.value || 'legacy_bug_compatible',
+    policyModel: policyModelEl.value || 'v85'
   });
   latest = data;
   applyResetInitialPoseFromSnapshot(data);
   updateConfigGeometryFromSnapshot(data);
+  geometrySyncPending = false;
   ball = pointFromArray(data.rawBall || data.ball || data.observedBall || CONFIG.initialBall)
     || {x: CONFIG.initialBall[0], y: CONFIG.initialBall[1], z: CONFIG.initialBall[2]};
   observedBall = pointFromArray(data.observedBall) || {...ball};
@@ -24174,6 +25720,21 @@ class ControlSubprocessProxy:
         except ValueError:
             return None
 
+    @staticmethod
+    def _snapshot_policy_model(snapshot: Any) -> str | None:
+        if not isinstance(snapshot, dict):
+            return None
+        runtime = snapshot.get("runtime")
+        if not isinstance(runtime, dict):
+            return None
+        value = runtime.get("activePolicyModel", runtime.get("policyModel"))
+        if value is None:
+            return None
+        try:
+            return _normalize_gpu0_rmp_model(value)
+        except ValueError:
+            return None
+
     def _wait_for_runtime_options(
         self,
         requested_mode: str,
@@ -24183,6 +25744,7 @@ class ControlSubprocessProxy:
         requested_tracking_height_m: float,
         requested_tracking_use_mpc: bool,
         requested_policy_profile: str,
+        requested_policy_model: str,
         timeout_s: float = 0.5,
     ) -> bool:
         """Wait for the 200 Hz child loop to acknowledge critical UI changes."""
@@ -24203,6 +25765,8 @@ class ControlSubprocessProxy:
                 ) = self._snapshot_tracking_options(self.latest_snapshot)
                 applied_policy_profile = self._snapshot_policy_profile(
                     self.latest_snapshot)
+                applied_policy_model = self._snapshot_policy_model(
+                    self.latest_snapshot)
                 child_error = self.last_error
             if (applied == requested
                     and applied_publish == requested_publish_commands
@@ -24214,7 +25778,11 @@ class ControlSubprocessProxy:
                             - requested_tracking_height_m) <= 1e-6
                     and applied_tracking_use_mpc
                     == requested_tracking_use_mpc
-                    and applied_policy_profile == requested_policy_profile):
+                    and applied_policy_profile == requested_policy_profile
+                    and (
+                        requested_policy_profile
+                        != OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                        or applied_policy_model == requested_policy_model)):
                 return True
             if child_error is not None or not self.process.is_alive():
                 return False
@@ -24243,6 +25811,11 @@ class ControlSubprocessProxy:
         )
         requested_policy_profile = normalize_observation_profile(
             payload.get("policyProfile", self.cfg.policy_profile))
+        requested_policy_model = _normalize_gpu0_rmp_model(payload.get(
+            "policyModel",
+            self._snapshot_policy_model(self.latest_snapshot)
+            or GPU0_RMP_MODEL_V85,
+        ))
         requested_tracking_height_m = _payload_float(
             payload,
             "racketTrackingHeightOffsetM",
@@ -24270,6 +25843,8 @@ class ControlSubprocessProxy:
                 ) = self._snapshot_tracking_options(self.latest_snapshot)
                 applied_policy_profile = self._snapshot_policy_profile(
                     self.latest_snapshot)
+                applied_policy_model = self._snapshot_policy_model(
+                    self.latest_snapshot)
             if (applied_mode != requested_mode
                     or applied_publish != requested_publish_commands
                     or applied_prediction
@@ -24280,7 +25855,11 @@ class ControlSubprocessProxy:
                            - requested_tracking_height_m) > 1e-6
                     or applied_tracking_use_mpc
                     != requested_tracking_use_mpc
-                    or applied_policy_profile != requested_policy_profile):
+                    or applied_policy_profile != requested_policy_profile
+                    or (
+                        requested_policy_profile
+                        == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                        and applied_policy_model != requested_policy_model)):
                 self._wait_for_runtime_options(
                     requested_mode,
                     requested_publish_commands,
@@ -24289,6 +25868,7 @@ class ControlSubprocessProxy:
                     requested_tracking_height_m,
                     requested_tracking_use_mpc,
                     requested_policy_profile,
+                    requested_policy_model,
                 )
         self._drain_status()
         with self.lock:
@@ -24316,6 +25896,7 @@ class ControlSubprocessProxy:
                     applied_tracking_use_mpc,
                 ) = self._snapshot_tracking_options(snapshot)
                 applied_policy_profile = self._snapshot_policy_profile(snapshot)
+                applied_policy_model = self._snapshot_policy_model(snapshot)
                 snapshot["controlModeRequested"] = requested_control_mode
                 snapshot["controlModePending"] = bool(
                     applied_control_mode != requested_control_mode)
@@ -24332,6 +25913,11 @@ class ControlSubprocessProxy:
                 snapshot["policyProfileRequested"] = requested_policy_profile
                 snapshot["policyProfilePending"] = bool(
                     applied_policy_profile != requested_policy_profile)
+                snapshot["policyModelRequested"] = requested_policy_model
+                snapshot["policyModelPending"] = bool(
+                    requested_policy_profile
+                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                    and applied_policy_model != requested_policy_model)
                 return snapshot
             if self.last_error is not None:
                 return {"error": self.last_error, "traceback": self.last_traceback}
@@ -24722,13 +26308,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8765)
+    p.add_argument(
+        "--policy-release-manifest",
+        type=Path,
+        default=REPO_ROOT / "config" / "policy_release_manifest.json",
+    )
+    p.add_argument(
+        "--policy-release-id", default="simcode5_v5_recovery")
     p.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
     p.add_argument(
         "--policy-profile",
         type=normalize_observation_profile,
         choices=OBSERVATION_PROFILES,
-        default=OBSERVATION_PROFILE_SIMCODE6_QVEL67,
-        help="Initial RL actor/observation profile; both profiles remain switchable in the UI.",
+        default=OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+        help="Release-locked initial RL actor/observation profile.",
     )
     p.add_argument(
         "--simcode2-model-path", type=Path,
@@ -24760,8 +26353,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--simcode6-policy-xml-path", type=Path,
         default=DEFAULT_SIMCODE6_POLICY_XML)
+    p.add_argument(
+        "--simcode7-model-path", type=Path,
+        default=DEFAULT_SIMCODE7_MODEL_PATH)
+    p.add_argument(
+        "--simcode7-v85-model-path", type=Path,
+        default=DEFAULT_SIMCODE7_V85_MODEL_PATH)
+    p.add_argument(
+        "--simcode7-v91-model-path", type=Path,
+        default=DEFAULT_SIMCODE7_V91_MODEL_PATH)
+    p.add_argument(
+        "--simcode7-policy-xml-path", type=Path,
+        default=DEFAULT_SIMCODE7_POLICY_XML)
     p.add_argument("--robot-xml-path", type=Path, default=DEFAULT_ROBOT_XML)
-    p.add_argument("--policy-obs-dim", type=int, choices=(50, 67), default=67)
+    p.add_argument(
+        "--policy-obs-dim", type=int, choices=(50, 57, 67), default=67)
     p.add_argument(
         "--reset-initial-pose",
         default=RESET_INITIAL_POSE_DEFAULT,
@@ -24929,6 +26535,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--control-rate-hz", type=finite_float, default=200.0)
     p.add_argument(
+        "--policy-dq-mode",
+        choices=tuple(mode.value for mode in PolicyDqMode),
+        default=PolicyDqMode.RAW_COHERENT.value,
+    )
+    p.add_argument(
+        "--allow-incoherent-dq-ablation", action="store_true")
+    p.add_argument(
+        "--incoherent-dq-ablation-max-impacts", type=int, default=0)
+    p.add_argument(
+        "--policy-plant-matcher-mode",
+        choices=tuple(mode.value for mode in PlantMatcherMode),
+        default=PlantMatcherMode.SHADOW.value,
+    )
+    p.add_argument(
+        "--policy-plant-matcher-real-config",
+        type=Path,
+        default=DEFAULT_POLICY_PLANT_REAL_CONFIG,
+    )
+    p.add_argument(
+        "--allow-policy-plant-matcher-apply", action="store_true")
+    p.add_argument(
         "--enable-policy-dq-adapter",
         action="store_true",
         help=(
@@ -24963,7 +26590,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "0.5 divides those actor inputs by two for both real and mirror."),
     )
     p.add_argument("--ball-lost-failsafe-timeout-s", type=finite_float, default=0.6)
-    p.add_argument("--enable-safety-limiter", action="store_true")
     p.add_argument("--safety-parking-velocity-scale", type=finite_float, default=0.08)
     p.add_argument("--safety-parking-acceleration-scale", type=finite_float, default=0.06)
     p.add_argument(
@@ -25222,6 +26848,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Default Gaussian position noise std for ball observations, in meters.",
     )
     p.add_argument("--ball-observation-rate-hz", type=finite_float, default=90.0)
+    p.add_argument(
+        "--policy-ball-handover-mode",
+        choices=tuple(mode.value for mode in PolicyBallHandoverMode),
+        default=PolicyBallHandoverMode.LEGACY_FORCE_FRESH.value,
+    )
     p.add_argument(
         "--backend-control-loop",
         action="store_true",
@@ -25803,6 +27434,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--simcode6-sim-xml-path", type=Path,
         default=DEFAULT_SIMCODE6_POLICY_XML)
     p.add_argument(
+        "--simcode7-sim-xml-path", type=Path,
+        default=DEFAULT_SIMCODE7_POLICY_XML)
+    p.add_argument(
         "--enable-sim-video",
         action="store_true",
         help=(
@@ -25831,40 +27465,54 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
     simcode5_policy_xml = args.simcode5_policy_xml_path.expanduser().resolve()
     simcode6_model_path = args.simcode6_model_path.expanduser().resolve()
     simcode6_policy_xml = args.simcode6_policy_xml_path.expanduser().resolve()
+    simcode7_model_path = args.simcode7_model_path.expanduser().resolve()
+    simcode7_v85_model_path = (
+        args.simcode7_v85_model_path.expanduser().resolve())
+    simcode7_v91_model_path = (
+        args.simcode7_v91_model_path.expanduser().resolve())
+    simcode7_policy_xml = args.simcode7_policy_xml_path.expanduser().resolve()
     robot_xml = args.robot_xml_path.expanduser().resolve()
     yolo_model_path = args.yolo_model_path.expanduser().resolve()
-    if not model_path.is_file():
-        raise FileNotFoundError(f"model checkpoint not found: {model_path}")
-    if not simcode2_model_path.is_file():
-        raise FileNotFoundError(
-            f"simcode2 ideal-PD67 checkpoint not found: {simcode2_model_path}")
-    if not simcode2_policy_xml.is_file():
-        raise FileNotFoundError(
-            f"simcode2 policy XML not found: {simcode2_policy_xml}")
-    if not simcode3_model_path.is_file():
-        raise FileNotFoundError(
-            f"simcode3 actuator67 checkpoint not found: {simcode3_model_path}")
-    if not simcode3_policy_xml.is_file():
-        raise FileNotFoundError(
-            f"simcode3 policy XML not found: {simcode3_policy_xml}")
-    if not simcode4_model_path.is_file():
-        raise FileNotFoundError(
-            f"simcode4 servo67 checkpoint not found: {simcode4_model_path}")
-    if not simcode4_policy_xml.is_file():
-        raise FileNotFoundError(
-            f"simcode4 policy XML not found: {simcode4_policy_xml}")
-    if not simcode5_model_path.is_file():
-        raise FileNotFoundError(
-            f"simcode5 pure-actuator checkpoint not found: {simcode5_model_path}")
-    if not simcode5_policy_xml.is_file():
-        raise FileNotFoundError(
-            f"simcode5 policy XML not found: {simcode5_policy_xml}")
-    if not simcode6_model_path.is_file():
-        raise FileNotFoundError(
-            f"simcode6 qvel67 checkpoint not found: {simcode6_model_path}")
-    if not simcode6_policy_xml.is_file():
-        raise FileNotFoundError(
-            f"simcode6 policy XML not found: {simcode6_policy_xml}")
+    # Only the release-locked profile is a launch dependency.  Historical UI
+    # profiles may be absent in a clean checkout; requiring every old fixture
+    # here turned one missing asset into many identical FileNotFound errors.
+    profile = normalize_observation_profile(args.policy_profile)
+    selected_assets = {
+        OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: (
+            ("legacy checkpoint", model_path),
+            ("legacy policy XML", robot_xml),
+        ),
+        OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: (
+            ("simcode2 ideal-PD67 checkpoint", simcode2_model_path),
+            ("simcode2 policy XML", simcode2_policy_xml),
+        ),
+        OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67: (
+            ("simcode3 actuator67 checkpoint", simcode3_model_path),
+            ("simcode3 policy XML", simcode3_policy_xml),
+        ),
+        OBSERVATION_PROFILE_SIMCODE4_SERVO67: (
+            ("simcode4 servo67 checkpoint", simcode4_model_path),
+            ("simcode4 policy XML", simcode4_policy_xml),
+        ),
+        OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: (
+            ("simcode5 pure-actuator checkpoint", simcode5_model_path),
+            ("simcode5 policy XML", simcode5_policy_xml),
+        ),
+        OBSERVATION_PROFILE_SIMCODE6_QVEL67: (
+            ("simcode6 qvel67 checkpoint", simcode6_model_path),
+            ("simcode6 policy XML", simcode6_policy_xml),
+        ),
+        OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: (
+            ("GPU0-QVEL/REAL-RMP selected checkpoint", simcode7_model_path),
+            ("GPU0-QVEL/REAL-RMP V85 checkpoint", simcode7_v85_model_path),
+            ("GPU0-QVEL/REAL-RMP V91 checkpoint", simcode7_v91_model_path),
+            ("simcode7 policy XML", simcode7_policy_xml),
+        ),
+    }[profile]
+    for label, selected_path in selected_assets:
+        if not selected_path.is_file():
+            raise FileNotFoundError(
+                f"selected release {label} not found: {selected_path}")
     if not robot_xml.is_file():
         raise FileNotFoundError(f"robot XML not found: {robot_xml}")
     if bool(args.camera_ball) and not yolo_model_path.is_file():
@@ -25875,23 +27523,19 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
     simcode4_sim_xml = args.simcode4_sim_xml_path.expanduser().resolve()
     simcode5_sim_xml = args.simcode5_sim_xml_path.expanduser().resolve()
     simcode6_sim_xml = args.simcode6_sim_xml_path.expanduser().resolve()
-    if bool(args.enable_sim_mirror) and not sim_xml.is_file():
-        raise FileNotFoundError(f"sim XML not found: {sim_xml}")
-    if bool(args.enable_sim_mirror) and not simcode2_sim_xml.is_file():
+    simcode7_sim_xml = args.simcode7_sim_xml_path.expanduser().resolve()
+    selected_sim_xml = {
+        OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: sim_xml,
+        OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: simcode2_sim_xml,
+        OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67: simcode3_sim_xml,
+        OBSERVATION_PROFILE_SIMCODE4_SERVO67: simcode4_sim_xml,
+        OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: simcode5_sim_xml,
+        OBSERVATION_PROFILE_SIMCODE6_QVEL67: simcode6_sim_xml,
+        OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: simcode7_sim_xml,
+    }[profile]
+    if bool(args.enable_sim_mirror) and not selected_sim_xml.is_file():
         raise FileNotFoundError(
-            f"simcode2 sim XML not found: {simcode2_sim_xml}")
-    if bool(args.enable_sim_mirror) and not simcode3_sim_xml.is_file():
-        raise FileNotFoundError(
-            f"simcode3 sim XML not found: {simcode3_sim_xml}")
-    if bool(args.enable_sim_mirror) and not simcode4_sim_xml.is_file():
-        raise FileNotFoundError(
-            f"simcode4 sim XML not found: {simcode4_sim_xml}")
-    if bool(args.enable_sim_mirror) and not simcode5_sim_xml.is_file():
-        raise FileNotFoundError(
-            f"simcode5 sim XML not found: {simcode5_sim_xml}")
-    if bool(args.enable_sim_mirror) and not simcode6_sim_xml.is_file():
-        raise FileNotFoundError(
-            f"simcode6 sim XML not found: {simcode6_sim_xml}")
+            f"selected release sim XML not found: {selected_sim_xml}")
     hybrid_ball_tracker_config_path = (
         args.hybrid_ball_tracker_config_path.expanduser().resolve())
     if (bool(args.enable_hybrid_ball_tracker)
@@ -25899,21 +27543,32 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         raise ValueError(
             "--enable-hybrid-ball-tracker requires the ball-state "
             "estimator master switch to remain enabled")
-    if not hybrid_ball_tracker_config_path.is_file():
-        raise FileNotFoundError(
-            "hybrid ball tracker config not found: "
-            f"{hybrid_ball_tracker_config_path}")
-    try:
-        HybridBallTrackerConfig.from_yaml(
-            hybrid_ball_tracker_config_path)
-    except Exception as exc:
-        raise ValueError(
-            "invalid hybrid ball tracker config "
-            f"{hybrid_ball_tracker_config_path}: {exc}") from exc
+    if bool(args.enable_hybrid_ball_tracker):
+        if not hybrid_ball_tracker_config_path.is_file():
+            raise FileNotFoundError(
+                "hybrid ball tracker config not found: "
+                f"{hybrid_ball_tracker_config_path}")
+        try:
+            HybridBallTrackerConfig.from_yaml(
+                hybrid_ball_tracker_config_path)
+        except Exception as exc:
+            raise ValueError(
+                "invalid hybrid ball tracker config "
+                f"{hybrid_ball_tracker_config_path}: {exc}") from exc
     mocap_rigid_body_slot = (
         int(args.mocap_rigid_body_slot)
         if args.mocap_rigid_body_slot is not None
         else int(args.mocap_rigid_body_id))
+    dq_mode = PolicyDqMode.parse(args.policy_dq_mode)
+    if (dq_mode is PolicyDqMode.RAW_COHERENT
+            and not math.isclose(
+                float(args.policy_dq_observation_scale),
+                1.0,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )):
+        raise ValueError(
+            "raw_coherent requires POLICY_DQ_OBSERVATION_SCALE=1.0")
     return ProbeConfig(
         host=args.host,
         port=int(args.port),
@@ -25929,9 +27584,16 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         simcode5_policy_xml_path=simcode5_policy_xml,
         simcode6_model_path=simcode6_model_path,
         simcode6_policy_xml_path=simcode6_policy_xml,
+        simcode7_model_path=simcode7_model_path,
+        simcode7_v85_model_path=simcode7_v85_model_path,
+        simcode7_v91_model_path=simcode7_v91_model_path,
+        simcode7_policy_xml_path=simcode7_policy_xml,
         robot_xml_path=robot_xml,
         policy_obs_dim=int(args.policy_obs_dim),
-        reset_initial_pose_id=_reset_initial_pose_id(args.reset_initial_pose),
+        reset_initial_pose_id=(
+            RESET_INITIAL_POSE_HORIZONTAL
+            if profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+            else _reset_initial_pose_id(args.reset_initial_pose)),
         default_control_mode=_control_mode(args.default_control_mode),
         racket_tracking_height_offset_m=min(
             1.0, max(0.0, float(args.racket_tracking_height_offset_m))),
@@ -26043,6 +27705,17 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
                 args.juggle_mpc_terminal_velocity_tolerance_m_s))),
         control_rate_hz=float(args.control_rate_hz),
         enable_policy_dq_adapter=bool(args.enable_policy_dq_adapter),
+        policy_dq_mode=dq_mode.value,
+        allow_incoherent_dq_ablation=bool(
+            args.allow_incoherent_dq_ablation),
+        incoherent_dq_ablation_max_impacts=max(
+            0, int(args.incoherent_dq_ablation_max_impacts)),
+        policy_plant_matcher_mode=PlantMatcherMode.parse(
+            args.policy_plant_matcher_mode).value,
+        policy_plant_matcher_real_config=(
+            args.policy_plant_matcher_real_config.expanduser().resolve()),
+        allow_policy_plant_matcher_apply=bool(
+            args.allow_policy_plant_matcher_apply),
         policy_dq_adapter_gain=tuple(
             float(value) for value in args.policy_dq_adapter_gain),
         policy_dq_adapter_tau_s=tuple(
@@ -26053,7 +27726,9 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
             100.0, max(-100.0, float(
                 args.policy_dq_observation_scale))),
         ball_lost_timeout_s=float(args.ball_lost_failsafe_timeout_s),
-        enable_safety_limiter=bool(args.enable_safety_limiter),
+        # Hard invariant: normal policy/hold/parking commands never use the
+        # safety limiter.  Soft workspace reset owns the sole filter() call.
+        enable_safety_limiter=False,
         safety_parking_velocity_scale=min(
             1.0, max(1e-3, float(args.safety_parking_velocity_scale))),
         safety_parking_acceleration_scale=min(
@@ -26186,6 +27861,8 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         ball_noise_std_m=max(0.0, float(args.ball_noise_std_m)),
         ball_observation_rate_hz=min(
             240.0, max(1.0, float(args.ball_observation_rate_hz))),
+        policy_ball_handover_mode=PolicyBallHandoverMode.parse(
+            args.policy_ball_handover_mode).value,
         backend_control_loop=bool(args.backend_control_loop),
         backend_snapshot_rate_hz=min(
             120.0, max(1.0, float(args.backend_snapshot_rate_hz))),
@@ -26415,9 +28092,9 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         sim_mirror_default_enabled=bool(
             args.enable_sim_mirror and not args.sim_mirror_default_disabled),
         sim_subprocess=not bool(args.disable_sim_subprocess),
-        # Simcode4's target-aware planner ordering remains MJX-only.  The
-        # simcode5 CPU mirror restores the checkpoint plant settings and keeps
-        # an explicit operator-selected MJX backend available for exact runs.
+        # Simcode4's target-aware planner remains MJX-only.  Simcode5/6 and
+        # simcode7 restore their checkpoint plants on the CPU MuJoCo mirror;
+        # MJX remains available when explicitly selected.
         sim_backend=(
             "mjx"
             if normalize_observation_profile(args.policy_profile)
@@ -26430,6 +28107,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         simcode4_sim_xml_path=simcode4_sim_xml,
         simcode5_sim_xml_path=simcode5_sim_xml,
         simcode6_sim_xml_path=simcode6_sim_xml,
+        simcode7_sim_xml_path=simcode7_sim_xml,
         sim_enable_video_frames=bool(args.enable_sim_video),
         sim_frame_rate_hz=min(120.0, max(1.0, float(args.sim_frame_rate_hz))),
         sim_render_width=max(320, int(args.sim_render_width)),
@@ -26482,8 +28160,103 @@ def _prewarm_jax_cuda_for_mjx(cfg: ProbeConfig) -> None:
     _prewarm_jax_cuda_backend(str(cfg.sim_backend))
 
 
+def _validate_release_before_runtime(args: argparse.Namespace) -> dict[str, Any]:
+    """Verify selected bytes before constructing anything that can publish."""
+    profile = normalize_observation_profile(args.policy_profile)
+    if profile == OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67:
+        checkpoint_path = args.simcode5_model_path
+        xml_path = args.simcode5_policy_xml_path
+    elif profile == OBSERVATION_PROFILE_SIMCODE6_QVEL67:
+        checkpoint_path = args.simcode6_model_path
+        xml_path = args.simcode6_policy_xml_path
+    elif profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+        checkpoint_path = args.simcode7_model_path
+        xml_path = args.simcode7_policy_xml_path
+    else:
+        raise ReleaseContractError(
+            f"policy profile {profile!r} has no versioned live release")
+    environment_overrides = {
+        key: os.environ[key]
+        for key in (
+            "POLICY_RELEASE_ID",
+            "POLICY_PROFILE",
+            "SIMCODE5_MODEL_PATH",
+            "SIMCODE5_POLICY_XML_PATH",
+            "SIMCODE6_MODEL_PATH",
+            "SIMCODE6_POLICY_XML_PATH",
+            "SIMCODE7_MODEL_PATH",
+            "SIMCODE7_POLICY_XML_PATH",
+            "POLICY_OBS_DIM",
+            "CONTROL_RATE_HZ",
+            "BALL_OBSERVATION_RATE_HZ",
+            "POLICY_DQ_MODE",
+            "POLICY_PLANT_MATCHER_MODE",
+            "POLICY_PLANT_MATCHER_REAL_CONFIG",
+            "ALLOW_POLICY_PLANT_MATCHER_APPLY",
+        )
+        if key in os.environ
+    }
+    # Persist effective parser values as well as the literal environment.
+    # This keeps direct Python CLI launches just as auditable as the shell
+    # entry point, without trying to infer which argparse values were defaults.
+    explicit = {
+        "environment": environment_overrides,
+        "effective_cli": {
+            "policy_release_manifest": str(args.policy_release_manifest),
+            "policy_release_id": str(args.policy_release_id),
+            "policy_profile": profile,
+            "checkpoint_path": str(checkpoint_path),
+            "policy_xml_path": str(xml_path),
+            "policy_obs_dim": int(args.policy_obs_dim),
+            "control_rate_hz": float(args.control_rate_hz),
+            "ball_observation_rate_hz": float(
+                args.ball_observation_rate_hz),
+            "policy_dq_mode": str(getattr(
+                args, "policy_dq_mode", "raw_coherent")),
+            "policy_plant_matcher_mode": str(getattr(
+                args, "policy_plant_matcher_mode", "shadow")),
+            "policy_plant_matcher_real_config": str(getattr(
+                args, "policy_plant_matcher_real_config", "")),
+            "allow_policy_plant_matcher_apply": bool(getattr(
+                args, "allow_policy_plant_matcher_apply", False)),
+            "policy_ball_handover_mode": str(getattr(
+                args, "policy_ball_handover_mode",
+                "legacy_force_fresh")),
+        },
+    }
+    validated = validate_policy_release(
+        args.policy_release_manifest,
+        args.policy_release_id,
+        REPO_ROOT,
+        policy_profile=profile,
+        checkpoint_path=checkpoint_path,
+        policy_xml_path=xml_path,
+        observation_dim=int(args.policy_obs_dim),
+        control_rate_hz=float(args.control_rate_hz),
+        deployment_ball_observation_rate_hz=float(
+            args.ball_observation_rate_hz),
+        policy_dq_mode=str(getattr(args, "policy_dq_mode", "raw_coherent")),
+        explicit_overrides=explicit,
+    )
+    payload = validated.as_dict()
+    os.environ["POLICY_RELEASE_CONTRACT_JSON"] = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"))
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    try:
+        release_contract = _validate_release_before_runtime(args)
+    except ReleaseContractError as exc:
+        print(f"ERROR: policy release contract failed: {exc}", file=sys.stderr)
+        return 2
+    print(
+        "[ProbeConfig] validated release "
+        f"id={release_contract['release_id']} "
+        f"manifest_sha256={release_contract['manifest_sha256']} "
+        f"checkpoint_sha256={release_contract['checkpoint_sha256']} "
+        f"xml_sha256={release_contract['policy_xml_sha256']}")
     cfg = config_from_args(args)
     if bool(args.control_subprocess):
         cfg.backend_control_loop = True
@@ -26561,6 +28334,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Simcode4 servo67 model: {cfg.simcode4_model_path}")
         print(f"Simcode5 pure-actuator67 model: {cfg.simcode5_model_path}")
         print(f"Simcode6 qvel67 model: {cfg.simcode6_model_path}")
+        print(f"GPU0-QVEL/REAL-RMP selected model: {cfg.simcode7_model_path}")
+        print(f"GPU0-QVEL/REAL-RMP V85 model: {cfg.simcode7_v85_model_path}")
+        print(f"GPU0-QVEL/REAL-RMP V91 model: {cfg.simcode7_v91_model_path}")
         print(f"Robot XML: {cfg.robot_xml_path}")
         if cfg.enable_sim_mirror:
             print(

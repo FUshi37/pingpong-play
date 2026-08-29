@@ -1,0 +1,38 @@
+{
+  "checkpoint": {
+    "path": "/home/spirit-ai/pingpong_moz1/simcode5/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/goal_d455_gpu1_pure_stable_v5_recovery_20260802/mjx_curriculum_best.pkl",
+    "sha256": "9d7e94e9ef803fcbe9385ab97485626b2529394be62c75136c69d873adffaa79"
+  },
+  "claimScope": "frozen one-step actor sensitivity only; not a closed-loop replay and not paired real A/B evidence",
+  "executionContract": "same_saved_rows_pure_numpy_no_ros_no_jax_no_gpu",
+  "input": {
+    "handoverIndex": 370,
+    "path": "/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/interactive_recordings/record_new5/probe_recording_20260813_144530/control_samples.jsonl",
+    "policyRows": 878,
+    "secondInferredImpactIndex": 506,
+    "sha256": "e3c5bcecf75bd0d557b3afe2df70197822eb00b062468d813b4979d3091f5d4d",
+    "windowEndIndexInclusive": 506,
+    "windowStartIndex": 340
+  },
+  "pairedResult": {
+    "finalPreSecondImpactActionDifferenceRms": 0.0,
+    "handoverActionJump": {
+      "legacy": 0.1654749437814764,
+      "strict": 0.15457916529703475
+    },
+    "handoverObservationJump": {
+      "legacy": 0.04945493727792773,
+      "strict": 0.0
+    },
+    "legacyActionJumpMax": 1.5639605837681676,
+    "legacyObservationJumpMax": 3.1764048392339017,
+    "preSecondImpactCumulativeObservationDifference": 3.735206200113238,
+    "strictActionJumpMax": 1.5639605837681676,
+    "strictObservationJumpMax": 3.1764048392339017
+  },
+  "rates": {
+    "controlHz": 200.0,
+    "deploymentBallObservationHz": 90.0
+  },
+  "schemaVersion": 1
+}

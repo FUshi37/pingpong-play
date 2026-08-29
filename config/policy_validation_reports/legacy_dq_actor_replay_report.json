@@ -1,0 +1,61 @@
+{
+  "acceptance": {
+    "allActorP99RmsBelow1e5": true,
+    "allLegacyDqExactFloat32": true
+  },
+  "checkpoint": {
+    "path": "/home/spirit-ai/pingpong_moz1/simcode5/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/goal_d455_gpu1_pure_stable_v5_recovery_20260802/mjx_curriculum_best.pkl",
+    "sha256": "9d7e94e9ef803fcbe9385ab97485626b2529394be62c75136c69d873adffaa79"
+  },
+  "claimScope": "historical_actor_and_legacy_dq_reproduction_only; does_not_claim_plant_alignment_or_real_robot_benefit",
+  "executionContract": "pure_numpy_no_ros_no_jax_no_gpu",
+  "recordings": [
+    {
+      "actorActionRms": {
+        "count": 1883,
+        "max": 3.3949288535950473e-06,
+        "mean": 1.1778811397881964e-06,
+        "p50": 1.1235325700909016e-06,
+        "p90": 1.8878743730965652e-06,
+        "p99": 2.6504434345042695e-06
+      },
+      "actorP99Below1e5": true,
+      "adapterSegmentResetCount": 5,
+      "legacyDqExactFloat32": true,
+      "legacyDqRms": {
+        "count": 1883,
+        "max": 0.0,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p99": 0.0
+      },
+      "path": "/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/interactive_recordings/record_new4/probe_recording_20260811_202932/control_samples.jsonl",
+      "sha256": "7f8e0b443e99900aaccf63fc8990929d65315af97a241d85b1c3e27847fd3b8d"
+    },
+    {
+      "actorActionRms": {
+        "count": 878,
+        "max": 2.757303491307539e-06,
+        "mean": 1.0171939292934218e-06,
+        "p50": 9.57817746893852e-07,
+        "p90": 1.608872389624594e-06,
+        "p99": 2.299777249845648e-06
+      },
+      "actorP99Below1e5": true,
+      "adapterSegmentResetCount": 0,
+      "legacyDqExactFloat32": true,
+      "legacyDqRms": {
+        "count": 878,
+        "max": 0.0,
+        "mean": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p99": 0.0
+      },
+      "path": "/home/spirit-ai/pingpong_moz1/src/pingpong_moz1/pingpong_controller/outputs/interactive_recordings/record_new5/probe_recording_20260813_144530/control_samples.jsonl",
+      "sha256": "e3c5bcecf75bd0d557b3afe2df70197822eb00b062468d813b4979d3091f5d4d"
+    }
+  ],
+  "schemaVersion": 1
+}

@@ -650,7 +650,9 @@ class PingPongControllerNode(Node):
         self.declare_parameter('mocap_velocity_window_frames', 3)
         self.declare_parameter('mocap_velocity_window_max_span_s', 0.05)
 
-        # Safety limiter: can be disabled for simulation/testing
+        # Legacy parameter retained so old launch files still parse. Runtime
+        # policy/hold/parking commands are hard-wired to bypass the limiter;
+        # only an explicit reset profile may use it.
         self.declare_parameter('enable_safety_limiter', False)
         self.declare_parameter('safety_parking_velocity_scale', 0.08)
         self.declare_parameter('safety_parking_acceleration_scale', 0.06)
@@ -1304,9 +1306,16 @@ class PingPongControllerNode(Node):
             else EXPECTED_OBS_DIM)
         self._configure_policy_observation_path()
 
-        # Safety limiter enable flag
-        self.enable_safety_limiter = bool(
+        # Hard invariant shared with the interactive probe: policy commands
+        # cannot enable the legacy limiter. Keep the requested value only so
+        # a stale launch file can be diagnosed clearly.
+        requested_safety_limiter = bool(
             self.get_parameter('enable_safety_limiter').value)
+        self.enable_safety_limiter = False
+        if requested_safety_limiter:
+            self.get_logger().warn(
+                'enable_safety_limiter=true ignored: the policy command path '
+                'is hard-disabled; only explicit reset commands may use it')
         self.safety_parking_velocity_scale = float(
             self.get_parameter('safety_parking_velocity_scale').value)
         self.safety_parking_acceleration_scale = float(
@@ -1575,9 +1584,7 @@ class PingPongControllerNode(Node):
                 'RL policy disabled (enable_rl_policy=False); '
                 'publishing default joint positions')
 
-        # Safety limiter: hardcoded RightArm position/vel/acc limits, applied
-        # right before publishing MechUnitCmd. Must NOT be skipped even if the
-        # RL policy or detector is disabled.
+        # Construct the limiter only for the explicit reset command path.
         initial_safe_cmd = (
             self.rl_controller.current_arm_cmd_q().astype(np.float64)
             if self.rl_controller is not None
@@ -1587,18 +1594,9 @@ class PingPongControllerNode(Node):
             initial_safe_cmd, dt=self.control_dt,
             parking_velocity_scale=self.safety_parking_velocity_scale,
             parking_acceleration_scale=self.safety_parking_acceleration_scale)
-        if self.enable_safety_limiter:
-            self.get_logger().info(
-                f'Safety limiter ENABLED: dt={self.control_dt:.4f}s '
-                f'(control_rate_hz={self.control_rate_hz:.1f}, '
-                f'parking_vel_scale='
-                f'{self.safety_limiter.parking_velocity_scale:.3f}, '
-                f'parking_acc_scale='
-                f'{self.safety_limiter.parking_acceleration_scale:.3f})')
-        else:
-            self.get_logger().warn(
-                f'Safety limiter DISABLED: raw RL commands will be published directly! '
-                f'Only use in simulation.')
+        self.get_logger().warn(
+            'Safety limiter hard-disabled for policy/hold/parking commands; '
+            'explicit reset profile remains enabled')
         self._safety_log_period_s = 1.0
         self._safety_log_last_wall = time.time()
 
@@ -4444,7 +4442,7 @@ class PingPongControllerNode(Node):
                 'moving right arm to safe init posture')
         target = self.safe_init_pose_q
         self._last_raw_joint_positions = target.copy()
-        self._publish_right_arm_command(target, stamp, profile='parking')
+        self._publish_right_arm_command(target, stamp, profile='reset')
         # Sync the policy integrator to what was actually commanded this tick
         # (the ramp position) with zero velocity, so a resume does not snap.
         self._sync_rl_integrator_to_last_safe_command()
@@ -4677,7 +4675,7 @@ class PingPongControllerNode(Node):
                 f'Pausing RL and moving to safe pose.{detail}')
         target = self.safe_init_pose_q
         self._last_raw_joint_positions = target.copy()
-        self._publish_right_arm_command(target, stamp, profile='parking')
+        self._publish_right_arm_command(target, stamp, profile='reset')
         self._sync_rl_integrator_to_last_safe_command()
 
     def _run_duration_failsafe(self, stamp: Time) -> None:
@@ -4701,7 +4699,7 @@ class PingPongControllerNode(Node):
                     daemon=True).start()
         target = self.safe_init_pose_q
         self._last_raw_joint_positions = target.copy()
-        self._publish_right_arm_command(target, stamp, profile='parking')
+        self._publish_right_arm_command(target, stamp, profile='reset')
         self._sync_rl_integrator_to_last_safe_command()
 
     def _maybe_log_done_status(self, conditions: dict) -> None:
@@ -5855,12 +5853,12 @@ class PingPongControllerNode(Node):
     def _publish_right_arm_command(
             self, joint_positions: np.ndarray, stamp: Time,
             *, profile: str = 'normal'):
-        """Safety-limit + publish a right-arm command on command_topic.
+        """Publish a right-arm command on command_topic.
 
         This is the ONLY path that may send right-arm joint commands: every
-        raw right-arm target (RL or init-pose) must come through here so it
-        passes `RightArmCommandSafetyLimiter` first. The safe command is
-        wrapped in a single-element MechUnitCmdArray.
+        raw right-arm target (RL or init-pose) comes through here. Normal,
+        hold, and parking targets pass through unchanged; an explicit reset
+        profile alone uses `RightArmCommandSafetyLimiter`.
         """
         if len(self.joint_names) != self.safety_limiter.N_JOINTS:
             self.get_logger().error(
@@ -5872,18 +5870,25 @@ class PingPongControllerNode(Node):
 
         raw = np.asarray(joint_positions, dtype=np.float64).reshape(-1)
 
-        # Apply the normal safety limiter only when enabled, but always keep the
-        # low-speed parking profile active for reset/failsafe return-to-init.
-        use_limiter = (
-            self.enable_safety_limiter
-            or str(profile).strip().lower() != 'normal')
+        # No runtime flag may route policy/hold/parking commands through the
+        # limiter. Explicit reset-to-pose is the sole temporary exception.
+        profile_name = str(profile).strip().lower()
+        use_limiter = profile_name == 'reset'
         if use_limiter:
+            if getattr(self, '_last_command_profile', None) != 'reset':
+                feedback_q, _ = self._get_right_arm_feedback()
+                reset_seed = (
+                    feedback_q if feedback_q is not None
+                    else self._last_safe_joint_positions)
+                self.safety_limiter.reset(np.asarray(
+                    reset_seed, dtype=np.float64))
             safe_cmd = self.safety_limiter.filter(raw, profile=profile)
             self._maybe_log_safety_counts()
         else:
-            # Bypass safety limiter - use raw command directly
+            # Do not call observe(): its mode-transition derivative is hidden
+            # limiter state and previously corrupted a later hold command.
             safe_cmd = raw.copy()
-            self.safety_limiter.observe(safe_cmd)
+        self._last_command_profile = profile_name
 
         self._last_safe_joint_positions = safe_cmd.copy()
 
@@ -5902,7 +5907,7 @@ class PingPongControllerNode(Node):
         controlled by this juggling controller (matching the
         on-hardware-verified pingpong_replay). Other mechanical units (left
         arm, leg+waist, head) are maintained by their own controllers or
-        teleop. The right-arm command is safety-limited and wrapped in a
+        teleop. The right-arm command follows the smooth init ramp and is wrapped in a
         single-element MechUnitCmdArray, keeping the init phase at the same
         topic rate and message structure as the RL phase (one right-arm cmd
         per tick, mu_idx=0 only).
@@ -5917,7 +5922,7 @@ class PingPongControllerNode(Node):
                                       stamp: Time) -> None:
         """Drive every mechanical unit toward TARGET_DEGREES during init.
 
-        The right arm is safety-limited; the other three units (left arm,
+        The right arm follows the smooth init ramp; the other three units (left arm,
         leg+waist, head) are sent their TARGET_DEGREES setpoints directly.
         All four are packed into ONE MechUnitCmdArray and published in a
         single message, so the init phase publishes at the same topic rate
@@ -5934,14 +5939,9 @@ class PingPongControllerNode(Node):
 
         raw = np.asarray(right_arm_raw_q, dtype=np.float64).reshape(-1)
 
-        # Whole-body init uses its own smooth ramp; obey the global limiter flag.
-        if self.enable_safety_limiter:
-            safe_cmd = self.safety_limiter.filter(raw)
-            self._maybe_log_safety_counts()
-        else:
-            # Bypass safety limiter - use raw command directly
-            safe_cmd = raw.copy()
-            self.safety_limiter.observe(safe_cmd)
+        # Whole-body init already owns a smooth ramp and never enters the
+        # legacy limiter or its hidden observe() state.
+        safe_cmd = raw.copy()
 
         self._last_safe_joint_positions = safe_cmd.copy()
 

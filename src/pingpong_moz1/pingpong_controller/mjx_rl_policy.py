@@ -32,7 +32,9 @@ NumPy ``params`` survive — which is all inference needs.
 
 from __future__ import annotations
 
+import hashlib
 import pickle
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -44,7 +46,9 @@ from pingpong_controller.rl_policy import (
     DEFAULT_ARM_VEL_LIMIT_DEG_S,
     DEFAULT_BALL_OBS_AGE_CLIP_S,
     EXPECTED_OBS_DIM,
+    EXPECTED_OBS_DIM_GPU0_REAL_RMP,
     EXPECTED_OBS_DIM_WITH_DELAY,
+    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
@@ -160,7 +164,7 @@ class MjxRLPolicyController(RLPolicyController):
 
     def _load_model(self, model_path: str, device: str) -> None:
         del device  # NumPy forward pass is CPU-only; device is ignored.
-        self._logger.info(f"Loading MJX/JAX PPO checkpoint from: {model_path}")
+        self._logger.info(f"Loading PPO policy checkpoint from: {model_path}")
         with open(model_path, "rb") as handle:
             payload = _CheckpointUnpickler(handle).load()
 
@@ -313,7 +317,7 @@ class MjxRLPolicyController(RLPolicyController):
                     0.0, float(lost_timeout_ms) * 1e-3)
 
         self._logger.info(
-            "MJX checkpoint env_cfg applied: "
+            "Policy checkpoint env_cfg applied: "
             f"action_command_mode={self.action_command_mode}, "
             f"action_velocity_scale={self.action_velocity_scale}, "
             f"action_filter_tau_ms={self.action_filter_tau_ms}, "
@@ -552,3 +556,403 @@ class Simcode6Qvel67PolicyController(MjxRLPolicyController):
             raise RuntimeError(
                 "simcode6 checkpoint deployment contract mismatch: "
                 + "; ".join(mismatches))
+
+
+class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
+    """Exact 57-D measured-feedback adapter for GPU0-QVEL/REAL-RMP.
+
+    The returned position is the persistent bounded ``q_ref`` consumed by the
+    robot's existing RMP.  This class deliberately contains no recovered-RMP,
+    XML-PD, actuator, delay, compensation, planner, or publication-hold model.
+    """
+
+    CHECKPOINT_SHA256 = (
+        "0381dc68a8ea02b2b3db171cc7edcc45291ff1b510d944b5ae2cddd89505c93a"
+    )
+    V91_CHECKPOINT_SHA256 = (
+        "92b5d39592a81236ee5ee5806499a0a8d4b422f131b312ad87ea1efc90507c66"
+    )
+    PROFILE_NAME = "goal_d455_measured_qvel_rmp_vertical_v85"
+    STAGE_NAME = "rmp85_complete_nonexecution_full_episode_polish"
+    REFERENCE_ERROR_HORIZON_S = np.asarray(
+        [0.018, 0.019, 0.019, 0.018, 0.018, 0.018, 0.018],
+        dtype=np.float32,
+    )
+    JOINT_LOW_RAD = np.asarray(
+        [-2.0944, -2.96706, -3.05433, -0.174533,
+         -3.05433, -1.65806, -1.5708],
+        dtype=np.float32,
+    )
+    JOINT_HIGH_RAD = np.asarray(
+        [3.14159, 0.15708, 3.05433, 2.25147,
+         3.05433, 1.65806, 1.5708],
+        dtype=np.float32,
+    )
+    RESET_DEG = np.asarray(
+        [5.736, -44.399, 30.683, 97.142, 49.323, -12.269, 14.214],
+        dtype=np.float32,
+    )
+    ZERO_OBSERVATION_ACTOR_MEAN = np.asarray(
+        [-0.013018085, 0.011029976, 0.019584768, 0.064141512,
+         0.115628816, -0.122984409, 0.017757997],
+        dtype=np.float32,
+    )
+    V91_ZERO_OBSERVATION_ACTOR_MEAN = np.asarray(
+        [-0.01141354, 0.01237924, 0.01954993, 0.06344163,
+         0.11612345, -0.12466098, 0.01851650],
+        dtype=np.float32,
+    )
+    CHECKPOINT_CONTRACTS = {
+        CHECKPOINT_SHA256: {
+            "model_id": "v85",
+            "label": "V85",
+            "payload": {
+                "obs_dim": EXPECTED_OBS_DIM_GPU0_REAL_RMP,
+                "critic_obs_dim": 368,
+                "act_dim": 7,
+                "stage_name": STAGE_NAME,
+                "stage_index": 24,
+                "stage_update": 174,
+                "global_update": 430,
+                "step": 2_922_905_600,
+            },
+            "args": {
+                "curriculum_profile": PROFILE_NAME,
+                "seed": 20261004,
+            },
+            "zero_observation_actor_mean": ZERO_OBSERVATION_ACTOR_MEAN,
+        },
+        V91_CHECKPOINT_SHA256: {
+            "model_id": "v91",
+            "label": "V91",
+            "payload": {
+                "obs_dim": EXPECTED_OBS_DIM_GPU0_REAL_RMP,
+                "critic_obs_dim": 368,
+                "act_dim": 7,
+                "step": 3_405_774_848,
+            },
+            "args": {
+                "curriculum_profile": (
+                    "goal_d455_measured_qvel_rmp_vertical_v91"),
+                "seed": 20261018,
+                "resume_start_stage": "rmp91_wide_xy_no_hold_margin",
+            },
+            "zero_observation_actor_mean": V91_ZERO_OBSERVATION_ACTOR_MEAN,
+        },
+    }
+    MAXIMUM_JOINT_FEEDBACK_AGE_S = 0.010
+    LOST_BALL_TIMEOUT_S = 0.350
+
+    _REQUIRED_EXACT = {
+        "action_command_mode": "velocity",
+        "action_velocity_scale": 1.0,
+        "policy_integration_feedback_source": "measured",
+        "recovered_rmp_motion_mode": True,
+        "recovered_rmp_direct_qvel_target": True,
+        "recovered_rmp_bounded_qvel_reference": True,
+        "include_qvel_reference_error_obs": True,
+        "enable_delay_conditioning": False,
+        "high_latency_obs": False,
+        "ball_obs_rate_hz": 90.0,
+        "ball_obs_fractional_rate": True,
+        "ball_obs_age_tracks_stale": True,
+        "ball_obs_age_clip": 0.5,
+        "ball_obs_velocity_observer_mode": "raw",
+        "lost_ball_timeout_ms": 350.0,
+        "actor_mask_previous_action": False,
+        "actor_previous_action_scale": 1.0,
+        "arm_action_limiter": True,
+        "actuator_cmd_filter": False,
+        "actuator_compensation_mode": "none",
+        "arm_servo_target_tracking_planner": False,
+        "right_arm_pd_profile": "recovered_rmp_rmpmd_v2",
+        "recovered_rmp_period_s": 0.001,
+        "frame_skip": 5,
+        "action_filter_tau_ms": 0.0,
+        "action_jerk_limit": 0.0,
+        "enable_anti_windup": False,
+        "dr_rmp_target_update_hold_probability": 0.08,
+        "dr_rmp_target_update_hold_tail_probability": 0.022,
+        "dr_rmp_target_update_hold_tail_steps_range": (2, 9),
+    }
+
+    def __init__(self, model_path: str, **kwargs) -> None:
+        kwargs["enable_delay_conditioning"] = False
+        kwargs["use_valid_ball_obs_age"] = True
+        kwargs["observation_profile"] = (
+            OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+        kwargs["expected_obs_dim"] = EXPECTED_OBS_DIM_GPU0_REAL_RMP
+        kwargs["ball_obs_age_clip_s"] = 0.5
+        super().__init__(model_path, **kwargs)
+        self.arm_q_low = self.JOINT_LOW_RAD.copy()
+        self.arm_q_high = self.JOINT_HIGH_RAD.copy()
+        self.initial_arm_q_rad = np.deg2rad(self.RESET_DEG).astype(np.float32)
+        self._base_obs_q = np.zeros(3, dtype=np.float32)
+        self._base_obs_dq = np.zeros(3, dtype=np.float32)
+        self.maximum_joint_feedback_age_s = (
+            self.MAXIMUM_JOINT_FEEDBACK_AGE_S)
+        self.reset()
+        golden = self._policy_action(
+            np.zeros(EXPECTED_OBS_DIM_GPU0_REAL_RMP, dtype=np.float32))
+        expected_golden = np.asarray(
+            self._checkpoint_contract["zero_observation_actor_mean"],
+            dtype=np.float32,
+        )
+        if not np.allclose(
+                golden, expected_golden,
+                rtol=0.0, atol=2e-7):
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP actor failed its zero-observation golden vector")
+
+    @staticmethod
+    def _sha256(path: str) -> str:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _load_model(self, model_path: str, device: str) -> None:
+        path = Path(model_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"GPU0-QVEL/REAL-RMP checkpoint not found: {path}")
+        actual = self._sha256(str(path))
+        contract = self.CHECKPOINT_CONTRACTS.get(actual)
+        if contract is None:
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP checkpoint SHA-256 is not an approved "
+                f"V85/V91 model: {actual}")
+        self._checkpoint_sha256 = actual
+        self._checkpoint_contract = contract
+        self.policy_model_id = str(contract["model_id"])
+        self.policy_model_label = str(contract["label"])
+        super()._load_model(str(path), device)
+
+    def _validate_checkpoint_contract(self, payload: dict) -> None:
+        expected_payload = dict(self._checkpoint_contract["payload"])
+        mismatches = []
+        for key, expected in expected_payload.items():
+            if payload.get(key) != expected:
+                mismatches.append(
+                    f"{key}={payload.get(key)!r} (expected {expected!r})")
+        args = payload.get("args")
+        if not isinstance(args, dict):
+            mismatches.append("args is missing")
+        else:
+            for key, expected in self._checkpoint_contract["args"].items():
+                if args.get(key) != expected:
+                    mismatches.append(
+                        f"args.{key}={args.get(key)!r} (expected {expected!r})")
+        cfg = payload.get("env_cfg")
+        if not isinstance(cfg, dict):
+            mismatches.append("env_cfg is missing")
+            cfg = {}
+        for key, expected in self._REQUIRED_EXACT.items():
+            if cfg.get(key) != expected:
+                mismatches.append(
+                    f"{key}={cfg.get(key)!r} (expected {expected!r})")
+        if float(cfg.get(
+                "recovered_rmp_qvel_reference_error_horizon_s",
+                float("nan"))) != 0.0:
+            mismatches.append(
+                "recovered_rmp_qvel_reference_error_horizon_s must be 0.0")
+        vector_contracts = {
+            "recovered_rmp_qvel_reference_error_horizon_s_per_joint": (
+                self.REFERENCE_ERROR_HORIZON_S),
+            "arm_vel_limit_deg_s": np.asarray(
+                [210.0, 210.0, 240.0, 240.0, 300.0, 300.0, 300.0],
+                dtype=np.float32),
+            "arm_acc_limit_deg_s2": np.asarray(
+                [1300.0, 1300.0, 1800.0, 3000.0, 3000.0, 3000.0, 3000.0],
+                dtype=np.float32),
+        }
+        for key, expected in vector_contracts.items():
+            try:
+                actual = np.asarray(cfg.get(key, ()), dtype=np.float32)
+                valid = actual.shape == (7,) and np.array_equal(actual, expected)
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                mismatches.append(
+                    f"{key} does not match the {self.policy_model_label} contract")
+        params = payload.get("params")
+        actor = params.get("pi") if isinstance(params, dict) else None
+        if (not isinstance(params, dict)
+                or params.get("teacher_pi") is not None
+                or not isinstance(actor, dict)):
+            mismatches.append("checkpoint must contain one plain pi actor")
+        else:
+            shapes = {
+                "l1": ((57, 256), (256,)),
+                "l2": ((256, 256), (256,)),
+                "out": ((256, 7), (7,)),
+            }
+            for name, (w_shape, b_shape) in shapes.items():
+                layer = actor.get(name)
+                if (not isinstance(layer, dict)
+                        or np.asarray(layer.get("w")).shape != w_shape
+                        or np.asarray(layer.get("b")).shape != b_shape):
+                    mismatches.append(f"actor layer {name} shape changed")
+        if mismatches:
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP checkpoint deployment contract mismatch: "
+                + "; ".join(mismatches))
+
+    def reset(self) -> None:
+        super().reset()
+        self._gpu0_requires_measured_reset = True
+        self._gpu0_previous_measured_dq = np.zeros(
+            self.n_arm, dtype=np.float32)
+
+    def _seed_from_measurement(self, q: np.ndarray, dq: np.ndarray) -> None:
+        self.arm_cmd_q = q.copy()
+        self.arm_cmd_qvel = np.zeros(self.n_arm, dtype=np.float32)
+        self.prev_action = np.zeros(self.n_arm, dtype=np.float32)
+        self._gpu0_previous_measured_dq = dq.copy()
+        racket_pos, fk_ok = self._compute_racket_pose_base(q)
+        if not fk_ok:
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP requires encoder FK for right_ee_site")
+        self._prev_racket_pos_base = np.asarray(
+            racket_pos, dtype=np.float32).reshape(3).copy()
+        self._prev_racket_sample_pos_base = self._prev_racket_pos_base.copy()
+        self._prev_racket_sample_stamp_s = None
+        self._last_racket_sample_vel_base = np.zeros(3, dtype=np.float32)
+        self._gpu0_requires_measured_reset = False
+
+    def _build_obs(
+        self,
+        ball_pos_m: np.ndarray,
+        ball_vel_m_s: np.ndarray,
+        ball_obs_age_s: float,
+        step_dt: float,
+        arm_q: Optional[np.ndarray] = None,
+        arm_dq: Optional[np.ndarray] = None,
+        arm_sample_stamp_s: Optional[float] = None,
+    ) -> np.ndarray:
+        del arm_sample_stamp_s
+        if arm_q is None or arm_dq is None:
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP requires one atomic measured q/dq sample")
+        q = np.asarray(arm_q, dtype=np.float32).reshape(self.n_arm)
+        dq = np.asarray(arm_dq, dtype=np.float32).reshape(self.n_arm)
+        ball_pos = np.asarray(ball_pos_m, dtype=np.float32).reshape(3)
+        ball_vel = np.asarray(ball_vel_m_s, dtype=np.float32).reshape(3)
+        if not all(np.all(np.isfinite(value)) for value in (
+                q, dq, ball_pos, ball_vel)):
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP observation inputs must be finite")
+        racket_pos, fk_ok = self._compute_racket_pose_base(q)
+        if not fk_ok:
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP requires encoder FK for right_ee_site")
+        racket_pos = np.asarray(racket_pos, dtype=np.float32).reshape(3)
+        racket_vel = (
+            (racket_pos - self._prev_racket_pos_base)
+            / np.float32(step_dt)
+        ).astype(np.float32)
+        self._prev_racket_pos_base = racket_pos.copy()
+        age_norm = np.float32(np.clip(float(ball_obs_age_s) / 0.5, 0.0, 1.0))
+        obs = np.concatenate((
+            q,
+            dq,
+            np.zeros(3, dtype=np.float32),
+            np.zeros(3, dtype=np.float32),
+            ball_pos,
+            ball_vel,
+            racket_pos,
+            racket_vel,
+            ball_pos - racket_pos,
+            self.prev_action.astype(np.float32),
+            dq - self._gpu0_previous_measured_dq,
+            np.asarray([age_norm], dtype=np.float32),
+            self.arm_cmd_q.astype(np.float32) - q,
+        )).astype(np.float32)
+        if obs.shape != (EXPECTED_OBS_DIM_GPU0_REAL_RMP,):
+            raise RuntimeError("GPU0-QVEL/REAL-RMP observation is not 57-D")
+        return obs
+
+    def predict(
+        self,
+        ball_pos_m: np.ndarray,
+        ball_vel_m_s: np.ndarray,
+        *,
+        ball_valid: bool,
+        ball_obs_age_s: float = 0.0,
+        dt: Optional[float] = None,
+        arm_q: Optional[np.ndarray] = None,
+        arm_dq: Optional[np.ndarray] = None,
+        arm_sample_stamp_s: Optional[float] = None,
+        observation_scales=None,
+    ) -> np.ndarray:
+        step_dt = self.dt if dt is None else float(dt)
+        if not np.isclose(step_dt, 0.005, rtol=0.0, atol=1e-12):
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP requires an exact 0.005 s policy tick")
+        if not bool(ball_valid):
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP refuses inference without a valid ball state")
+        age_s = float(ball_obs_age_s)
+        if (not np.isfinite(age_s) or age_s < 0.0
+                or age_s > self.LOST_BALL_TIMEOUT_S):
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP represented ball age exceeds 350 ms")
+        if arm_q is None or arm_dq is None:
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP requires fresh measured q/dq feedback")
+        q = np.asarray(arm_q, dtype=np.float32).reshape(self.n_arm)
+        dq = np.asarray(arm_dq, dtype=np.float32).reshape(self.n_arm)
+        if (not np.all(np.isfinite(q)) or not np.all(np.isfinite(dq))
+                or np.any(q < self.arm_q_low) or np.any(q > self.arm_q_high)):
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP measured joint state is invalid")
+        if observation_scales is not None:
+            scales = np.asarray(observation_scales, dtype=np.float32).reshape(-1)
+            if scales.size and (
+                    scales.shape != (EXPECTED_OBS_DIM_GPU0_REAL_RMP,)
+                    or not np.all(scales == np.float32(1.0))):
+                raise RuntimeError(
+                    "GPU0-QVEL/REAL-RMP forbids actor observation scaling")
+        if self._gpu0_requires_measured_reset:
+            self._seed_from_measurement(q, dq)
+        obs = self._build_obs(
+            ball_pos_m,
+            ball_vel_m_s,
+            age_s,
+            step_dt,
+            arm_q=q,
+            arm_dq=dq,
+            arm_sample_stamp_s=arm_sample_stamp_s,
+        )
+        raw_action = self._policy_action(obs)
+        if not np.all(np.isfinite(raw_action)):
+            raise RuntimeError(
+                "GPU0-QVEL/REAL-RMP actor returned a non-finite action")
+        action = np.clip(raw_action, -1.0, 1.0).astype(np.float32)
+        desired_dq = (action * self.arm_vel_limit_rad_s).astype(np.float32)
+        integrated_q_ref = (
+            self.arm_cmd_q + desired_dq * np.float32(0.005))
+        maximum_error = (
+            self.arm_vel_limit_rad_s * self.REFERENCE_ERROR_HORIZON_S)
+        lower = np.maximum(self.arm_q_low, q - maximum_error)
+        upper = np.minimum(self.arm_q_high, q + maximum_error)
+        q_ref = np.clip(integrated_q_ref, lower, upper).astype(np.float32)
+        previous_desired_dq = self.arm_cmd_qvel.copy()
+        self.arm_cmd_q = q_ref.copy()
+        self.arm_cmd_qvel = desired_dq.copy()
+        self.prev_action = action.copy()
+        self._gpu0_previous_measured_dq = dq.copy()
+        self.last_obs = obs.copy()
+        self.last_obs_unscaled = obs.copy()
+        self.last_observation_scales = np.ones(
+            EXPECTED_OBS_DIM_GPU0_REAL_RMP, dtype=np.float32)
+        self.last_observation_scale_indices = ()
+        self.last_action = np.asarray(raw_action, dtype=np.float32).copy()
+        self.last_executed_action = action.copy()
+        self.last_cmd_q = q_ref.copy()
+        self.last_cmd_qvel = desired_dq.copy()
+        self.last_cmd_qacc = (
+            (desired_dq - previous_desired_dq) / np.float32(0.005)
+        ).astype(np.float32)
+        return q_ref.copy()

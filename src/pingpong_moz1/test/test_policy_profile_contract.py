@@ -130,6 +130,15 @@ SIMCODE6_SHA256 = (
 )
 
 
+def requires_fixtures(*paths: Path):
+    """Skip once, with the exact missing bytes, instead of setup errors."""
+    missing = [str(path) for path in paths if not path.is_file()]
+    return unittest.skipUnless(
+        not missing,
+        "fixture missing (supply these paths): " + ", ".join(missing),
+    )
+
+
 class _Space:
     def __init__(self, shape):
         self.shape = shape
@@ -480,6 +489,13 @@ class ObservationProfileContractTest(unittest.TestCase):
         )
 
 
+@requires_fixtures(
+    SIMCODE2_MODEL,
+    SIMCODE2_XML,
+    SIMCODE2_ARTIFACT_DIR / "obs_trace.csv",
+    SIMCODE2_ARTIFACT_DIR / "action_trace.csv",
+    LEGACY_MODEL,
+)
 class FrozenCheckpointContractTest(unittest.TestCase):
 
     @classmethod
@@ -589,6 +605,7 @@ class FrozenCheckpointContractTest(unittest.TestCase):
 
 
 
+@requires_fixtures(SIMCODE6_MODEL, SIMCODE6_XML)
 class Simcode6QvelCheckpointContractTest(unittest.TestCase):
 
     @classmethod
@@ -838,6 +855,12 @@ class Simcode6QvelCheckpointContractTest(unittest.TestCase):
         )
 
 
+@requires_fixtures(
+    SIMCODE4_MODEL,
+    SIMCODE4_XML,
+    SIMCODE4_TRACE_DIR / "obs_trace.csv",
+    SIMCODE4_TRACE_DIR / "action_trace.csv",
+)
 class Simcode4FrozenCheckpointContractTest(unittest.TestCase):
 
     @classmethod
@@ -946,6 +969,7 @@ class Simcode4FrozenCheckpointContractTest(unittest.TestCase):
 
 class Simcode4ServoPlannerContractTest(unittest.TestCase):
 
+    @requires_fixtures(SIMCODE4_TRACE_DIR / "action_trace.csv")
     def test_numpy_planner_replays_frozen_mjx_servo_trace(self):
         with (SIMCODE4_TRACE_DIR / "action_trace.csv").open(
                 newline="") as handle:
@@ -1179,6 +1203,7 @@ class SimMirrorProfileContractTest(unittest.TestCase):
         self.assertEqual(float(kwargs["delay_min_ms"]), 91.0)
         self.assertEqual(float(kwargs["delay_max_ms"]), 91.0)
 
+    @requires_fixtures(SIMCODE5_MODEL, SIMCODE5_XML)
     def test_simcode5_restores_pure_second_order_plant_and_zero_age(self):
         cfg = sim_mirror_config_for_policy_profile(
             self._base_config(),

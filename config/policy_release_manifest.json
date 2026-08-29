@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "releases": [
+    {
+      "release_id": "simcode5_v5_recovery",
+      "policy_profile": "simcode5_pure_actuator67",
+      "checkpoint_path": "simcode5/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/goal_d455_gpu1_pure_stable_v5_recovery_20260802/mjx_curriculum_best.pkl",
+      "checkpoint_sha256": "9d7e94e9ef803fcbe9385ab97485626b2529394be62c75136c69d873adffaa79",
+      "policy_xml_path": "simcode5/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+      "policy_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+      "observation_dim": 67,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 60.0,
+      "action_semantics": "acceleration_integrated_once_to_dq_once_to_q",
+      "reset_mode": "racket_launch",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "shadow",
+      "policy_plant_matcher_real_config": "config/policy_plant_real_fit_record_new3_v1.json"
+    },
+    {
+      "release_id": "simcode6_v14_record_new3_rework",
+      "policy_profile": "simcode6_qvel67",
+      "checkpoint_path": "simcode6/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/record_new3_plateau_rework_20260812/formal_gpu0_v14_heavy_ball_conservative_n1024_s128_e4_online/mjx_curriculum_last.pkl",
+      "checkpoint_sha256": "2ca715d71fe19a0058b8cac710574630bdff580ec28157ac80a3e1d70f8cef47",
+      "policy_xml_path": "simcode6/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+      "policy_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+      "observation_dim": 67,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 60.0,
+      "action_semantics": "normalized_velocity_integrated_once_to_q",
+      "reset_mode": "racket_launch",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off"
+    },
+    {
+      "release_id": "gpu0_qvel_real_rmp_v85",
+      "policy_profile": "gpu0_qvel_real_rmp_v85",
+      "checkpoint_path": "simcode7/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/measured_qvel_rmp_vertical_v85_gpu0_seed20261004_20260828_stage23_failure_time_survival_online1/mjx_curriculum_best.pkl",
+      "checkpoint_sha256": "0381dc68a8ea02b2b3db171cc7edcc45291ff1b510d944b5ae2cddd89505c93a",
+      "policy_xml_path": "simcode7/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+      "policy_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+      "observation_dim": 57,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_bounded_qref_to_existing_robot_rmp",
+      "reset_mode": "atomic_measured_q_dq_fk",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off"
+    },
+    {
+      "release_id": "gpu0_qvel_real_rmp_v91",
+      "policy_profile": "gpu0_qvel_real_rmp_v85",
+      "checkpoint_path": "simcode7/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/measured_qvel_rmp_vertical_v91_gpu0_seed20261018_20260829_stage24_ceilling_gate_online2/26_rmp91_complete_nonexecution_factorized_commit.pkl",
+      "checkpoint_sha256": "92b5d39592a81236ee5ee5806499a0a8d4b422f131b312ad87ea1efc90507c66",
+      "policy_xml_path": "simcode7/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+      "policy_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+      "observation_dim": 57,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_bounded_qref_to_existing_robot_rmp",
+      "reset_mode": "atomic_measured_q_dq_fk",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off"
+    }
+  ]
+}

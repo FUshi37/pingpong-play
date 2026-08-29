@@ -1,0 +1,602 @@
+{
+  "contract": {
+    "checkpoint": "/home/spirit-ai/pingpong_moz1/simcode7/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/measured_qvel_rmp_vertical_v91_gpu0_seed20261018_20260829_stage24_ceilling_gate_online2/26_rmp91_complete_nonexecution_factorized_commit.pkl",
+    "checkpoint_sha256": "92b5d39592a81236ee5ee5806499a0a8d4b422f131b312ad87ea1efc90507c66",
+    "historical_xml": "/home/spirit-ai/pingpong_moz1/simcode6/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+    "historical_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+    "recorded_backend": "mujoco_recovered_rmp_mirror",
+    "control_dt_s": 0.005,
+    "mujoco_timestep_s": 0.001,
+    "frame_skip": 5,
+    "rmp_target_update_delay_steps": 3,
+    "rmp_output_delay_steps_per_joint": [
+      18.0,
+      19.0,
+      19.0,
+      18.0,
+      18.0,
+      18.0,
+      18.0
+    ],
+    "right_arm_controller_kp": [
+      112320.0,
+      184320.0,
+      133650.0,
+      73200.0,
+      30420.0,
+      62100.0,
+      35100.0
+    ],
+    "right_arm_controller_kv": [
+      9048.0,
+      9604.8,
+      9570.0,
+      4071.6,
+      3712.0,
+      5000.0,
+      2030.0
+    ],
+    "recording_time_ball_mass_kg": 0.0027,
+    "physical_ball_mass_kg": 0.004,
+    "recording_time_solref": [
+      0.003,
+      0.8
+    ],
+    "identified_impact_solref_sensitivity": [
+      0.003,
+      0.15254
+    ]
+  },
+  "real_launch": {
+    "start_source_time_s": 17.625,
+    "apex_source_time_s": 17.88,
+    "apex_time_s": 0.254999999999999,
+    "apex_z_m": 1.1558449212380688,
+    "raw_apex_z_m": 1.156937,
+    "initial_observed_ball_m": [
+      -0.105301,
+      -0.475284,
+      1.068106
+    ],
+    "height_gain_m": 0.08773892123806881,
+    "fresh_camera_sample_count": 27,
+    "maximum_camera_gap_s": 0.015000000000000568,
+    "position_fit_rms_m": 0.001670468431283355,
+    "racket_z_max_m": 1.109631,
+    "racket_vz_max_m_s": 0.758114
+  },
+  "initial_state": {
+    "real_arm_q_rad": [
+      0.100112,
+      -0.774909,
+      0.535519,
+      1.695448,
+      0.860849,
+      -0.214134,
+      0.248081
+    ],
+    "real_arm_dq_rad_s": [
+      0.0,
+      -0.0,
+      -0.0,
+      -0.0,
+      -0.0,
+      -0.000942,
+      -0.0
+    ],
+    "checkpoint_default_arm_q_rad": [
+      0.10011208589439474,
+      -0.7749087345929624,
+      0.5355193743894201,
+      1.6954477419723315,
+      0.8608487469611632,
+      -0.2141344459271843,
+      0.24808109987847402
+    ],
+    "arm_q_default_rms_rad": 2.821903801365648e-07,
+    "camera_ball_m": [
+      -0.105301,
+      -0.475284,
+      1.068106
+    ],
+    "real_racket_m": [
+      -0.114136,
+      -0.466601,
+      1.059307
+    ],
+    "real_racket_normal": [
+      -0.005836001303249268,
+      0.035624007955269356,
+      0.9993482231664753
+    ],
+    "camera_normal_distance_m": 0.008432380683052005,
+    "camera_tangent_offset_m": [
+      0.00888421138465578,
+      -0.008983395196534901,
+      0.0003721153473286703
+    ],
+    "camera_tangent_offset_norm_m": 0.01263997907498629,
+    "default_ball_m": [
+      -0.11252,
+      -0.463248,
+      1.089938
+    ],
+    "default_racket_m": [
+      -0.114136,
+      -0.466601,
+      1.059307
+    ],
+    "default_normal_distance_m": 0.030721051744380345,
+    "default_surface_gap_m": 0.008721
+  },
+  "executor": {
+    "mode_counts_to_apex": {
+      "policy": 42,
+      "policy_feedback_hold": 8,
+      "policy_ball_state_hold": 2
+    },
+    "tick_count_to_apex": 52,
+    "executed_tick_count_to_apex": 42,
+    "executed_fraction_to_apex": 0.8076923076923077,
+    "longest_hold_ticks": 3,
+    "longest_hold_duration_s": 0.015
+  },
+  "original_mirror": {
+    "sample_count": 49,
+    "ball_physics_independent": false,
+    "ball_state_forced_each_tick": true,
+    "actor_minus_physical_racket_mean_m": [
+      0.0036558979591836734,
+      0.007434734693877546,
+      0.010657857142857151
+    ],
+    "actor_minus_physical_racket_rms_m": [
+      0.0036570711348993873,
+      0.007435595352417846,
+      0.010657974455298536
+    ]
+  },
+  "command_replay": {
+    "sample_count": 81,
+    "joint_position_rms_rad": 0.03239404425377875,
+    "joint_position_per_joint_rms_rad": [
+      0.029991093093754296,
+      0.006612355090800666,
+      0.028527568733881185,
+      0.007407717985462719,
+      0.008350852757923204,
+      0.0427551992423435,
+      0.06029916707011709
+    ],
+    "joint_velocity_rms_rad_s": 0.5262237297292924,
+    "racket_position_rms_m": 0.00880328178378485,
+    "racket_z_rms_m": 0.013560522364444593,
+    "real_racket_z_max_m": 1.109631,
+    "sim_racket_z_max_m": 1.0878435373306274,
+    "sim_minus_real_peak_racket_z_m": -0.021787462669372593
+  },
+  "simulations": [
+    {
+      "scenario": "same_observed_init_4g_historical",
+      "label": "同相机初态 / 4.0g / 历史接触",
+      "init_mode": "observed",
+      "mass_kg": 0.004,
+      "solref": [
+        0.003,
+        0.8
+      ],
+      "observation_mode": "truth",
+      "real_hold_mask": false,
+      "initial_ball_m": [
+        -0.105301,
+        -0.475284,
+        1.068106
+      ],
+      "initial_actor_racket_m": [
+        -0.11413609981536865,
+        -0.4666008949279785,
+        1.0593068599700928
+      ],
+      "initial_physical_racket_m": [
+        -0.11413710581311615,
+        -0.4664016893739535,
+        1.0486077152260593
+      ],
+      "initial_actor_minus_physical_racket_m": [
+        1.0059977474941029e-06,
+        -0.00019920555402502815,
+        0.01069914474403344
+      ],
+      "apex_time_s": 0.23,
+      "apex_z_m": 1.1436501540041268,
+      "height_gain_m": 0.07554415400412684,
+      "apex_vertical_velocity_m_s": 0.002562243041961695,
+      "maximum_ball_vertical_speed_m_s": 1.5961044236247017,
+      "maximum_actor_racket_z_m": 1.116532325744629,
+      "maximum_physical_racket_z_m": 1.105961238651053,
+      "executed_fraction": 1.0,
+      "contact_tick_count": 15,
+      "sample_count": 81
+    },
+    {
+      "scenario": "same_physical_on_racket_4g_historical",
+      "label": "同物理放拍初态 / 4.0g / 历史接触",
+      "init_mode": "physical_on_racket",
+      "mass_kg": 0.004,
+      "solref": [
+        0.003,
+        0.8
+      ],
+      "observation_mode": "truth",
+      "real_hold_mask": false,
+      "initial_ball_m": [
+        -0.10538055201811143,
+        -0.47458538879930023,
+        1.0709649207531746
+      ],
+      "initial_actor_racket_m": [
+        -0.11413609981536865,
+        -0.4666008949279785,
+        1.0593068599700928
+      ],
+      "initial_physical_racket_m": [
+        -0.11413710581311615,
+        -0.4664016893739535,
+        1.0486077152260593
+      ],
+      "initial_actor_minus_physical_racket_m": [
+        1.0059977474941029e-06,
+        -0.00019920555402502815,
+        0.01069914474403344
+      ],
+      "apex_time_s": 0.225,
+      "apex_z_m": 1.1362441151772147,
+      "height_gain_m": 0.06527919442404007,
+      "apex_vertical_velocity_m_s": -0.03591675111682272,
+      "maximum_ball_vertical_speed_m_s": 1.5645965265978408,
+      "maximum_actor_racket_z_m": 1.1147141456604004,
+      "maximum_physical_racket_z_m": 1.1041889535176082,
+      "executed_fraction": 1.0,
+      "contact_tick_count": 20,
+      "sample_count": 81
+    },
+    {
+      "scenario": "same_physical_on_racket_2p7g_historical",
+      "label": "同物理放拍初态 / 历史2.7g",
+      "init_mode": "physical_on_racket",
+      "mass_kg": 0.0027,
+      "solref": [
+        0.003,
+        0.8
+      ],
+      "observation_mode": "truth",
+      "real_hold_mask": false,
+      "initial_ball_m": [
+        -0.10538055201811143,
+        -0.47458538879930023,
+        1.0709649207531746
+      ],
+      "initial_actor_racket_m": [
+        -0.11413609981536865,
+        -0.4666008949279785,
+        1.0593068599700928
+      ],
+      "initial_physical_racket_m": [
+        -0.11413710581311615,
+        -0.4664016893739535,
+        1.0486077152260593
+      ],
+      "initial_actor_minus_physical_racket_m": [
+        1.0059977474941029e-06,
+        -0.00019920555402502815,
+        0.01069914474403344
+      ],
+      "apex_time_s": 0.295,
+      "apex_z_m": 1.1965978813863427,
+      "height_gain_m": 0.1256329606331681,
+      "apex_vertical_velocity_m_s": 0.0037915549485535265,
+      "maximum_ball_vertical_speed_m_s": 1.377191554948556,
+      "maximum_actor_racket_z_m": 1.116237759590149,
+      "maximum_physical_racket_z_m": 1.1057636636220747,
+      "executed_fraction": 1.0,
+      "contact_tick_count": 17,
+      "sample_count": 81
+    },
+    {
+      "scenario": "physical_default_4g_historical",
+      "label": "碰撞拍面默认初态 / 4.0g / 历史接触",
+      "init_mode": "physical_default",
+      "mass_kg": 0.004,
+      "solref": [
+        0.003,
+        0.8
+      ],
+      "observation_mode": "truth",
+      "real_hold_mask": false,
+      "initial_ball_m": [
+        -0.11252110581311614,
+        -0.4630486893739535,
+        1.0792387152260594
+      ],
+      "initial_actor_racket_m": [
+        -0.11413609981536865,
+        -0.4666008949279785,
+        1.0593068599700928
+      ],
+      "initial_physical_racket_m": [
+        -0.11413710581311615,
+        -0.4664016893739535,
+        1.0486077152260593
+      ],
+      "initial_actor_minus_physical_racket_m": [
+        1.0059977474941029e-06,
+        -0.00019920555402502815,
+        0.01069914474403344
+      ],
+      "apex_time_s": 0.22,
+      "apex_z_m": 1.1269700689433504,
+      "height_gain_m": 0.04773135371729098,
+      "apex_vertical_velocity_m_s": -0.025598137216433288,
+      "maximum_ball_vertical_speed_m_s": 1.5515981372164303,
+      "maximum_actor_racket_z_m": 1.104156494140625,
+      "maximum_physical_racket_z_m": 1.093511597896,
+      "executed_fraction": 1.0,
+      "contact_tick_count": 13,
+      "sample_count": 81
+    },
+    {
+      "scenario": "recorded_mirror_default_4g_historical",
+      "label": "记录 mirror 默认坐标 / 4.0g / 历史接触",
+      "init_mode": "mirror_default",
+      "mass_kg": 0.004,
+      "solref": [
+        0.003,
+        0.8
+      ],
+      "observation_mode": "truth",
+      "real_hold_mask": false,
+      "initial_ball_m": [
+        -0.11252,
+        -0.463248,
+        1.089938
+      ],
+      "initial_actor_racket_m": [
+        -0.11413609981536865,
+        -0.4666008949279785,
+        1.0593068599700928
+      ],
+      "initial_physical_racket_m": [
+        -0.11413710581311615,
+        -0.4664016893739535,
+        1.0486077152260593
+      ],
+      "initial_actor_minus_physical_racket_m": [
+        1.0059977474941029e-06,
+        -0.00019920555402502815,
+        0.01069914474403344
+      ],
+      "apex_time_s": 0.23,
+      "apex_z_m": 1.1372715504722355,
+      "height_gain_m": 0.04733355047223542,
+      "apex_vertical_velocity_m_s": -0.0054228712430549175,
+      "maximum_ball_vertical_speed_m_s": 1.837688394873549,
+      "maximum_actor_racket_z_m": 1.1043500900268555,
+      "maximum_physical_racket_z_m": 1.093712214958187,
+      "executed_fraction": 1.0,
+      "contact_tick_count": 9,
+      "sample_count": 81
+    },
+    {
+      "scenario": "physical_default_2p7g_historical",
+      "label": "碰撞拍面默认初态 / 历史2.7g",
+      "init_mode": "physical_default",
+      "mass_kg": 0.0027,
+      "solref": [
+        0.003,
+        0.8
+      ],
+      "observation_mode": "truth",
+      "real_hold_mask": false,
+      "initial_ball_m": [
+        -0.11252110581311614,
+        -0.4630486893739535,
+        1.0792387152260594
+      ],
+      "initial_actor_racket_m": [
+        -0.11413609981536865,
+        -0.4666008949279785,
+        1.0593068599700928
+      ],
+      "initial_physical_racket_m": [
+        -0.11413710581311615,
+        -0.4664016893739535,
+        1.0486077152260593
+      ],
+      "initial_actor_minus_physical_racket_m": [
+        1.0059977474941029e-06,
+        -0.00019920555402502815,
+        0.01069914474403344
+      ],
+      "apex_time_s": 0.23,
+      "apex_z_m": 1.1266641468948888,
+      "height_gain_m": 0.0474254316688294,
+      "apex_vertical_velocity_m_s": 0.003904172262216298,
+      "maximum_ball_vertical_speed_m_s": 1.6566762452330468,
+      "maximum_actor_racket_z_m": 1.1083990335464478,
+      "maximum_physical_racket_z_m": 1.097795015246067,
+      "executed_fraction": 1.0,
+      "contact_tick_count": 10,
+      "sample_count": 81
+    },
+    {
+      "scenario": "same_physical_truth_holdmask",
+      "label": "同物理初态 / truth / 实物hold掩码",
+      "init_mode": "physical_on_racket",
+      "mass_kg": 0.004,
+      "solref": [
+        0.003,
+        0.8
+      ],
+      "observation_mode": "truth",
+      "real_hold_mask": true,
+      "initial_ball_m": [
+        -0.10538055201811143,
+        -0.47458538879930023,
+        1.0709649207531746
+      ],
+      "initial_actor_racket_m": [
+        -0.11413609981536865,
+        -0.4666008949279785,
+        1.0593068599700928
+      ],
+      "initial_physical_racket_m": [
+        -0.11413710581311615,
+        -0.4664016893739535,
+        1.0486077152260593
+      ],
+      "initial_actor_minus_physical_racket_m": [
+        1.0059977474941029e-06,
+        -0.00019920555402502815,
+        0.01069914474403344
+      ],
+      "apex_time_s": 0.265,
+      "apex_z_m": 1.1644748702451528,
+      "height_gain_m": 0.09350994949197822,
+      "apex_vertical_velocity_m_s": 0.01894075737254816,
+      "maximum_ball_vertical_speed_m_s": 1.8703925759607811,
+      "maximum_actor_racket_z_m": 1.1265085935592651,
+      "maximum_physical_racket_z_m": 1.115838677985261,
+      "executed_fraction": 0.75,
+      "contact_tick_count": 20,
+      "sample_count": 81
+    },
+    {
+      "scenario": "same_physical_recorded_obs_holdmask",
+      "label": "同物理初态 / 实物观测 / 实物hold掩码",
+      "init_mode": "physical_on_racket",
+      "mass_kg": 0.004,
+      "solref": [
+        0.003,
+        0.8
+      ],
+      "observation_mode": "recorded",
+      "real_hold_mask": true,
+      "initial_ball_m": [
+        -0.10538055201811143,
+        -0.47458538879930023,
+        1.0709649207531746
+      ],
+      "initial_actor_racket_m": [
+        -0.11413609981536865,
+        -0.4666008949279785,
+        1.0593068599700928
+      ],
+      "initial_physical_racket_m": [
+        -0.11413710581311615,
+        -0.4664016893739535,
+        1.0486077152260593
+      ],
+      "initial_actor_minus_physical_racket_m": [
+        1.0059977474941029e-06,
+        -0.00019920555402502815,
+        0.01069914474403344
+      ],
+      "apex_time_s": 0.29,
+      "apex_z_m": 1.2083922944080816,
+      "height_gain_m": 0.13742737365490698,
+      "apex_vertical_velocity_m_s": -0.009515529839762851,
+      "maximum_ball_vertical_speed_m_s": 1.6618178034935671,
+      "maximum_actor_racket_z_m": 1.1367502212524414,
+      "maximum_physical_racket_z_m": 1.1260113620740861,
+      "executed_fraction": 0.75,
+      "contact_tick_count": 20,
+      "sample_count": 81
+    },
+    {
+      "scenario": "same_physical_4g_identified_contact",
+      "label": "同物理初态 / 4.0g / 冲击辨识接触",
+      "init_mode": "physical_on_racket",
+      "mass_kg": 0.004,
+      "solref": [
+        0.003,
+        0.15254
+      ],
+      "observation_mode": "truth",
+      "real_hold_mask": false,
+      "initial_ball_m": [
+        -0.10538055201811143,
+        -0.47458538879930023,
+        1.0709649207531746
+      ],
+      "initial_actor_racket_m": [
+        -0.11413609981536865,
+        -0.4666008949279785,
+        1.0593068599700928
+      ],
+      "initial_physical_racket_m": [
+        -0.11413710581311615,
+        -0.4664016893739535,
+        1.0486077152260593
+      ],
+      "initial_actor_minus_physical_racket_m": [
+        1.0059977474941029e-06,
+        -0.00019920555402502815,
+        0.01069914474403344
+      ],
+      "apex_time_s": 0.245,
+      "apex_z_m": 1.2385162746205864,
+      "height_gain_m": 0.16755135386741182,
+      "apex_vertical_velocity_m_s": 0.009204367584708202,
+      "maximum_ball_vertical_speed_m_s": 2.243462299081957,
+      "maximum_actor_racket_z_m": 1.107174277305603,
+      "maximum_physical_racket_z_m": 1.0964808757627957,
+      "executed_fraction": 1.0,
+      "contact_tick_count": 0,
+      "sample_count": 81
+    }
+  ],
+  "static_hold": {
+    "historical_contact": {
+      "mass_kg": 0.004,
+      "solref": [
+        0.003,
+        0.8
+      ],
+      "initial_ball_m": [
+        -0.11252,
+        -0.463248,
+        1.089938
+      ],
+      "initial_velocity_m_s": [
+        -0.001684,
+        0.001131,
+        -0.000177
+      ],
+      "departure_time_s": 0.525,
+      "maximum_ball_z_m": 1.0899380445480347,
+      "minimum_ball_z_m": 0.14342848541528394,
+      "maximum_lateral_offset_m": 0.19303219839065777
+    },
+    "identified_contact": {
+      "mass_kg": 0.004,
+      "solref": [
+        0.003,
+        0.15254
+      ],
+      "initial_ball_m": [
+        -0.11252,
+        -0.463248,
+        1.089938
+      ],
+      "initial_velocity_m_s": [
+        -0.001684,
+        0.001131,
+        -0.000177
+      ],
+      "departure_time_s": 0.47000000000000003,
+      "maximum_ball_z_m": 2.2894673655735676,
+      "minimum_ball_z_m": 1.0698155364537634,
+      "maximum_lateral_offset_m": 0.27311766933798043
+    }
+  }
+}

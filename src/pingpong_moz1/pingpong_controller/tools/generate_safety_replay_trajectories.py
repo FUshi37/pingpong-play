@@ -337,7 +337,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--random-walk-step-m", type=finite_float, default=0.018)
 
-    p.add_argument("--sim-base-height-m", type=finite_float, default=0.947396)
+    p.add_argument("--sim-base-height-m", type=finite_float, default=1.302396)
     p.add_argument("--sim-cartesian-x-offset-m", type=finite_float, default=0.0)
     p.add_argument("--sim-cartesian-y-offset-m", type=finite_float, default=0.023583)
     p.add_argument("--quiet", action="store_true")

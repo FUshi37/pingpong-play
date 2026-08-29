@@ -198,6 +198,9 @@ def _resolve_detector_config(camera_params: dict, args) -> dict:
             args.depth_correction_model_path,
             camera_params.get('depth_correction_model_path'),
             'depth_correction_model.pkl'),
+        'sensor_surface_to_center_depth_enabled': bool(
+            (camera_params.get('sensor_surface_to_center_depth') or {}).get(
+                'enabled', False)),
     }
 
 
@@ -433,6 +436,8 @@ def main():
         roi_margin=cfg['roi_margin'],
         depth_scale=camera_params.get('depth_scale', 0.001),
         depth_neighborhood_px=cfg['depth_neighborhood_px'],
+        sensor_surface_to_center_depth_enabled=(
+            cfg['sensor_surface_to_center_depth_enabled']),
         calibration_data=calibration,
         output_frame=args.output_frame,
         print_every=999999,

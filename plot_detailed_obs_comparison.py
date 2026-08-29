@@ -78,7 +78,8 @@ def plot_obs_dimension(recorded_data, reference_data, dim_idx, obs_name, output_
     mean_diff = np.mean(diff)
 
     # Create figure
-    fig, axes = plt.subplots(2, 1, figsize=(12, 8), height_ratios=[2, 1])
+    fig, axes = plt.subplots(
+        2, 1, figsize=(12, 8), gridspec_kw={'height_ratios': [2, 1]})
 
     # Top: overlay plot
     time = np.arange(n) * 0.005  # 5ms timestep

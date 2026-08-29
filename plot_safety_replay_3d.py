@@ -924,7 +924,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--scenario", default="")
     p.add_argument("--replay-frame", choices=("sim", "base_link"), default="sim")
-    p.add_argument("--sim-base-height-m", type=float, default=0.947396)
+    p.add_argument("--sim-base-height-m", type=float, default=1.302396)
     p.add_argument("--sim-cartesian-x-offset-m", type=float, default=0.0)
     p.add_argument("--sim-cartesian-y-offset-m", type=float, default=0.023583)
     p.add_argument("--done-z-min-m", type=float, default=0.8)

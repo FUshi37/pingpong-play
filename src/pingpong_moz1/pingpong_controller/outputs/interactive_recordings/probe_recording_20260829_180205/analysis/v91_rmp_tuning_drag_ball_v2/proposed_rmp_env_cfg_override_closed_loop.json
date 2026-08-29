@@ -1,0 +1,72 @@
+{
+  "recovered_rmp_jnt_kp_scale_per_joint": [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "recovered_rmp_jnt_kd_scale_per_joint": [
+    1.0,
+    1.0,
+    0.92,
+    1.0,
+    1.0,
+    1.0,
+    1.0
+  ],
+  "recovered_rmp_output_filter_length": 35,
+  "recovered_rmp_target_filter_length": 10,
+  "recovered_rmp_target_update_delay_steps": 4,
+  "recovered_rmp_output_delay_steps_per_joint": [
+    12,
+    11,
+    10,
+    12,
+    13,
+    12,
+    13
+  ],
+  "recovered_rmp_joint_velocity_feedforward": 0.5,
+  "recovered_rmp_joint_acceleration_feedforward": 0.05,
+  "recovered_rmp_estimator_joint_process_var": 50.0,
+  "recovered_rmp_estimator_joint_measure_var": 0.0001,
+  "arm_acc_limit_deg_s2": [
+    1300.0,
+    1300.0,
+    1800.0,
+    2400.0,
+    3000.0,
+    3000.0,
+    3000.0
+  ],
+  "recovered_rmp_dof_damping_scale_per_joint": [
+    0.6084,
+    0.9984,
+    0.9984,
+    1.92,
+    0.58,
+    1.17,
+    0.78
+  ],
+  "recovered_rmp_dof_armature_scale_per_joint": [
+    0.4524,
+    1.65,
+    0.92,
+    1.22,
+    0.58,
+    0.5336,
+    0.58
+  ],
+  "recovered_rmp_acceleration_feedforward_s2": [
+    2.5e-05,
+    -5e-05,
+    0.0,
+    2.5e-05,
+    -2.5e-05,
+    -2.5e-05,
+    -2.5e-05
+  ]
+}

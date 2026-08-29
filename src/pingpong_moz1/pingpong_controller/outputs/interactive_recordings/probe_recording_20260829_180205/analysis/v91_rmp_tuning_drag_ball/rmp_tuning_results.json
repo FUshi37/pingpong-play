@@ -1,0 +1,1158 @@
+{
+  "recording": "probe_recording_20260829_180205",
+  "ticks": 3667,
+  "duration_s": 18.33,
+  "replay_equivalence": {
+    "online_independent_q_rms_rad": 4.3736839504829057e-07,
+    "online_independent_dq_rms_rad_s": 6.209749711702811e-05,
+    "online_independent_passed": true,
+    "common_replay_q_rms_rad": 0.0,
+    "common_replay_dq_rms_rad_s": 0.0,
+    "common_replay_passed": true
+  },
+  "objective_scales": {
+    "q_rad": 0.01,
+    "dq_rad_s": 0.2,
+    "development_score": "0.65*train + 0.35*validation"
+  },
+  "baseline_candidate": {
+    "kp_scale": 1.0,
+    "kd_scale": 1.0,
+    "output_filter_length": 35,
+    "target_filter_length": 10,
+    "target_update_delay_steps": 3,
+    "output_delay_offset_steps": 0,
+    "output_delay_per_joint_adjustment": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "joint_velocity_feedforward": 0.5,
+    "acceleration_limit_scale": 1.0
+  },
+  "selected_candidate": {
+    "kp_scale": 1.0,
+    "kd_scale": 1.0,
+    "output_filter_length": 35,
+    "target_filter_length": 10,
+    "target_update_delay_steps": 4,
+    "output_delay_offset_steps": -5,
+    "output_delay_per_joint_adjustment": [
+      1,
+      -1,
+      -3,
+      1,
+      0,
+      0,
+      0
+    ],
+    "joint_velocity_feedforward": 0.5,
+    "acceleration_limit_scale": 1.0
+  },
+  "baseline_metrics": {
+    "full": {
+      "samples": 3667,
+      "q_rms_rad": 0.005003745818701068,
+      "dq_rms_rad_s": 0.11828721245142339,
+      "q_per_joint_rms_rad": [
+        0.0033720145256491,
+        0.0031951932238692094,
+        0.006840917097117277,
+        0.003923807904116232,
+        0.0050015509731885155,
+        0.005422257343967852,
+        0.00608865845556129
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.07503080047965031,
+        0.05896800123379292,
+        0.1681304800945383,
+        0.0975083808820167,
+        0.12168296720001752,
+        0.13945956472980492,
+        0.12963313170749152
+      ],
+      "normalized_score": 0.5478007566259326
+    },
+    "post_warmup": {
+      "samples": 3467,
+      "q_rms_rad": 0.004238088000675879,
+      "dq_rms_rad_s": 0.11180850143300552,
+      "q_per_joint_rms_rad": [
+        0.0029479333160648226,
+        0.002349851778189295,
+        0.006049993519151084,
+        0.0034008309883083667,
+        0.004346366499322615,
+        0.00510469437384931,
+        0.004289607873131809
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.07100503270374453,
+        0.047851760174214455,
+        0.16456510972662747,
+        0.09335371794256023,
+        0.11175419545870856,
+        0.13841153226343855,
+        0.11284120199935044
+      ],
+      "normalized_score": 0.4960556540510795
+    },
+    "train_1_to_9_s": {
+      "samples": 1600,
+      "q_rms_rad": 0.004690696186757863,
+      "dq_rms_rad_s": 0.12070962619424656,
+      "q_per_joint_rms_rad": [
+        0.00333316698940577,
+        0.0026530797053217915,
+        0.006608821216630982,
+        0.0038292526905836293,
+        0.004774843467352199,
+        0.005610816687804036,
+        0.004821772789089983
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.0784173858836636,
+        0.053466515398130944,
+        0.1771475846242461,
+        0.10074259684083621,
+        0.11894394172239137,
+        0.14856035204004542,
+        0.12344863420417257
+      ],
+      "normalized_score": 0.540507471531854
+    },
+    "validation_9_to_14_s": {
+      "samples": 1000,
+      "q_rms_rad": 0.003463016531480783,
+      "dq_rms_rad_s": 0.09711011455645689,
+      "q_per_joint_rms_rad": [
+        0.002236283604352487,
+        0.0020646072833063454,
+        0.005204274069186412,
+        0.002543799778354993,
+        0.0036273102806217675,
+        0.00412973718694376,
+        0.00330398575709574
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.05494793502907068,
+        0.04047899408591223,
+        0.14810265608024925,
+        0.07687536280621975,
+        0.09808442146344971,
+        0.12172885491603962,
+        0.09524762422448475
+      ],
+      "normalized_score": 0.42171328749655046
+    },
+    "held_out_14_s_to_end": {
+      "samples": 867,
+      "q_rms_rad": 0.004169899020010688,
+      "dq_rms_rad_s": 0.1105599635481325,
+      "q_per_joint_rms_rad": [
+        0.002912079567522129,
+        0.0020431780901341125,
+        0.005875849192779749,
+        0.0034242695548499912,
+        0.0042768614141121125,
+        0.005141369846849722,
+        0.004252665936308562
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.07300985808396435,
+        0.04462178671286058,
+        0.15837898892172592,
+        0.0964555304042823,
+        0.11285613594102162,
+        0.13707156324368844,
+        0.11104188941303045
+      ],
+      "normalized_score": 0.48962649890757065
+    },
+    "development_score": 0.49892950711949774
+  },
+  "tuned_metrics": {
+    "full": {
+      "samples": 3667,
+      "q_rms_rad": 0.0035234258020048247,
+      "dq_rms_rad_s": 0.06579904511005208,
+      "q_per_joint_rms_rad": [
+        0.0027302448719197727,
+        0.0023466464081099343,
+        0.004287068760893233,
+        0.0029799572759122883,
+        0.003370854488237483,
+        0.003581321533817083,
+        0.004742688205432876
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.048888739117716434,
+        0.04045172824427032,
+        0.07387608609787226,
+        0.05977910479000194,
+        0.06855724174362368,
+        0.07253136009276161,
+        0.08537000745144907
+      ],
+      "normalized_score": 0.34086885473536604
+    },
+    "post_warmup": {
+      "samples": 3467,
+      "q_rms_rad": 0.0024063215699024853,
+      "dq_rms_rad_s": 0.05262104258528397,
+      "q_per_joint_rms_rad": [
+        0.002220653391065631,
+        0.0012083923696115245,
+        0.0027576588994700072,
+        0.00220445665906878,
+        0.0025333308835296447,
+        0.002966654693902388,
+        0.002541270091198902
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.04242453941337106,
+        0.02538379729326029,
+        0.05826374876754528,
+        0.051818599639830626,
+        0.053651626368930526,
+        0.06879411134412797,
+        0.05698843473138744
+      ],
+      "normalized_score": 0.2521192059788745
+    },
+    "train_1_to_9_s": {
+      "samples": 1600,
+      "q_rms_rad": 0.0027596298107832205,
+      "dq_rms_rad_s": 0.0586905442303426,
+      "q_per_joint_rms_rad": [
+        0.0025277589675919976,
+        0.001477044308562116,
+        0.0030695117663019507,
+        0.002553969159670505,
+        0.0029716005600309496,
+        0.0034112622108942474,
+        0.0028854619817944207
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.04720624516225132,
+        0.029249120294411755,
+        0.06348397337170227,
+        0.057868722023985596,
+        0.06030253238771451,
+        0.07791159215185715,
+        0.06278936045465078
+      ],
+      "normalized_score": 0.2848421198462223
+    },
+    "validation_9_to_14_s": {
+      "samples": 1000,
+      "q_rms_rad": 0.001752159984934878,
+      "dq_rms_rad_s": 0.0385110110208313,
+      "q_per_joint_rms_rad": [
+        0.00169642308564085,
+        0.000942814456894637,
+        0.0021985764784597573,
+        0.0014943722818630473,
+        0.0018110214450819905,
+        0.002062951475900505,
+        0.001766705235493509
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.029203767947662548,
+        0.02130942880399003,
+        0.044272717030257286,
+        0.036894205545223366,
+        0.038718661671024744,
+        0.05063581132502836,
+        0.04111396288901512
+      ],
+      "normalized_score": 0.18408978159343153
+    },
+    "held_out_14_s_to_end": {
+      "samples": 867,
+      "q_rms_rad": 0.0023579124605734325,
+      "dq_rms_rad_s": 0.054820745348018056,
+      "q_per_joint_rms_rad": [
+        0.002146767726640581,
+        0.0008875666182513373,
+        0.002728940985687358,
+        0.002195405771591715,
+        0.0023631977499974865,
+        0.0029682482234339247,
+        0.0026191115862632115
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.045838380644951396,
+        0.02177285312257643,
+        0.06226116323946376,
+        0.054658741397078575,
+        0.05541477989510128,
+        0.06903266421404135,
+        0.0613322717008102
+      ],
+      "normalized_score": 0.25566615412494537
+    },
+    "development_score": 0.24957880145774555
+  },
+  "frequency_diagnostics": [
+    {
+      "joint": 1,
+      "dominant_command_frequency_hz": 4.268820305739832,
+      "baseline": {
+        "amplitude_ratio_real_over_sim": 1.0092488333509235,
+        "phase_sim_minus_real_deg": -4.326700145857485
+      },
+      "tuned": {
+        "amplitude_ratio_real_over_sim": 1.0092216769906746,
+        "phase_sim_minus_real_deg": 0.2951911601434117
+      }
+    },
+    {
+      "joint": 2,
+      "dominant_command_frequency_hz": 1.03836169599077,
+      "baseline": {
+        "amplitude_ratio_real_over_sim": 1.0001447672137638,
+        "phase_sim_minus_real_deg": -2.1733760426824507
+      },
+      "tuned": {
+        "amplitude_ratio_real_over_sim": 1.000895858406503,
+        "phase_sim_minus_real_deg": -0.32868638352539253
+      }
+    },
+    {
+      "joint": 3,
+      "dominant_command_frequency_hz": 4.268820305739832,
+      "baseline": {
+        "amplitude_ratio_real_over_sim": 0.9943179846382555,
+        "phase_sim_minus_real_deg": -9.555825200993235
+      },
+      "tuned": {
+        "amplitude_ratio_real_over_sim": 0.9944717383709846,
+        "phase_sim_minus_real_deg": 1.2244667264822706
+      }
+    },
+    {
+      "joint": 4,
+      "dominant_command_frequency_hz": 4.268820305739832,
+      "baseline": {
+        "amplitude_ratio_real_over_sim": 1.0096542032743163,
+        "phase_sim_minus_real_deg": -4.512969101400586
+      },
+      "tuned": {
+        "amplitude_ratio_real_over_sim": 1.009704239297255,
+        "phase_sim_minus_real_deg": 0.10781050834346424
+      }
+    },
+    {
+      "joint": 5,
+      "dominant_command_frequency_hz": 4.268820305739832,
+      "baseline": {
+        "amplitude_ratio_real_over_sim": 1.0217390034538911,
+        "phase_sim_minus_real_deg": -6.022777877794395
+      },
+      "tuned": {
+        "amplitude_ratio_real_over_sim": 1.0218108299192843,
+        "phase_sim_minus_real_deg": 0.13583190641632215
+      }
+    },
+    {
+      "joint": 6,
+      "dominant_command_frequency_hz": 4.268820305739832,
+      "baseline": {
+        "amplitude_ratio_real_over_sim": 1.0279330590729014,
+        "phase_sim_minus_real_deg": -5.929938452127838
+      },
+      "tuned": {
+        "amplitude_ratio_real_over_sim": 1.0280077092389794,
+        "phase_sim_minus_real_deg": 0.23106151858807616
+      }
+    },
+    {
+      "joint": 7,
+      "dominant_command_frequency_hz": 4.268820305739832,
+      "baseline": {
+        "amplitude_ratio_real_over_sim": 1.025395219132458,
+        "phase_sim_minus_real_deg": -5.77634028933117
+      },
+      "tuned": {
+        "amplitude_ratio_real_over_sim": 1.025503235495634,
+        "phase_sim_minus_real_deg": 0.3816976226461459
+      }
+    }
+  ],
+  "search_decisions": [
+    {
+      "phase": "coarse",
+      "parameter": "output_delay_offset_steps",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 3,
+        "output_delay_offset_steps": 0,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 3,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.49892950711949774,
+      "selected_development_score": 0.2746759047695881
+    },
+    {
+      "phase": "coarse",
+      "parameter": "target_update_delay_steps",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 3,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.2746759047695881,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "coarse",
+      "parameter": "output_filter_length",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "coarse",
+      "parameter": "target_filter_length",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "coarse",
+      "parameter": "kp_scale",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "coarse",
+      "parameter": "kd_scale",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "coarse",
+      "parameter": "joint_velocity_feedforward",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "coarse",
+      "parameter": "acceleration_limit_scale",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "fine",
+      "parameter": "output_delay_offset_steps",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "fine",
+      "parameter": "target_update_delay_steps",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "fine",
+      "parameter": "output_filter_length",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "fine",
+      "parameter": "target_filter_length",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "fine",
+      "parameter": "kp_scale",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "fine",
+      "parameter": "kd_scale",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "fine",
+      "parameter": "joint_velocity_feedforward",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "fine",
+      "parameter": "acceleration_limit_scale",
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27142953231448996
+    },
+    {
+      "phase": "per_joint_output_delay",
+      "joint": 1,
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27142953231448996,
+      "selected_development_score": 0.27037145541636104
+    },
+    {
+      "phase": "per_joint_output_delay",
+      "joint": 2,
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.27037145541636104,
+      "selected_development_score": 0.2700996100711524
+    },
+    {
+      "phase": "per_joint_output_delay",
+      "joint": 3,
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          -3,
+          0,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.2700996100711524,
+      "selected_development_score": 0.2506016912122625
+    },
+    {
+      "phase": "per_joint_output_delay",
+      "joint": 4,
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          -3,
+          0,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          -3,
+          1,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.2506016912122625,
+      "selected_development_score": 0.24957880145774555
+    },
+    {
+      "phase": "per_joint_output_delay",
+      "joint": 5,
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          -3,
+          1,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          -3,
+          1,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.24957880145774555,
+      "selected_development_score": 0.24957880145774555
+    },
+    {
+      "phase": "per_joint_output_delay",
+      "joint": 6,
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          -3,
+          1,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          -3,
+          1,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.24957880145774555,
+      "selected_development_score": 0.24957880145774555
+    },
+    {
+      "phase": "per_joint_output_delay",
+      "joint": 7,
+      "before": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          -3,
+          1,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "selected": {
+        "kp_scale": 1.0,
+        "kd_scale": 1.0,
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_offset_steps": -5,
+        "output_delay_per_joint_adjustment": [
+          1,
+          -1,
+          -3,
+          1,
+          0,
+          0,
+          0
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "acceleration_limit_scale": 1.0
+      },
+      "before_development_score": 0.24957880145774555,
+      "selected_development_score": 0.24957880145774555
+    }
+  ],
+  "evaluation_count": 89,
+  "resumed_global_search": true,
+  "proposed_env_cfg_override": {
+    "recovered_rmp_jnt_kp_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "recovered_rmp_jnt_kd_scale_per_joint": [
+      1.0,
+      1.0,
+      0.92,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "recovered_rmp_output_filter_length": 35,
+    "recovered_rmp_target_filter_length": 10,
+    "recovered_rmp_target_update_delay_steps": 4,
+    "recovered_rmp_output_delay_steps_per_joint": [
+      14,
+      13,
+      11,
+      14,
+      13,
+      13,
+      13
+    ],
+    "recovered_rmp_joint_velocity_feedforward": 0.5,
+    "arm_acc_limit_deg_s2": [
+      1300.0,
+      1300.0,
+      1800.0,
+      3000.0,
+      3000.0,
+      3000.0,
+      3000.0
+    ]
+  }
+}

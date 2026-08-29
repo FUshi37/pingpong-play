@@ -1,0 +1,2661 @@
+{
+  "recording": "probe_recording_20260829_180205",
+  "ticks": 3667,
+  "duration_s": 18.33,
+  "objective": "closed-loop real q/dq: 0.65*train(1-9s) + 0.35*validation(9-14s); 14s+ held out",
+  "fresh_original_reproduction": {
+    "q_rms_rad": 0.0005538947666086837,
+    "dq_rms_rad_s": 0.007143109566413566
+  },
+  "original_candidate": {
+    "jnt_kp_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "jnt_kd_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "output_filter_length": 35,
+    "target_filter_length": 10,
+    "target_update_delay_steps": 3,
+    "output_delay_steps_per_joint": [
+      18,
+      19,
+      19,
+      18,
+      18,
+      18,
+      18
+    ],
+    "joint_velocity_feedforward": 0.5,
+    "joint_acceleration_feedforward": 0.0,
+    "estimator_process_scale": 1.0,
+    "estimator_measure_scale": 1.0,
+    "acceleration_limit_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "dof_damping_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "dof_armature_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "acceleration_feedforward_s2_per_joint": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "v1_candidate": {
+    "jnt_kp_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "jnt_kd_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "output_filter_length": 35,
+    "target_filter_length": 10,
+    "target_update_delay_steps": 4,
+    "output_delay_steps_per_joint": [
+      14,
+      13,
+      11,
+      14,
+      13,
+      13,
+      13
+    ],
+    "joint_velocity_feedforward": 0.5,
+    "joint_acceleration_feedforward": 0.0,
+    "estimator_process_scale": 1.0,
+    "estimator_measure_scale": 1.0,
+    "acceleration_limit_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "dof_damping_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "dof_armature_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "acceleration_feedforward_s2_per_joint": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  },
+  "same_command_v2_candidate": {
+    "jnt_kp_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "jnt_kd_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "output_filter_length": 35,
+    "target_filter_length": 10,
+    "target_update_delay_steps": 4,
+    "output_delay_steps_per_joint": [
+      14,
+      13,
+      11,
+      14,
+      13,
+      13,
+      13
+    ],
+    "joint_velocity_feedforward": 0.5,
+    "joint_acceleration_feedforward": 0.05,
+    "estimator_process_scale": 1.0,
+    "estimator_measure_scale": 1.0,
+    "acceleration_limit_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      0.8,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "dof_damping_scale_per_joint": [
+      1.5,
+      1.5,
+      1.5,
+      1.5,
+      1.5,
+      0.5,
+      1.5
+    ],
+    "dof_armature_scale_per_joint": [
+      0.5,
+      0.5,
+      0.75,
+      1.25,
+      1.5,
+      1.5,
+      1.5
+    ],
+    "acceleration_feedforward_s2_per_joint": [
+      2.5e-05,
+      -5e-05,
+      0.0,
+      2.5e-05,
+      -2.5e-05,
+      -2.5e-05,
+      -2.5e-05
+    ]
+  },
+  "selected_candidate": {
+    "jnt_kp_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "jnt_kd_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "output_filter_length": 35,
+    "target_filter_length": 10,
+    "target_update_delay_steps": 4,
+    "output_delay_steps_per_joint": [
+      12,
+      13,
+      10,
+      12,
+      13,
+      12,
+      11
+    ],
+    "joint_velocity_feedforward": 0.5,
+    "joint_acceleration_feedforward": 0.05,
+    "estimator_process_scale": 1.0,
+    "estimator_measure_scale": 1.0,
+    "acceleration_limit_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      0.8,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "dof_damping_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "dof_armature_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "acceleration_feedforward_s2_per_joint": [
+      2.5e-05,
+      -5e-05,
+      0.0,
+      2.5e-05,
+      -2.5e-05,
+      -2.5e-05,
+      -2.5e-05
+    ]
+  },
+  "original_metrics": {
+    "full": {
+      "samples": 3667,
+      "q_rms_rad": 0.0474179614045116,
+      "dq_rms_rad_s": 1.1327709781444992,
+      "q_per_joint_rms_rad": [
+        0.03765230724749097,
+        0.026698473399730707,
+        0.05315436719404644,
+        0.04649387015120452,
+        0.04886180602472246,
+        0.05993973634280082,
+        0.05139476558078667
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.8935302932738324,
+        0.45867438267336985,
+        1.2189094548503432,
+        1.1808146635806382,
+        1.1907592777220373,
+        1.4603443869559496,
+        1.2421091471045635
+      ],
+      "normalized_score": 1.0446423585204523
+    },
+    "post_warmup": {
+      "samples": 3467,
+      "q_rms_rad": 0.047992511021503724,
+      "dq_rms_rad_s": 1.1555791936748643,
+      "q_per_joint_rms_rad": [
+        0.03839785553763437,
+        0.027248567069681786,
+        0.05361091177401394,
+        0.047251165887206965,
+        0.049818321301775007,
+        0.060570948163175216,
+        0.051464362855763696
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.9103728945010673,
+        0.46602137663581805,
+        1.2428755552650785,
+        1.2055926463309115,
+        1.2151804950256329,
+        1.4908695486358665,
+        1.2665067146102487
+      ],
+      "normalized_score": 1.062232488326805
+    },
+    "train_1_to_9_s": {
+      "samples": 1600,
+      "q_rms_rad": 0.04668395852403011,
+      "dq_rms_rad_s": 1.1234172506974158,
+      "q_per_joint_rms_rad": [
+        0.038890602834353936,
+        0.02576519982740682,
+        0.05187080194564853,
+        0.04525679415272104,
+        0.04769963741274875,
+        0.05916555610697372,
+        0.05064428322255412
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.8969859585391707,
+        0.5196395531795788,
+        1.202339450950885,
+        1.137809276293138,
+        1.14938368674588,
+        1.4458306294205066,
+        1.2681151313059238
+      ],
+      "normalized_score": 1.0329141088575289
+    },
+    "validation_9_to_14_s": {
+      "samples": 1000,
+      "q_rms_rad": 0.05262191259703171,
+      "dq_rms_rad_s": 1.3285756086589107,
+      "q_per_joint_rms_rad": [
+        0.04169136973069259,
+        0.02684064096354146,
+        0.05596004316877896,
+        0.05410014294417431,
+        0.05546771124942323,
+        0.06767842126368218,
+        0.05665228932891359
+      ],
+      "dq_per_joint_rms_rad_s": [
+        1.0487405327492254,
+        0.48219513851265594,
+        1.436552648793683,
+        1.3988856265557774,
+        1.417228206591413,
+        1.717705571859541,
+        1.429618987258939
+      ],
+      "normalized_score": 1.1984864250527105
+    },
+    "held_out_14_s_to_end": {
+      "samples": 867,
+      "q_rms_rad": 0.04466177860411693,
+      "dq_rms_rad_s": 0.9873976424250072,
+      "q_per_joint_rms_rad": [
+        0.03316436726890789,
+        0.030216836464183168,
+        0.053999803988449654,
+        0.042101196807107555,
+        0.04665946704601333,
+        0.054111230447231345,
+        0.046434557017578364
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.7488440328647612,
+        0.319306397128657,
+        1.0625949125087326,
+        1.0797853264033304,
+        1.0725281173623804,
+        1.2756610952527512,
+        1.0436870591231169
+      ],
+      "normalized_score": 0.9414945277322978
+    },
+    "development_score": 1.0908644195258426
+  },
+  "v1_metrics": {
+    "full": {
+      "samples": 3667,
+      "q_rms_rad": 0.04676301903857816,
+      "dq_rms_rad_s": 1.0679109557406834,
+      "q_per_joint_rms_rad": [
+        0.03447360059794127,
+        0.026379723259116968,
+        0.051923285190297166,
+        0.04829919847198479,
+        0.048144340476089585,
+        0.0569151896585343,
+        0.05326428689158719
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.8518203167014596,
+        0.3570505919595291,
+        1.1531191377419872,
+        1.1373841974836336,
+        1.1323076809709864,
+        1.3676543308590665,
+        1.163627121098968
+      ],
+      "normalized_score": 1.003779305732079
+    },
+    "post_warmup": {
+      "samples": 3467,
+      "q_rms_rad": 0.04763229642747954,
+      "dq_rms_rad_s": 1.0955300080527135,
+      "q_per_joint_rms_rad": [
+        0.03533561978279765,
+        0.027016531907402355,
+        0.05277133255887294,
+        0.04924199108537294,
+        0.04935366902273117,
+        0.057845898094235945,
+        0.053961382678019754
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.8732593618533415,
+        0.3651347270138114,
+        1.1832015042257158,
+        1.1672470895928624,
+        1.161850669979916,
+        1.4037860751791715,
+        1.1926662634229128
+      ],
+      "normalized_score": 1.0265769001214888
+    },
+    "train_1_to_9_s": {
+      "samples": 1600,
+      "q_rms_rad": 0.04415585176218961,
+      "dq_rms_rad_s": 0.9945524837799361,
+      "q_per_joint_rms_rad": [
+        0.0329115207443158,
+        0.029375545929954647,
+        0.04843395908450246,
+        0.04376370817892169,
+        0.04447788191368717,
+        0.05301743713912699,
+        0.05149604500373386
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.8181244277543687,
+        0.31464586508383674,
+        1.0901982925875027,
+        1.0379945327935554,
+        1.0504323620921163,
+        1.2655763589606022,
+        1.0883732201256577
+      ],
+      "normalized_score": 0.9404866668195316
+    },
+    "validation_9_to_14_s": {
+      "samples": 1000,
+      "q_rms_rad": 0.052603937332890954,
+      "dq_rms_rad_s": 1.3438292938955712,
+      "q_per_joint_rms_rad": [
+        0.04039222250072973,
+        0.023640383815269454,
+        0.054838042701971214,
+        0.05404962477226436,
+        0.05398810720713517,
+        0.06859879988663892,
+        0.06025559097606864
+      ],
+      "dq_per_joint_rms_rad_s": [
+        1.0575145330203446,
+        0.4616885200310133,
+        1.433807604043134,
+        1.4307112321814448,
+        1.4299618087678092,
+        1.7276357516079914,
+        1.4755988549652472
+      ],
+      "normalized_score": 1.206802979011271
+    },
+    "held_out_14_s_to_end": {
+      "samples": 867,
+      "q_rms_rad": 0.04777996748350138,
+      "dq_rms_rad_s": 0.9439617225292642,
+      "q_per_joint_rms_rad": [
+        0.03335033595156143,
+        0.026108525022403822,
+        0.05777876299321611,
+        0.052842053018901707,
+        0.05222719510440506,
+        0.052590797952787295,
+        0.050620520582867416
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.7241193021627345,
+        0.3233914102930879,
+        1.0167146779090739,
+        1.0483369309653954,
+        1.001641684203256,
+        1.2172844386846895,
+        0.995353626550774
+      ],
+      "normalized_score": 0.949798360361344
+    },
+    "development_score": 1.0336973760866404
+  },
+  "same_command_v2_metrics": {
+    "full": {
+      "samples": 3667,
+      "q_rms_rad": 0.04563667452113797,
+      "dq_rms_rad_s": 1.0125786190960837,
+      "q_per_joint_rms_rad": [
+        0.03495257527290427,
+        0.024641499133481574,
+        0.05027176888568595,
+        0.04819324455804421,
+        0.04621215745738778,
+        0.05526444111338568,
+        0.052062413652423215
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.8059985830853549,
+        0.34674301902309734,
+        1.092829872682118,
+        1.0748330671270558,
+        1.0726237494916604,
+        1.298582032178306,
+        1.104972183672883
+      ],
+      "normalized_score": 0.9639496575002879
+    },
+    "post_warmup": {
+      "samples": 3467,
+      "q_rms_rad": 0.04646617543291039,
+      "dq_rms_rad_s": 1.0386079268222304,
+      "q_per_joint_rms_rad": [
+        0.03584075612157499,
+        0.025218178262465956,
+        0.051051151460674016,
+        0.04913163341913823,
+        0.04736805053300431,
+        0.05612525217926365,
+        0.05271914538299976
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.8261877603075076,
+        0.3543758564996405,
+        1.1211936779121663,
+        1.1029557449145195,
+        1.1004732255386174,
+        1.3327103472993331,
+        1.1322683816559491
+      ],
+      "normalized_score": 0.9854817627441853
+    },
+    "train_1_to_9_s": {
+      "samples": 1600,
+      "q_rms_rad": 0.043132856811203046,
+      "dq_rms_rad_s": 0.9636040389278222,
+      "q_per_joint_rms_rad": [
+        0.03346185608676486,
+        0.02644892708584748,
+        0.045667792868773344,
+        0.043731076611140535,
+        0.04241020132588037,
+        0.0521496362328558,
+        0.051843010110436856
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.7907623463601833,
+        0.30967188341756163,
+        1.0570288448055603,
+        1.001285634601727,
+        1.0179763891943163,
+        1.2271164949143534,
+        1.0566710562927775
+      ],
+      "normalized_score": 0.9145244880582231
+    },
+    "validation_9_to_14_s": {
+      "samples": 1000,
+      "q_rms_rad": 0.049846422638046714,
+      "dq_rms_rad_s": 1.2644835920006783,
+      "q_per_joint_rms_rad": [
+        0.0403782485200013,
+        0.02130173352253708,
+        0.05123749076840251,
+        0.05075884465613261,
+        0.05125472814988191,
+        0.06608587874751962,
+        0.05578855478903875
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.9911197609299252,
+        0.448104665672194,
+        1.344687360247996,
+        1.344799285294777,
+        1.3425002406533786,
+        1.6276535684649924,
+        1.393227497409633
+      ],
+      "normalized_score": 1.1385923533827302
+    },
+    "held_out_14_s_to_end": {
+      "samples": 867,
+      "q_rms_rad": 0.048319432106846485,
+      "dq_rms_rad_s": 0.8693844573548749,
+      "q_per_joint_rms_rad": [
+        0.034495082149957106,
+        0.026995326085846417,
+        0.05954081129616859,
+        0.056142223673496326,
+        0.05121558271518995,
+        0.05040234483462284,
+        0.05063817279867054
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.6652694872462432,
+        0.30595998386530643,
+        0.9377387433719109,
+        0.9636071845673428,
+        0.9228184314558584,
+        1.1259942274973764,
+        0.9095387433646138
+      ],
+      "normalized_score": 0.9191671073155003
+    },
+    "development_score": 0.9929482409218006
+  },
+  "selected_metrics": {
+    "full": {
+      "samples": 3667,
+      "q_rms_rad": 0.021655818338763462,
+      "dq_rms_rad_s": 0.469449781510899,
+      "q_per_joint_rms_rad": [
+        0.016861777867409666,
+        0.013235941406951965,
+        0.02411436288503341,
+        0.02156307023112202,
+        0.022861252828257198,
+        0.026282394398205816,
+        0.023736932117458216
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.34963083802168804,
+        0.16895901306512717,
+        0.48809137903825534,
+        0.4906216088185861,
+        0.5036884166594594,
+        0.6069005171691502,
+        0.5393698122665259
+      ],
+      "normalized_score": 0.45164858271074
+    },
+    "post_warmup": {
+      "samples": 3467,
+      "q_rms_rad": 0.0213753811543878,
+      "dq_rms_rad_s": 0.47932836303451104,
+      "q_per_joint_rms_rad": [
+        0.01721158619157658,
+        0.013396559089857795,
+        0.023513218896440407,
+        0.021181780501767913,
+        0.023258375448245286,
+        0.02567027355073608,
+        0.02282953527847691
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.35621882868960664,
+        0.170299143020629,
+        0.4985034538067693,
+        0.5019075068821754,
+        0.51451008934902,
+        0.6210639198003625,
+        0.5491249783038152
+      ],
+      "normalized_score": 0.45415770796469307
+    },
+    "train_1_to_9_s": {
+      "samples": 1600,
+      "q_rms_rad": 0.016830033114289523,
+      "dq_rms_rad_s": 0.3182310732346354,
+      "q_per_joint_rms_rad": [
+        0.015363770386135742,
+        0.01173306185373245,
+        0.019533728536466156,
+        0.016448546040442023,
+        0.01726309450921109,
+        0.019780239057868992,
+        0.01635990265416841
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.26119577888866563,
+        0.14259015826169794,
+        0.3502208695531834,
+        0.29595300868806224,
+        0.34464798768065547,
+        0.41780635204887473,
+        0.34169386827290893
+      ],
+      "normalized_score": 0.32754467010111815
+    },
+    "validation_9_to_14_s": {
+      "samples": 1000,
+      "q_rms_rad": 0.012122644229531708,
+      "dq_rms_rad_s": 0.2672413228539626,
+      "q_per_joint_rms_rad": [
+        0.010054492750221161,
+        0.009426564999046861,
+        0.01294540283099701,
+        0.01164925474749364,
+        0.013505288751289828,
+        0.01494114897012459,
+        0.011394613737776494
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.20450615009325318,
+        0.10013988964473074,
+        0.2673529223243212,
+        0.2983472022324758,
+        0.28717575600366557,
+        0.3518123375980931,
+        0.285209108696262
+      ],
+      "normalized_score": 0.25514831558042395
+    },
+    "held_out_14_s_to_end": {
+      "samples": 867,
+      "q_rms_rad": 0.033687925329388725,
+      "dq_rms_rad_s": 0.8059119724122805,
+      "q_per_joint_rms_rad": [
+        0.02514763881917451,
+        0.01900316049703396,
+        0.03624082314676722,
+        0.033739259847457896,
+        0.037454544034384814,
+        0.04068862298996203,
+        0.03795350467191565
+      ],
+      "dq_per_joint_rms_rad_s": [
+        0.5773044351839179,
+        0.2586231652903518,
+        0.8276118713955479,
+        0.862003108885011,
+        0.8626993792209346,
+        1.0380429435408172,
+        0.9468464804227816
+      ],
+      "normalized_score": 0.7427801264428258
+    },
+    "development_score": 0.3022059460188752
+  },
+  "search_decisions": [
+    {
+      "stage": "initial_model_selection",
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          14,
+          13,
+          11,
+          14,
+          13,
+          13,
+          13
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "scores": {
+        "original": 1.0908644195258426,
+        "v1": 1.0336973760866404,
+        "v2": 0.9929482409218006
+      }
+    },
+    {
+      "stage": "global_output_delay",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          14,
+          13,
+          11,
+          14,
+          13,
+          13,
+          13
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          13,
+          12,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.9929482409218006,
+      "selected_development_score": 0.477137754202538
+    },
+    {
+      "stage": "target_update_delay",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          13,
+          12,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          13,
+          12,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.477137754202538,
+      "selected_development_score": 0.477137754202538
+    },
+    {
+      "stage": "output_delay_J1",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          13,
+          12,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          12,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.477137754202538,
+      "selected_development_score": 0.3370661646849045
+    },
+    {
+      "stage": "output_delay_J2",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          12,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.3370661646849045,
+      "selected_development_score": 0.33471842494816734
+    },
+    {
+      "stage": "output_delay_J3",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.33471842494816734,
+      "selected_development_score": 0.33471842494816734
+    },
+    {
+      "stage": "output_delay_J4",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          13,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.33471842494816734,
+      "selected_development_score": 0.31643817162399396
+    },
+    {
+      "stage": "output_delay_J5",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          12,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.31643817162399396,
+      "selected_development_score": 0.3039777125199025
+    },
+    {
+      "stage": "output_delay_J6",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.3039777125199025,
+      "selected_development_score": 0.3039777125199025
+    },
+    {
+      "stage": "output_delay_J7",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          12
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          11
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.3039777125199025,
+      "selected_development_score": 0.30392117738621593
+    },
+    {
+      "stage": "joint_acceleration_feedforward",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          11
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          11
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.30392117738621593,
+      "selected_development_score": 0.30392117738621593
+    },
+    {
+      "stage": "low_level_acceleration_feedforward_scale",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          11
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          11
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.30392117738621593,
+      "selected_development_score": 0.30392117738621593
+    },
+    {
+      "stage": "low_level_damping_armature_ablation",
+      "before": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          11
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          1.5,
+          0.5,
+          1.5
+        ],
+        "dof_armature_scale_per_joint": [
+          0.5,
+          0.5,
+          0.75,
+          1.25,
+          1.5,
+          1.5,
+          1.5
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "selected": {
+        "jnt_kp_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "jnt_kd_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "output_filter_length": 35,
+        "target_filter_length": 10,
+        "target_update_delay_steps": 4,
+        "output_delay_steps_per_joint": [
+          12,
+          13,
+          10,
+          12,
+          13,
+          12,
+          11
+        ],
+        "joint_velocity_feedforward": 0.5,
+        "joint_acceleration_feedforward": 0.05,
+        "estimator_process_scale": 1.0,
+        "estimator_measure_scale": 1.0,
+        "acceleration_limit_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          0.8,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_damping_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "dof_armature_scale_per_joint": [
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ],
+        "acceleration_feedforward_s2_per_joint": [
+          2.5e-05,
+          -5e-05,
+          0.0,
+          2.5e-05,
+          -2.5e-05,
+          -2.5e-05,
+          -2.5e-05
+        ]
+      },
+      "before_development_score": 0.30392117738621593,
+      "selected_development_score": 0.3022059460188752
+    }
+  ],
+  "evaluation_count": 37
+}

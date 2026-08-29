@@ -1,0 +1,130 @@
+{
+  "scope": "sim_mirror_only",
+  "drive_mode": "real_published_q_ref",
+  "no_feedback_to_real_control": true,
+  "real_command_interface": "joint_position_q_ref_only",
+  "actuator_rmp": {
+    "recovered_rmp_jnt_kp_scale_per_joint": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "recovered_rmp_jnt_kd_scale_per_joint": [
+      1.0,
+      1.0,
+      0.92,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "recovered_rmp_output_filter_length": 35,
+    "recovered_rmp_target_filter_length": 10,
+    "recovered_rmp_target_update_delay_steps": 4,
+    "recovered_rmp_output_delay_steps_per_joint": [
+      13.875,
+      13.0,
+      11.5,
+      14.25,
+      12.75,
+      12.625,
+      13.0
+    ],
+    "recovered_rmp_joint_velocity_feedforward": 0.5,
+    "recovered_rmp_joint_acceleration_feedforward": 0.05,
+    "recovered_rmp_estimator_joint_process_var": 50.0,
+    "recovered_rmp_estimator_joint_measure_var": 0.0001,
+    "arm_acc_limit_deg_s2": [
+      1300.0,
+      1300.0,
+      1800.0,
+      2400.0,
+      3000.0,
+      3000.0,
+      3000.0
+    ],
+    "recovered_rmp_dof_damping_scale_per_joint": [
+      0.9126000000000001,
+      1.4975999999999998,
+      1.4975999999999998,
+      2.88,
+      0.8699999999999999,
+      0.585,
+      1.17
+    ],
+    "recovered_rmp_dof_armature_scale_per_joint": [
+      0.2262,
+      0.825,
+      0.6900000000000001,
+      1.525,
+      0.8699999999999999,
+      0.8004,
+      0.8699999999999999
+    ],
+    "recovered_rmp_acceleration_feedforward_s2": [
+      1.25e-05,
+      -5e-05,
+      1.25e-05,
+      2.5e-05,
+      -3.7500000000000003e-05,
+      -3.7500000000000003e-05,
+      -2.5e-05
+    ],
+    "recovered_rmp_actuator_kp_scale_per_joint": [
+      0.85,
+      0.85,
+      0.85,
+      1.15,
+      1.15,
+      1.15,
+      1.15
+    ],
+    "recovered_rmp_actuator_kv_scale_per_joint": [
+      1.15,
+      1.15,
+      1.15,
+      1.0,
+      0.85,
+      0.85,
+      0.85
+    ],
+    "application_scope": "sim_mirror_only",
+    "mirror_drive_mode": "real_published_q_ref"
+  },
+  "ball_racket_contact": {
+    "ball_mass_kg": 0.004,
+    "ball_mass_evidence": "user_provided_approximate_physical_mass",
+    "pair_sliding_friction": 0.35,
+    "solref_time_s": 0.003,
+    "solref_damping_ratio": 0.15254001462000516,
+    "solimp": [
+      0.9,
+      0.995,
+      0.001
+    ],
+    "margin_m": 0.001,
+    "condim": 3,
+    "ball_radius_m": 0.02,
+    "racket_radius_m": 0.075,
+    "racket_rubber_half_thickness_m": 0.001,
+    "suggested_training_dr_solref_damping_range": [
+      0.1,
+      0.24
+    ],
+    "suggested_training_dr_ball_mass_range_kg": [
+      0.0036,
+      0.0044
+    ],
+    "fit_groups": [
+      "record_new3",
+      "record_new4"
+    ],
+    "holdout_group": "record_new5",
+    "fit_backend": "MJX 3.3.7 direct",
+    "cpu_proxy_solref_damping_ratio": 0.1687115510119597
+  }
+}

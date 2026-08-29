@@ -1,0 +1,103 @@
+{
+  "recording": "probe_recording_20260829_180205",
+  "ticks": 3667,
+  "duration_s": 18.33,
+  "comparison_contract": {
+    "before": "recorded online sim mirror",
+    "after": "fresh closed-loop mirror with identical initial tick-start state, drag-ball input stream, actor, and tuned RMP only",
+    "line_style": "thin solid lines without markers"
+  },
+  "selected_candidate": {
+    "kp_scale": 1.0,
+    "kd_scale": 1.0,
+    "output_filter_length": 35,
+    "target_filter_length": 10,
+    "target_update_delay_steps": 4,
+    "output_delay_offset_steps": -5,
+    "output_delay_per_joint_adjustment": [
+      1,
+      -1,
+      -3,
+      1,
+      0,
+      0,
+      0
+    ],
+    "joint_velocity_feedforward": 0.5,
+    "acceleration_limit_scale": 1.0
+  },
+  "fresh_baseline_reproduction": {
+    "q_rms_rad": 5.234176730801857e-07,
+    "dq_rms_rad_s": 7.2314389131998286e-06,
+    "qcmd_rms_rad": 6.313581496217242e-07,
+    "action_rms": 4.765807612763823e-06
+  },
+  "closed_loop_metrics": {
+    "full": {
+      "q": {
+        "before_rms": 0.04744037969105153,
+        "after_rms": 0.04693081325264662,
+        "relative_change": -0.010741196460133514
+      },
+      "dq": {
+        "before_rms": 1.1322311821566697,
+        "after_rms": 1.0708388419547734,
+        "relative_change": -0.05422244252711396
+      },
+      "racket_position": {
+        "before_rms": 0.02686247668208272,
+        "after_rms": 0.02539738678409782,
+        "relative_change": -0.05454038789216024
+      },
+      "racket_velocity": {
+        "before_rms": 0.6790890774622818,
+        "after_rms": 0.6515680165382756,
+        "relative_change": -0.04052643730753389
+      }
+    },
+    "post_warmup": {
+      "q": {
+        "before_rms": 0.048013754218844046,
+        "after_rms": 0.04780378812309964,
+        "relative_change": -0.004373040583066896
+      },
+      "dq": {
+        "before_rms": 1.1550638802602524,
+        "after_rms": 1.0985736209695158,
+        "relative_change": -0.048906610496735926
+      },
+      "racket_position": {
+        "before_rms": 0.027358558900426114,
+        "after_rms": 0.02599355446273699,
+        "relative_change": -0.04989314103338476
+      },
+      "racket_velocity": {
+        "before_rms": 0.6928661178459327,
+        "after_rms": 0.6685118129005864,
+        "relative_change": -0.03515008790018763
+      }
+    },
+    "held_out_14_s_to_end": {
+      "q": {
+        "before_rms": 0.04452260975165914,
+        "after_rms": 0.04811380796907386,
+        "relative_change": 0.08066010140568834
+      },
+      "dq": {
+        "before_rms": 0.9811549709526987,
+        "after_rms": 0.9495021424227267,
+        "relative_change": -0.03226078394041786
+      },
+      "racket_position": {
+        "before_rms": 0.023891696695996136,
+        "after_rms": 0.023365289675736027,
+        "relative_change": -0.02203305302918593
+      },
+      "racket_velocity": {
+        "before_rms": 0.5862223677143478,
+        "after_rms": 0.5544451981503534,
+        "relative_change": -0.054206682163787046
+      }
+    }
+  }
+}

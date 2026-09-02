@@ -106,7 +106,8 @@ _SIMCODE7_RELEASE_DEFAULT="$SIMCODE7_V85_MODEL_PATH"
 _SIMCODE7_XML_DEFAULT="$WORKSPACE_DIR/simcode7/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml"
 if [ "${POLICY_RELEASE_ID,,}" = "gpu0_qvel_real_rmp_v91" ]; then
     _SIMCODE7_RELEASE_DEFAULT="$SIMCODE7_V91_MODEL_PATH"
-elif [ "${POLICY_RELEASE_ID,,}" = "gpu0_qvel_real_rmp_v97" ]; then
+elif [[ "${POLICY_RELEASE_ID,,}" = "gpu0_qvel_real_rmp_v97" \
+        || "${POLICY_RELEASE_ID,,}" = "gpu0_qvel_real_rmp_v97_source_clock" ]]; then
     _SIMCODE7_RELEASE_DEFAULT="$SIMCODE7_V97_MODEL_PATH"
     _SIMCODE7_XML_DEFAULT="$SIMCODE8_POLICY_XML_PATH"
 fi

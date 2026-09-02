@@ -102,6 +102,7 @@ from pingpong_controller.done_condition_monitor import (
 from pingpong_controller.mjx_rl_policy import (
     Gpu1QaccFtV153PolicyController,
     Gpu0QvelRealRmpV85PolicyController,
+    Gpu0QvelRealRmpV97SourceClockPolicyController,
     MjxRLPolicyController,
     Simcode2IdealPd67PolicyController,
     Simcode3Actuator67PolicyController,
@@ -312,9 +313,14 @@ DEFAULT_SIMCODE7_MODEL_PATH = DEFAULT_SIMCODE7_V85_MODEL_PATH
 GPU0_RMP_MODEL_V85 = "v85"
 GPU0_RMP_MODEL_V91 = "v91"
 GPU0_RMP_MODEL_V97 = "v97"
+GPU0_RMP_MODEL_V97_SOURCE_CLOCK = "v97_source_clock"
 GPU1_QACC_FT_MODEL_V153 = "v153"
 GPU0_RMP_MODEL_IDS = (
-    GPU0_RMP_MODEL_V85, GPU0_RMP_MODEL_V91, GPU0_RMP_MODEL_V97)
+    GPU0_RMP_MODEL_V85,
+    GPU0_RMP_MODEL_V91,
+    GPU0_RMP_MODEL_V97,
+    GPU0_RMP_MODEL_V97_SOURCE_CLOCK,
+)
 RUNTIME_SWITCHABLE_POLICY_PROFILES = (
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
@@ -358,13 +364,17 @@ def _normalize_gpu0_rmp_model(
         "97": GPU0_RMP_MODEL_V97,
         "v97": GPU0_RMP_MODEL_V97,
         "gpu0_qvel_real_rmp_v97": GPU0_RMP_MODEL_V97,
+        "v97_source_clock": GPU0_RMP_MODEL_V97_SOURCE_CLOCK,
+        "v97-source-clock": GPU0_RMP_MODEL_V97_SOURCE_CLOCK,
+        "gpu0_qvel_real_rmp_v97_source_clock": (
+            GPU0_RMP_MODEL_V97_SOURCE_CLOCK),
     }
     try:
         return aliases[text]
     except KeyError as exc:
         raise ValueError(
             f"unknown GPU0-QVEL/REAL-RMP model {value!r}; "
-            "expected V85, V91, or V97"
+            "expected V85, V91, V97, or V97 source-clock"
         ) from exc
 
 
@@ -703,6 +713,7 @@ class ProbeConfig:
     port: int
     model_path: Path
     policy_profile: str
+    policy_release_id: str
     simcode2_model_path: Path
     simcode2_policy_xml_path: Path
     simcode3_model_path: Path
@@ -9899,11 +9910,26 @@ class PolicySafetyProbe:
             GPU0_RMP_MODEL_V85: cfg.simcode7_v85_model_path,
             GPU0_RMP_MODEL_V91: cfg.simcode7_v91_model_path,
             GPU0_RMP_MODEL_V97: cfg.simcode7_v97_model_path,
+            GPU0_RMP_MODEL_V97_SOURCE_CLOCK: cfg.simcode7_v97_model_path,
         }
+        selected_gpu0_model = (
+            None
+            if policy_model is None
+            else _normalize_gpu0_rmp_model(policy_model)
+        )
+        if (selected_gpu0_model is None
+                and str(getattr(cfg, "policy_release_id", "")).strip().lower()
+                == "gpu0_qvel_real_rmp_v97_source_clock"):
+            selected_gpu0_model = GPU0_RMP_MODEL_V97_SOURCE_CLOCK
         gpu0_model_path = (
             cfg.simcode7_model_path
             if policy_model is None
-            else gpu0_model_paths[_normalize_gpu0_rmp_model(policy_model)]
+            else gpu0_model_paths[selected_gpu0_model]
+        )
+        gpu0_controller_cls = (
+            Gpu0QvelRealRmpV97SourceClockPolicyController
+            if selected_gpu0_model == GPU0_RMP_MODEL_V97_SOURCE_CLOCK
+            else Gpu0QvelRealRmpV85PolicyController
         )
         builders = {
             OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: lambda: MjxRLPolicyController(
@@ -9949,12 +9975,15 @@ class PolicySafetyProbe:
                     robot_xml_path=str(cfg.simcode6_policy_xml_path),
                 )),
             OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: lambda: (
-                Gpu0QvelRealRmpV85PolicyController(
+                gpu0_controller_cls(
                     str(gpu0_model_path),
                     dt=cfg.control_dt,
                     robot_xml_path=str(
                         cfg.simcode8_policy_xml_path
-                        if (policy_model == GPU0_RMP_MODEL_V97
+                        if (selected_gpu0_model in {
+                                GPU0_RMP_MODEL_V97,
+                                GPU0_RMP_MODEL_V97_SOURCE_CLOCK,
+                            }
                             or (policy_model is None
                                 and Path(gpu0_model_path)
                                 == Path(cfg.simcode7_v97_model_path)))
@@ -21535,15 +21564,23 @@ class PolicySafetyProbe:
                     GPU0_RMP_MODEL_V85: self.cfg.simcode7_v85_model_path,
                     GPU0_RMP_MODEL_V91: self.cfg.simcode7_v91_model_path,
                     GPU0_RMP_MODEL_V97: self.cfg.simcode7_v97_model_path,
+                    GPU0_RMP_MODEL_V97_SOURCE_CLOCK: (
+                        self.cfg.simcode7_v97_model_path),
                 }.get(
                     self.active_policy_model,
                     self.cfg.simcode7_v85_model_path,
                 ),
                 (self.cfg.simcode8_policy_xml_path
-                 if self.active_policy_model == GPU0_RMP_MODEL_V97
+                 if self.active_policy_model in {
+                     GPU0_RMP_MODEL_V97,
+                     GPU0_RMP_MODEL_V97_SOURCE_CLOCK,
+                 }
                  else self.cfg.simcode7_policy_xml_path),
                 (self.cfg.simcode8_sim_xml_path
-                 if self.active_policy_model == GPU0_RMP_MODEL_V97
+                 if self.active_policy_model in {
+                     GPU0_RMP_MODEL_V97,
+                     GPU0_RMP_MODEL_V97_SOURCE_CLOCK,
+                 }
                  else self.cfg.simcode7_sim_xml_path),
             ),
             OBSERVATION_PROFILE_GPU1_QACC_FT_V153: (
@@ -21810,7 +21847,12 @@ class PolicySafetyProbe:
                     },
                     {
                         "id": GPU0_RMP_MODEL_V97,
-                        "label": "V97 (2026-09-01)",
+                        "label": "V97 (fixed 5 ms legacy)",
+                        "path": str(self.cfg.simcode7_v97_model_path),
+                    },
+                    {
+                        "id": GPU0_RMP_MODEL_V97_SOURCE_CLOCK,
+                        "label": "V97 source-clock v1",
                         "path": str(self.cfg.simcode7_v97_model_path),
                     },
                 ],
@@ -28994,6 +29036,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         port=int(args.port),
         model_path=model_path,
         policy_profile=normalize_observation_profile(args.policy_profile),
+        policy_release_id=str(args.policy_release_id),
         simcode2_model_path=simcode2_model_path,
         simcode2_policy_xml_path=simcode2_policy_xml,
         simcode3_model_path=simcode3_model_path,

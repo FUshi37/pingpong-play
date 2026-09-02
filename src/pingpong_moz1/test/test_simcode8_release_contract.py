@@ -18,6 +18,7 @@ if str(PACKAGE_ROOT) not in sys.path:
 
 from pingpong_controller.mjx_rl_policy import (  # noqa: E402
     Gpu0QvelRealRmpV85PolicyController,
+    Gpu0QvelRealRmpV97SourceClockPolicyController,
     Gpu1QaccFtV153PolicyController,
 )
 from pingpong_controller.reset_trajectory import (  # noqa: E402
@@ -30,6 +31,7 @@ from pingpong_controller.rl_policy import (  # noqa: E402
 from pingpong_controller.sim_mirror import (  # noqa: E402
     RealBallSimMirror,
     SimMirrorConfig,
+    sim_mirror_config_for_policy_profile,
 )
 
 
@@ -93,6 +95,21 @@ class Gpu0V97ReleaseContractTest(unittest.TestCase):
             atol=2e-7,
         )
 
+    def test_source_clock_adapter_has_distinct_runtime_identity(self):
+        controller = Gpu0QvelRealRmpV97SourceClockPolicyController(
+            str(GPU0_V97_MODEL), robot_xml_path=None)
+
+        self.assertEqual(controller.policy_model_id, "v97_source_clock")
+        self.assertEqual(controller.checkpoint_policy_model_id, "v97")
+        self.assertEqual(
+            controller.racket_velocity_observation_contract,
+            "joint_state_source_clock_v1",
+        )
+        self.assertEqual(
+            controller._checkpoint_sha256,
+            Gpu0QvelRealRmpV85PolicyController.V97_CHECKPOINT_SHA256,
+        )
+
     @requires_fixtures(SIMCODE8_XML)
     def test_cpu_mirror_restores_v97_rmp_only_on_sim_side(self):
         cfg = SimMirrorConfig(
@@ -122,6 +139,42 @@ class Gpu0V97ReleaseContractTest(unittest.TestCase):
                 mirror.rmp_output_delay_steps,
                 [18, 19, 19, 18, 18, 18, 18],
             )
+        finally:
+            mirror.close()
+
+    @requires_fixtures(SIMCODE8_XML)
+    def test_source_clock_release_uses_v97_assets_in_training_clock_mirror(self):
+        base = SimMirrorConfig(
+            model_path=GPU0_V97_MODEL,
+            policy_xml_path=SIMCODE8_XML,
+            sim_xml_path=SIMCODE8_XML,
+            policy_obs_dim=57,
+            control_dt=0.005,
+            policy_profile=OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+            policy_model="v97_source_clock",
+            simcode7_model_path=GPU0_V97_MODEL,
+            simcode7_v97_model_path=GPU0_V97_MODEL,
+            simcode7_policy_xml_path=SIMCODE8_XML,
+            simcode7_sim_xml_path=SIMCODE8_XML,
+            simcode8_policy_xml_path=SIMCODE8_XML,
+            simcode8_sim_xml_path=SIMCODE8_XML,
+            backend="mujoco",
+            enable_video_frames=False,
+            use_mujoco_renderer=False,
+        )
+        resolved = sim_mirror_config_for_policy_profile(
+            base, OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+        self.assertEqual(resolved.model_path, GPU0_V97_MODEL)
+        self.assertEqual(resolved.policy_xml_path, SIMCODE8_XML)
+        mirror = RealBallSimMirror(resolved)
+        try:
+            self.assertEqual(mirror.cfg.policy_model, "v97_source_clock")
+            # The mirror represents a new simulated state every 5 ms and keeps
+            # the checkpoint's original training-clock observation adapter.
+            self.assertIsInstance(
+                mirror.policy, Gpu0QvelRealRmpV85PolicyController)
+            self.assertNotIsInstance(
+                mirror.policy, Gpu0QvelRealRmpV97SourceClockPolicyController)
         finally:
             mirror.close()
 

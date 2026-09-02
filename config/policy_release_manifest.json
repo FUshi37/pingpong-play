@@ -83,6 +83,23 @@
       "policy_plant_matcher_default_mode": "off"
     },
     {
+      "release_id": "gpu0_qvel_real_rmp_v97_source_clock",
+      "policy_profile": "gpu0_qvel_real_rmp_v85",
+      "checkpoint_path": "simcode8/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/selected_best_models_and_normal_reset_videos_20260901/gpu0_v97/gpu0_v97_best_step5836242944.pkl",
+      "checkpoint_sha256": "f166a4b8adb6b5b6a846b14407baa5da32ba3535492d23cb0ad5978cece8568d",
+      "policy_xml_path": "simcode8/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+      "policy_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+      "observation_dim": 57,
+      "control_rate_hz": 200,
+      "deployment_ball_observation_rate_hz": 90,
+      "training_ball_observation_rate_hz": 90,
+      "action_semantics": "normalized_velocity_persistent_bounded_qref_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_fk",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "racket_velocity_observation_semantics": "joint_state_source_clock_hold_repeats_reanchor_invalid_v1"
+    },
+    {
       "release_id": "gpu1_qacc_ft_v153",
       "policy_profile": "gpu1_qacc_ft_v153",
       "checkpoint_path": "simcode8/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/selected_best_models_and_normal_reset_videos_20260901/gpu1_v153/gpu1_v153_best_step14841511936.pkl",

@@ -8,6 +8,7 @@ import pytest
 
 from pingpong_controller.mjx_rl_policy import (
     Gpu0QvelRealRmpV85PolicyController,
+    Gpu0QvelRealRmpV97SourceClockPolicyController,
 )
 from pingpong_controller.rl_policy import (
     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
@@ -34,6 +35,12 @@ POLICY_XML = (
     REPO_ROOT / "simcode7" / "pingpong_moz1-main" / "pingpong_controller"
     / "tools" / "rl_sim" / "moz1_pd.xml"
 )
+V97_CHECKPOINT = (
+    REPO_ROOT / "simcode8" / "pingpong_moz1-main" / "pingpong_controller"
+    / "outputs" / "rl_sim"
+    / "selected_best_models_and_normal_reset_videos_20260901"
+    / "gpu0_v97" / "gpu0_v97_best_step5836242944.pkl"
+)
 
 
 def _controller() -> Gpu0QvelRealRmpV85PolicyController:
@@ -41,6 +48,18 @@ def _controller() -> Gpu0QvelRealRmpV85PolicyController:
         str(CHECKPOINT), robot_xml_path=None)
     controller._compute_racket_pose_base = lambda _q: (
         np.asarray([0.1, -0.2, 1.0], dtype=np.float32), True)
+    return controller
+
+
+def _v97_controller(*, source_clock: bool):
+    controller_cls = (
+        Gpu0QvelRealRmpV97SourceClockPolicyController
+        if source_clock else Gpu0QvelRealRmpV85PolicyController
+    )
+    controller = controller_cls(str(V97_CHECKPOINT), robot_xml_path=None)
+    controller._compute_racket_pose_base = lambda q: (
+        np.asarray([q[0], 2.0 * q[0], 1.0], dtype=np.float32), True)
+    controller._policy_action = lambda _obs: np.zeros(7, dtype=np.float32)
     return controller
 
 
@@ -94,6 +113,94 @@ def test_v85_refuses_noncontract_inputs() -> None:
             observation_scales=np.full(57, 0.5, dtype=np.float32),
             **common,
         )
+
+
+def test_v97_source_clock_holds_repeated_joint_sample_velocity() -> None:
+    controller = _v97_controller(source_clock=True)
+    assert controller.policy_model_id == "v97_source_clock"
+    assert controller.checkpoint_policy_model_id == "v97"
+    common = dict(
+        ball_pos_m=np.asarray([0.2, -0.2, 1.2], dtype=np.float32),
+        ball_vel_m_s=np.asarray([0.0, 0.0, -0.3], dtype=np.float32),
+        ball_valid=True,
+        arm_dq=np.zeros(7, dtype=np.float32),
+    )
+
+    q0 = np.zeros(7, dtype=np.float32)
+    controller.predict(arm_q=q0, arm_sample_stamp_s=10.0, **common)
+    np.testing.assert_array_equal(controller.last_obs[29:32], np.zeros(3))
+
+    q1 = q0.copy()
+    q1[0] = np.float32(0.01)
+    controller.predict(arm_q=q1, arm_sample_stamp_s=10.01, **common)
+    expected_velocity = np.asarray([1.0, 2.0, 0.0], dtype=np.float32)
+    np.testing.assert_allclose(
+        controller.last_obs[29:32], expected_velocity, rtol=0.0, atol=3e-5)
+
+    # A second 200 Hz actor tick sees the same immutable JointState.  It must
+    # hold the source-sample derivative instead of emitting a false zero.
+    controller.predict(arm_q=q1, arm_sample_stamp_s=10.01, **common)
+    np.testing.assert_allclose(
+        controller.last_obs[29:32], expected_velocity, rtol=0.0, atol=3e-5)
+
+    # A skipped source frame still uses the real source interval, not 5 ms.
+    q2 = q0.copy()
+    q2[0] = np.float32(0.03)
+    controller.predict(arm_q=q2, arm_sample_stamp_s=10.03, **common)
+    np.testing.assert_allclose(
+        controller.last_obs[29:32], expected_velocity, rtol=0.0, atol=3e-5)
+
+
+def test_v97_source_clock_reanchors_invalid_source_transitions() -> None:
+    controller = _v97_controller(source_clock=True)
+    common = dict(
+        ball_pos_m=np.zeros(3, dtype=np.float32),
+        ball_vel_m_s=np.zeros(3, dtype=np.float32),
+        ball_valid=True,
+        arm_dq=np.zeros(7, dtype=np.float32),
+    )
+    q = np.zeros(7, dtype=np.float32)
+    controller.predict(arm_q=q, arm_sample_stamp_s=20.0, **common)
+
+    # Same timestamp with changed q is not a coherent repeated source sample.
+    q[0] = np.float32(0.01)
+    controller.predict(arm_q=q, arm_sample_stamp_s=20.0, **common)
+    np.testing.assert_array_equal(controller.last_obs[29:32], np.zeros(3))
+
+    # The changed sample became the anchor, so the next causal pair is clean.
+    q[0] = np.float32(0.02)
+    controller.predict(arm_q=q, arm_sample_stamp_s=20.01, **common)
+    np.testing.assert_allclose(
+        controller.last_obs[29:32], [1.0, 2.0, 0.0],
+        rtol=0.0, atol=3e-5)
+
+    q[0] = np.float32(0.03)
+    controller.predict(arm_q=q, arm_sample_stamp_s=19.0, **common)
+    np.testing.assert_array_equal(controller.last_obs[29:32], np.zeros(3))
+
+    q[0] = np.float32(0.04)
+    controller.predict(arm_q=q, arm_sample_stamp_s=None, **common)
+    np.testing.assert_array_equal(controller.last_obs[29:32], np.zeros(3))
+
+
+def test_original_v97_adapter_retains_fixed_tick_behavior() -> None:
+    controller = _v97_controller(source_clock=False)
+    assert controller.policy_model_id == "v97"
+    common = dict(
+        ball_pos_m=np.zeros(3, dtype=np.float32),
+        ball_vel_m_s=np.zeros(3, dtype=np.float32),
+        ball_valid=True,
+        arm_dq=np.zeros(7, dtype=np.float32),
+    )
+    q = np.zeros(7, dtype=np.float32)
+    controller.predict(arm_q=q, arm_sample_stamp_s=30.0, **common)
+    q[0] = np.float32(0.01)
+    controller.predict(arm_q=q, arm_sample_stamp_s=30.01, **common)
+    np.testing.assert_allclose(
+        controller.last_obs[29:32], [2.0, 4.0, 0.0],
+        rtol=0.0, atol=3e-5)
+    controller.predict(arm_q=q, arm_sample_stamp_s=30.01, **common)
+    np.testing.assert_array_equal(controller.last_obs[29:32], np.zeros(3))
 
 
 def test_simcode7_profile_defaults_to_cpu_mujoco_training_plant() -> None:

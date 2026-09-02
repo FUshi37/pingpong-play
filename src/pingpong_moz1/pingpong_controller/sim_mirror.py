@@ -220,24 +220,29 @@ def sim_mirror_config_for_policy_profile(
     elif canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
         policy_model = str(getattr(
             base_cfg, "policy_model", "v85") or "v85").strip().lower()
-        if policy_model not in {"v85", "v91", "v97"}:
+        if policy_model not in {
+                "v85", "v91", "v97", "v97_source_clock"}:
             raise ValueError(
                 f"unknown GPU0-QVEL/REAL-RMP mirror model: {policy_model!r}")
         selected_model_path = {
             "v85": base_cfg.simcode7_v85_model_path,
             "v91": base_cfg.simcode7_v91_model_path,
             "v97": base_cfg.simcode7_v97_model_path,
+            # The source clock is a real-observation adapter.  The independent
+            # simulator retains the checkpoint's one-new-state-per-5-ms
+            # training clock while using the same authenticated V97 assets.
+            "v97_source_clock": base_cfg.simcode7_v97_model_path,
         }[policy_model]
         alternate_paths = {
             "model_path": (
                 selected_model_path or base_cfg.simcode7_model_path),
             "policy_xml_path": (
                 base_cfg.simcode8_policy_xml_path
-                if policy_model == "v97"
+                if policy_model in {"v97", "v97_source_clock"}
                 else base_cfg.simcode7_policy_xml_path),
             "sim_xml_path": (
                 base_cfg.simcode8_sim_xml_path
-                if policy_model == "v97"
+                if policy_model in {"v97", "v97_source_clock"}
                 else base_cfg.simcode7_sim_xml_path),
         }
     elif canonical == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:

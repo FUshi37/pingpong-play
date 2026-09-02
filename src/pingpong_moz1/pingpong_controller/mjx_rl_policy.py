@@ -1131,7 +1131,6 @@ class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
         arm_dq: Optional[np.ndarray] = None,
         arm_sample_stamp_s: Optional[float] = None,
     ) -> np.ndarray:
-        del arm_sample_stamp_s
         if arm_q is None or arm_dq is None:
             raise RuntimeError(
                 "GPU0-QVEL/REAL-RMP requires one atomic measured q/dq sample")
@@ -1148,11 +1147,11 @@ class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
             raise RuntimeError(
                 "GPU0-QVEL/REAL-RMP requires encoder FK for right_ee_site")
         racket_pos = np.asarray(racket_pos, dtype=np.float32).reshape(3)
-        racket_vel = (
-            (racket_pos - self._prev_racket_pos_base)
-            / np.float32(step_dt)
-        ).astype(np.float32)
-        self._prev_racket_pos_base = racket_pos.copy()
+        racket_vel = self._racket_velocity_observation(
+            racket_pos,
+            step_dt=step_dt,
+            arm_sample_stamp_s=arm_sample_stamp_s,
+        )
         age_norm = np.float32(np.clip(float(ball_obs_age_s) / 0.5, 0.0, 1.0))
         obs = np.concatenate((
             q,
@@ -1172,6 +1171,22 @@ class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
         if obs.shape != (EXPECTED_OBS_DIM_GPU0_REAL_RMP,):
             raise RuntimeError("GPU0-QVEL/REAL-RMP observation is not 57-D")
         return obs
+
+    def _racket_velocity_observation(
+        self,
+        racket_pos: np.ndarray,
+        *,
+        step_dt: float,
+        arm_sample_stamp_s: Optional[float],
+    ) -> np.ndarray:
+        """Return the original fixed-policy-tick V85/V91/V97 observation."""
+        del arm_sample_stamp_s
+        racket_vel = (
+            (racket_pos - self._prev_racket_pos_base)
+            / np.float32(step_dt)
+        ).astype(np.float32)
+        self._prev_racket_pos_base = racket_pos.copy()
+        return racket_vel
 
     def predict(
         self,
@@ -1258,3 +1273,98 @@ class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
             (desired_dq - previous_desired_dq) / np.float32(0.005)
         ).astype(np.float32)
         return q_ref.copy()
+
+
+class Gpu0QvelRealRmpV97SourceClockPolicyController(
+        Gpu0QvelRealRmpV85PolicyController):
+    """V97 deployment adapter with source-clock racket velocity.
+
+    This is deliberately a separate runtime identity from the authenticated
+    V97 checkpoint adapter above.  The actor, action integration, limits, and
+    every observation slice except racket velocity ``obs[29:32]`` remain
+    unchanged.  Hardware JointState samples may repeat across policy ticks or
+    skip source frames, so the derivative is evaluated only on coherent new
+    source samples and is held across repeats.
+    """
+
+    POLICY_MODEL_ID = "v97_source_clock"
+    POLICY_MODEL_LABEL = "V97 source-clock v1"
+    RACKET_VELOCITY_OBSERVATION_CONTRACT = "joint_state_source_clock_v1"
+    MINIMUM_SOURCE_DT_S = 1e-4
+    MAXIMUM_SOURCE_DT_S = 0.10
+
+    def __init__(self, model_path: str, **kwargs) -> None:
+        super().__init__(model_path, **kwargs)
+        if self._checkpoint_sha256 != self.V97_CHECKPOINT_SHA256:
+            raise RuntimeError(
+                "GPU0 V97 source-clock adapter requires the approved V97 "
+                "checkpoint")
+        self.checkpoint_policy_model_id = self.policy_model_id
+        self.policy_model_id = self.POLICY_MODEL_ID
+        self.policy_model_label = self.POLICY_MODEL_LABEL
+        self.racket_velocity_observation_contract = (
+            self.RACKET_VELOCITY_OBSERVATION_CONTRACT)
+
+    def _racket_velocity_observation(
+        self,
+        racket_pos: np.ndarray,
+        *,
+        step_dt: float,
+        arm_sample_stamp_s: Optional[float],
+    ) -> np.ndarray:
+        del step_dt
+        current_pos = np.asarray(racket_pos, dtype=np.float32).reshape(3)
+        sample_stamp = None
+        if arm_sample_stamp_s is not None:
+            try:
+                candidate_stamp = float(arm_sample_stamp_s)
+            except (TypeError, ValueError):
+                candidate_stamp = float("nan")
+            if np.isfinite(candidate_stamp):
+                sample_stamp = candidate_stamp
+
+        previous_pos = self._prev_racket_sample_pos_base
+        previous_stamp = self._prev_racket_sample_stamp_s
+        if sample_stamp is None:
+            # Source time is part of this adapter's contract.  Never fall back
+            # to the 5 ms policy clock because that recreates the original
+            # zero/spike defect.  Re-anchor and wait for a causal source pair.
+            racket_vel = np.zeros(3, dtype=np.float32)
+            self._prev_racket_sample_pos_base = current_pos.copy()
+            self._prev_racket_sample_stamp_s = None
+        elif previous_pos is None or previous_stamp is None:
+            racket_vel = np.zeros(3, dtype=np.float32)
+            self._prev_racket_sample_pos_base = current_pos.copy()
+            self._prev_racket_sample_stamp_s = sample_stamp
+        elif (sample_stamp == previous_stamp
+              and np.array_equal(current_pos, previous_pos)):
+            # The policy timer observed the same immutable JointState again.
+            racket_vel = self._last_racket_sample_vel_base.copy()
+        elif sample_stamp == previous_stamp:
+            # A timestamp reused with different q/FK is not a coherent repeat.
+            # Re-anchor position without carrying it into the next derivative.
+            racket_vel = np.zeros(3, dtype=np.float32)
+            self._prev_racket_sample_pos_base = current_pos.copy()
+        else:
+            source_dt = sample_stamp - previous_stamp
+            if self.MINIMUM_SOURCE_DT_S <= source_dt <= self.MAXIMUM_SOURCE_DT_S:
+                candidate_vel = (
+                    (current_pos - previous_pos) / np.float32(source_dt)
+                ).astype(np.float32)
+                racket_vel = (
+                    candidate_vel
+                    if np.all(np.isfinite(candidate_vel))
+                    else np.zeros(3, dtype=np.float32)
+                )
+            else:
+                # Non-monotonic or stale source time cannot define a causal
+                # derivative.  This sample becomes the new anchor.
+                racket_vel = np.zeros(3, dtype=np.float32)
+            self._prev_racket_sample_pos_base = current_pos.copy()
+            self._prev_racket_sample_stamp_s = sample_stamp
+
+        self._last_racket_sample_vel_base = racket_vel.copy()
+        # Keep the legacy policy-clock anchor coherent for introspection and
+        # for an explicit switch back to the original adapter.
+        self._prev_racket_pos_base = current_pos.copy()
+        return racket_vel

@@ -1,0 +1,63 @@
+{
+  "one_first_impact_selected_per_recording": true,
+  "later_juggles_used": false,
+  "hard_stop_before_next_detected_impact": true,
+  "record_count": 6,
+  "minimum_used_to_next_impact_separation_ms": 22.5980281829834,
+  "records": [
+    {
+      "recording": "probe_recording_20260901_152749",
+      "first_impact_time_s": 1788247671.3762813,
+      "used_rebound_start_s_after_first_impact": 0.03720569610595703,
+      "used_rebound_end_s_after_first_impact": 0.22623658180236816,
+      "next_impact_detected_s_after_first_impact": 0.3268871307373047,
+      "used_to_next_impact_separation_ms": 100.65054893493652,
+      "later_juggle_samples_used": false
+    },
+    {
+      "recording": "probe_recording_20260901_152902",
+      "first_impact_time_s": 1788247745.000528,
+      "used_rebound_start_s_after_first_impact": 0.042780160903930664,
+      "used_rebound_end_s_after_first_impact": 0.2320542335510254,
+      "next_impact_detected_s_after_first_impact": 0.3097546100616455,
+      "used_to_next_impact_separation_ms": 77.70037651062012,
+      "later_juggle_samples_used": false
+    },
+    {
+      "recording": "probe_recording_20260901_153128",
+      "first_impact_time_s": 1788247891.378851,
+      "used_rebound_start_s_after_first_impact": 0.04554009437561035,
+      "used_rebound_end_s_after_first_impact": 0.2347407341003418,
+      "next_impact_detected_s_after_first_impact": 0.3125452995300293,
+      "used_to_next_impact_separation_ms": 77.8045654296875,
+      "later_juggle_samples_used": false
+    },
+    {
+      "recording": "probe_recording_20260901_153257",
+      "first_impact_time_s": 1788247978.6763055,
+      "used_rebound_start_s_after_first_impact": 0.042711496353149414,
+      "used_rebound_end_s_after_first_impact": 0.23195910453796387,
+      "next_impact_detected_s_after_first_impact": 0.33220529556274414,
+      "used_to_next_impact_separation_ms": 100.24619102478027,
+      "later_juggle_samples_used": false
+    },
+    {
+      "recording": "probe_recording_20260901_153452",
+      "first_impact_time_s": 1788248093.0442364,
+      "used_rebound_start_s_after_first_impact": 0.04281330108642578,
+      "used_rebound_end_s_after_first_impact": 0.23251700401306152,
+      "next_impact_detected_s_after_first_impact": 0.332489013671875,
+      "used_to_next_impact_separation_ms": 99.97200965881348,
+      "later_juggle_samples_used": false
+    },
+    {
+      "recording": "probe_recording_20260901_153517",
+      "first_impact_time_s": 1788248119.3719888,
+      "used_rebound_start_s_after_first_impact": 0.04255938529968262,
+      "used_rebound_end_s_after_first_impact": 0.2322063446044922,
+      "next_impact_detected_s_after_first_impact": 0.2548043727874756,
+      "used_to_next_impact_separation_ms": 22.5980281829834,
+      "later_juggle_samples_used": false
+    }
+  ]
+}

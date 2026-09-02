@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "source_xml": "/home/spirit-ai/pingpong_moz1/simcode7/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+  "timestep_s": 0.001,
+  "steps": 1000,
+  "audit_step": 700,
+  "cause": "transparent support bottom starts about 10 mm above the floor while base_z/roll/pitch are unactuated",
+  "fix": "six base joint equality constraints; qpos/dof/actuator layout retained",
+  "default_training_contract_changed": false,
+  "fixed_base_pass": true,
+  "fixed_base_abs_base_z_delta_limit_mm": 0.01,
+  "variants": {
+    "current_support_contact": {
+      "equality_constraint_count": 0,
+      "cpu_mujoco": {
+        "initial": {
+          "base_z_m": 0.0,
+          "base_roll_rad": 0.0,
+          "base_pitch_rad": 0.0,
+          "racket_site_z_m": 1.0819625424593622
+        },
+        "step_700": {
+          "base_z_m": -0.010033630941458463,
+          "base_roll_rad": -7.3804937672130515e-06,
+          "base_pitch_rad": 1.7463567431460874e-06,
+          "racket_site_z_m": 1.0715983274259986
+        },
+        "step_1000": {
+          "base_z_m": -0.01003363090680372,
+          "base_roll_rad": -7.37805306309964e-06,
+          "base_pitch_rad": 1.796530851216318e-06,
+          "racket_site_z_m": 1.0715983335462973
+        },
+        "base_z_delta_at_700_mm": -10.033630941458464,
+        "racket_z_delta_at_700_mm": -10.3642150333636
+      },
+      "mjx": {
+        "initial": {
+          "base_z_m": 0.0,
+          "base_roll_rad": 0.0,
+          "base_pitch_rad": 0.0,
+          "racket_site_z_m": 1.0819625424593622
+        },
+        "step_700": {
+          "base_z_m": -0.010033778846263885,
+          "base_roll_rad": -5.187789156479994e-06,
+          "base_pitch_rad": -5.678247134710546e-07,
+          "racket_site_z_m": 1.0715974569320679
+        },
+        "step_1000": {
+          "base_z_m": -0.010033815167844296,
+          "base_roll_rad": -3.0570743092539487e-06,
+          "base_pitch_rad": 3.3900485050253337e-06,
+          "racket_site_z_m": 1.071597933769226
+        },
+        "base_z_delta_at_700_mm": -10.033778846263885,
+        "racket_z_delta_at_700_mm": -10.365085527294315
+      }
+    },
+    "fixed_base_equality": {
+      "equality_constraint_count": 6,
+      "cpu_mujoco": {
+        "initial": {
+          "base_z_m": 0.0,
+          "base_roll_rad": 0.0,
+          "base_pitch_rad": 0.0,
+          "racket_site_z_m": 1.0819625424593622
+        },
+        "step_700": {
+          "base_z_m": -4.6822967009346044e-08,
+          "base_roll_rad": -3.894054674190933e-08,
+          "base_pitch_rad": 1.2558750326234506e-08,
+          "racket_site_z_m": 1.08162816011616
+        },
+        "step_1000": {
+          "base_z_m": -4.6824926922700386e-08,
+          "base_roll_rad": -3.8919461262628135e-08,
+          "base_pitch_rad": 1.2540227794933074e-08,
+          "racket_site_z_m": 1.0816281703841077
+        },
+        "base_z_delta_at_700_mm": -4.6822967009346045e-05,
+        "racket_z_delta_at_700_mm": -0.33438234320226634
+      },
+      "mjx": {
+        "initial": {
+          "base_z_m": 0.0,
+          "base_roll_rad": 0.0,
+          "base_pitch_rad": 0.0,
+          "racket_site_z_m": 1.0819625424593622
+        },
+        "step_700": {
+          "base_z_m": -4.6730448843845807e-08,
+          "base_roll_rad": -3.855327435076106e-08,
+          "base_pitch_rad": 2.848423008572354e-08,
+          "racket_site_z_m": 1.0816283226013184
+        },
+        "step_1000": {
+          "base_z_m": -4.795391106426905e-08,
+          "base_roll_rad": -3.230287859423697e-08,
+          "base_pitch_rad": 1.6367215138757274e-08,
+          "racket_site_z_m": 1.0816283226013184
+        },
+        "base_z_delta_at_700_mm": -4.6730448843845807e-05,
+        "racket_z_delta_at_700_mm": -0.33421985804382714
+      }
+    }
+  }
+}

@@ -1,0 +1,3604 @@
+{
+  "schema_version": 2,
+  "experiment": "static_racket_first_free_drop_v91_send_command_off",
+  "records": [
+    {
+      "recording": "probe_recording_20260901_142344",
+      "status": "processed",
+      "quality": {
+        "rows": 972,
+        "duration_s": 4.873669147491455,
+        "raw_valid_rows": 329,
+        "fresh_valid_camera_samples": 150,
+        "fresh_camera_rate_hz": 89.87730087642231,
+        "camera_interval_p95_ms": 11.524176597595215,
+        "joint_samples": 699,
+        "joint_position_peak_to_peak_rad": [
+          1.1980533599853516e-05,
+          4.0531158447265625e-06,
+          2.276897430419922e-05,
+          2.849102020263672e-05,
+          7.212162017822266e-06,
+          4.3138861656188965e-05,
+          6.720423698425293e-06
+        ],
+        "joint_velocity_rms_rad_s": [
+          0.00020477259160038764,
+          0.00014258533099907562,
+          0.000340044343352325,
+          0.0007962787577843692,
+          0.0008450511873795523,
+          0.00046477550376460616,
+          0.0002469650377044246
+        ],
+        "joint_velocity_abs_max_rad_s": [
+          0.000942439422942698,
+          0.000942439422942698,
+          0.002827318385243416,
+          0.002827318385243416,
+          0.002827318385243416,
+          0.005654876586049795,
+          0.001884878845885396
+        ],
+        "published_command_rows": 0,
+        "policy_executed_rows": 160,
+        "inferred_contact_rows": 3,
+        "detected_impact_count": 2,
+        "camera_filter_flags": {
+          "clear_buffers_on_loss": true,
+          "motion_consistency_gate": true,
+          "physics_constrained_velocity": true,
+          "trajectory_position_smoothing": true,
+          "impact_velocity_reset": true,
+          "surface_to_center_depth": false
+        }
+      },
+      "selected_impacts": 1,
+      "candidate_counts": {
+        "accepted": 1
+      }
+    },
+    {
+      "recording": "probe_recording_20260901_142601",
+      "status": "processed",
+      "quality": {
+        "rows": 756,
+        "duration_s": 3.8006949424743652,
+        "raw_valid_rows": 472,
+        "fresh_valid_camera_samples": 216,
+        "fresh_camera_rate_hz": 89.94861677031953,
+        "camera_interval_p95_ms": 11.721277236938477,
+        "joint_samples": 465,
+        "joint_position_peak_to_peak_rad": [
+          1.150369644165039e-05,
+          3.5762786865234375e-06,
+          2.205371856689453e-05,
+          2.396106719970703e-05,
+          9.834766387939453e-06,
+          4.29004430770874e-05,
+          6.9588422775268555e-06
+        ],
+        "joint_velocity_rms_rad_s": [
+          0.00030279422433091685,
+          0.0003059320721214079,
+          0.00039090566272047787,
+          0.00037849278228378687,
+          0.0005002218058772692,
+          0.0005493580803479146,
+          0.00034689436324796647
+        ],
+        "joint_velocity_abs_max_rad_s": [
+          0.001884878845885396,
+          0.000942439422942698,
+          0.001884878845885396,
+          0.002827318385243416,
+          0.002827318385243416,
+          0.005654636770486832,
+          0.001884878845885396
+        ],
+        "published_command_rows": 0,
+        "policy_executed_rows": 214,
+        "inferred_contact_rows": 4,
+        "detected_impact_count": 2,
+        "camera_filter_flags": {
+          "clear_buffers_on_loss": true,
+          "motion_consistency_gate": true,
+          "physics_constrained_velocity": true,
+          "trajectory_position_smoothing": true,
+          "impact_velocity_reset": true,
+          "surface_to_center_depth": false
+        }
+      },
+      "selected_impacts": 1,
+      "candidate_counts": {
+        "accepted": 1
+      }
+    },
+    {
+      "recording": "probe_recording_20260901_143213",
+      "status": "processed",
+      "quality": {
+        "rows": 920,
+        "duration_s": 4.737152099609375,
+        "raw_valid_rows": 538,
+        "fresh_valid_camera_samples": 250,
+        "fresh_camera_rate_hz": 89.86382139949437,
+        "camera_interval_p95_ms": 11.667227745056152,
+        "joint_samples": 631,
+        "joint_position_peak_to_peak_rad": [
+          1.0542571544647217e-05,
+          3.0994415283203125e-06,
+          1.990795135498047e-05,
+          3.4332275390625e-05,
+          1.6033649444580078e-05,
+          4.912912845611572e-05,
+          7.674098014831543e-06
+        ],
+        "joint_velocity_rms_rad_s": [
+          0.00028325409221462275,
+          0.00027569928828096097,
+          0.0003397392276786161,
+          0.00040233488808622117,
+          0.0004375303855685968,
+          0.0006216997159144421,
+          0.0002626254472865475
+        ],
+        "joint_velocity_abs_max_rad_s": [
+          0.001884878845885396,
+          0.000942439422942698,
+          0.002827318385243416,
+          0.0047121974639594555,
+          0.003769757691770792,
+          0.007644497323781252,
+          0.000942439422942698
+        ],
+        "published_command_rows": 0,
+        "policy_executed_rows": 311,
+        "inferred_contact_rows": 2,
+        "detected_impact_count": 1,
+        "camera_filter_flags": {
+          "clear_buffers_on_loss": true,
+          "motion_consistency_gate": true,
+          "physics_constrained_velocity": true,
+          "trajectory_position_smoothing": true,
+          "impact_velocity_reset": true,
+          "surface_to_center_depth": false
+        }
+      },
+      "selected_impacts": 1,
+      "candidate_counts": {
+        "accepted": 1
+      }
+    },
+    {
+      "recording": "probe_recording_20260901_143306",
+      "status": "processed",
+      "quality": {
+        "rows": 524,
+        "duration_s": 2.665745973587036,
+        "raw_valid_rows": 449,
+        "fresh_valid_camera_samples": 206,
+        "fresh_camera_rate_hz": 89.89078439777111,
+        "camera_interval_p95_ms": 11.537277698516846,
+        "joint_samples": 288,
+        "joint_position_peak_to_peak_rad": [
+          1.294165849685669e-05,
+          4.76837158203125e-06,
+          2.8014183044433594e-05,
+          3.4332275390625e-05,
+          1.0073184967041016e-05,
+          5.824863910675049e-05,
+          4.306435585021973e-06
+        ],
+        "joint_velocity_rms_rad_s": [
+          0.00041184950235278057,
+          0.00033779876919321015,
+          0.0005149990548928884,
+          0.000625833887074083,
+          0.0005441176545308823,
+          0.0008607561283046673,
+          0.00035989999946211794
+        ],
+        "joint_velocity_abs_max_rad_s": [
+          0.001884878845885396,
+          0.000942439422942698,
+          0.002827318385243416,
+          0.0047121974639594555,
+          0.001884878845885396,
+          0.009529376402497292,
+          0.000942439422942698
+        ],
+        "published_command_rows": 0,
+        "policy_executed_rows": 213,
+        "inferred_contact_rows": 5,
+        "detected_impact_count": 2,
+        "camera_filter_flags": {
+          "clear_buffers_on_loss": true,
+          "motion_consistency_gate": true,
+          "physics_constrained_velocity": true,
+          "trajectory_position_smoothing": true,
+          "impact_velocity_reset": true,
+          "surface_to_center_depth": false
+        }
+      },
+      "selected_impacts": 1,
+      "candidate_counts": {
+        "accepted": 1
+      }
+    },
+    {
+      "recording": "probe_recording_20260901_143346",
+      "status": "processed",
+      "quality": {
+        "rows": 1221,
+        "duration_s": 6.200797080993652,
+        "raw_valid_rows": 134,
+        "fresh_valid_camera_samples": 67,
+        "fresh_camera_rate_hz": 89.86574679150687,
+        "camera_interval_p95_ms": 11.499106884002686,
+        "joint_samples": 841,
+        "joint_position_peak_to_peak_rad": [
+          8.627772331237793e-06,
+          2.6226043701171875e-06,
+          1.823902130126953e-05,
+          1.8477439880371094e-05,
+          6.258487701416016e-06,
+          2.372264862060547e-05,
+          5.260109901428223e-06
+        ],
+        "joint_velocity_rms_rad_s": [
+          0.00020294938999616864,
+          0.00021061053531202625,
+          0.00021800261528022907,
+          0.0002599832890876408,
+          0.00030312033818093203,
+          0.00023880990160704365,
+          0.00018668628640211994
+        ],
+        "joint_velocity_abs_max_rad_s": [
+          0.000942439422942698,
+          0.000942439422942698,
+          0.001884878845885396,
+          0.001884878845885396,
+          0.002827318385243416,
+          0.002827318385243416,
+          0.000942439422942698
+        ],
+        "published_command_rows": 0,
+        "policy_executed_rows": 205,
+        "inferred_contact_rows": 5,
+        "detected_impact_count": 2,
+        "camera_filter_flags": {
+          "clear_buffers_on_loss": true,
+          "motion_consistency_gate": true,
+          "physics_constrained_velocity": true,
+          "trajectory_position_smoothing": true,
+          "impact_velocity_reset": true,
+          "surface_to_center_depth": false
+        }
+      },
+      "selected_impacts": 1,
+      "candidate_counts": {
+        "accepted": 1
+      }
+    }
+  ],
+  "rejection_counts": {
+    "accepted": 5
+  },
+  "aggregate": {
+    "count": 5,
+    "normal_restitution": {
+      "median": 0.6112256947535154,
+      "mad_sigma": 0.03873487159974664,
+      "p10": 0.5239997818464258,
+      "p90": 0.6292234144360891
+    },
+    "effective_impulse_friction_ratio": {
+      "median": 0.028887548929142273,
+      "mad_sigma": 0.01897003150290004,
+      "p10": 0.014662960471937506,
+      "p90": 0.05421115082258408
+    },
+    "tangential_speed_ratio": {
+      "median": 1.9386798179636782,
+      "mad_sigma": 1.9803414130573043,
+      "p10": 1.1300358009106672,
+      "p90": 5.461868756840944
+    },
+    "fit_quality": {
+      "pre_rmse_median_mm": 0.6216573512557341,
+      "post_rmse_median_mm": 1.5545728392467613,
+      "continuity_median_mm": 35.32112432186004,
+      "continuity_p95_mm": 71.02298957816868,
+      "surface_error_median_mm": 5.366008358547786,
+      "max_depth_disagreement_p95_mm": 99.3219924
+    }
+  },
+  "per_recording": {
+    "probe_recording_20260901_142344": {
+      "count": 1,
+      "normal_restitution": {
+        "median": 0.5706931145208358,
+        "mad_sigma": 0.0,
+        "p10": 0.5706931145208358,
+        "p90": 0.5706931145208358
+      },
+      "effective_impulse_friction_ratio": {
+        "median": 0.028887548929142273,
+        "mad_sigma": 0.0,
+        "p10": 0.028887548929142273,
+        "p90": 0.028887548929142273
+      },
+      "tangential_speed_ratio": {
+        "median": 4.20772662743597,
+        "mad_sigma": 0.0,
+        "p10": 4.20772662743597,
+        "p90": 4.20772662743597
+      },
+      "fit_quality": {
+        "pre_rmse_median_mm": 0.6085903547824588,
+        "post_rmse_median_mm": 0.7118032788766884,
+        "continuity_median_mm": 35.32112432186004,
+        "continuity_p95_mm": 35.32112432186004,
+        "surface_error_median_mm": 1.2687947672395334,
+        "max_depth_disagreement_p95_mm": 52.556106
+      }
+    },
+    "probe_recording_20260901_142601": {
+      "count": 1,
+      "normal_restitution": {
+        "median": 0.6170305245146374,
+        "mad_sigma": 0.0,
+        "p10": 0.6170305245146374,
+        "p90": 0.6170305245146374
+      },
+      "effective_impulse_friction_ratio": {
+        "median": 0.01660993807654656,
+        "mad_sigma": 0.0,
+        "p10": 0.01660993807654656,
+        "p90": 0.01660993807654656
+      },
+      "tangential_speed_ratio": {
+        "median": 1.920652750905113,
+        "mad_sigma": 0.0,
+        "p10": 1.920652750905113,
+        "p90": 1.920652750905113
+      },
+      "fit_quality": {
+        "pre_rmse_median_mm": 0.6216573512557341,
+        "post_rmse_median_mm": 1.0769924996333502,
+        "continuity_median_mm": 24.105526983903808,
+        "continuity_p95_mm": 24.105526983903808,
+        "surface_error_median_mm": 5.366008358547786,
+        "max_depth_disagreement_p95_mm": 72.055719
+      }
+    },
+    "probe_recording_20260901_143213": {
+      "count": 1,
+      "normal_restitution": {
+        "median": 0.4928708933968191,
+        "mad_sigma": 0.0,
+        "p10": 0.4928708933968191,
+        "p90": 0.4928708933968191
+      },
+      "effective_impulse_friction_ratio": {
+        "median": 0.041682659884828256,
+        "mad_sigma": 0.0,
+        "p10": 0.041682659884828256,
+        "p90": 0.041682659884828256
+      },
+      "tangential_speed_ratio": {
+        "median": 0.6029578342477032,
+        "mad_sigma": 0.0,
+        "p10": 0.6029578342477032,
+        "p90": 0.6029578342477032
+      },
+      "fit_quality": {
+        "pre_rmse_median_mm": 3.669143994963551,
+        "post_rmse_median_mm": 1.9831572711602519,
+        "continuity_median_mm": 79.66902139634053,
+        "continuity_p95_mm": 79.66902139634053,
+        "surface_error_median_mm": 0.5026854399369167,
+        "max_depth_disagreement_p95_mm": 102.265468
+      }
+    },
+    "probe_recording_20260901_143306": {
+      "count": 1,
+      "normal_restitution": {
+        "median": 0.6373520077170569,
+        "mad_sigma": 0.0,
+        "p10": 0.6373520077170569,
+        "p90": 0.6373520077170569
+      },
+      "effective_impulse_friction_ratio": {
+        "median": 0.06256347811442128,
+        "mad_sigma": 0.0,
+        "p10": 0.06256347811442128,
+        "p90": 0.06256347811442128
+      },
+      "tangential_speed_ratio": {
+        "median": 6.297963509777592,
+        "mad_sigma": 0.0,
+        "p10": 6.297963509777592,
+        "p90": 6.297963509777592
+      },
+      "fit_quality": {
+        "pre_rmse_median_mm": 0.6083327604902303,
+        "post_rmse_median_mm": 1.7816501909708067,
+        "continuity_median_mm": 36.43886230548134,
+        "continuity_p95_mm": 36.43886230548134,
+        "surface_error_median_mm": 7.440421798998126,
+        "max_depth_disagreement_p95_mm": 86.614737
+      }
+    },
+    "probe_recording_20260901_143346": {
+      "count": 1,
+      "normal_restitution": {
+        "median": 0.6112256947535154,
+        "mad_sigma": 0.0,
+        "p10": 0.6112256947535154,
+        "p90": 0.6112256947535154
+      },
+      "effective_impulse_friction_ratio": {
+        "median": 0.013364975402198137,
+        "mad_sigma": 0.0,
+        "p10": 0.013364975402198137,
+        "p90": 0.013364975402198137
+      },
+      "tangential_speed_ratio": {
+        "median": 1.9386798179636782,
+        "mad_sigma": 0.0,
+        "p10": 1.9386798179636782,
+        "p90": 1.9386798179636782
+      },
+      "fit_quality": {
+        "pre_rmse_median_mm": 0.7140874687053501,
+        "post_rmse_median_mm": 1.5545728392467613,
+        "continuity_median_mm": 30.173693928531303,
+        "continuity_p95_mm": 30.173693928531303,
+        "surface_error_median_mm": 6.810673988716382,
+        "max_depth_disagreement_p95_mm": 87.54809
+      }
+    }
+  },
+  "recommended_parameters": {
+    "ball_mass_kg": 0.004,
+    "pair_sliding_friction": 0.35,
+    "solref_time_s": 0.003,
+    "solref_damping_ratio": 0.20191273627955322,
+    "solimp": [
+      0.9,
+      0.995,
+      0.001
+    ],
+    "margin_m": 0.001,
+    "condim": 3,
+    "fit_backend": "CPU MuJoCo isolated-contact proxy",
+    "fit_scope": "normal restitution only; friction/time retained as priors"
+  },
+  "optimization": {
+    "status": "normal_only_constrained_fit",
+    "objective": 0.8168853853445508,
+    "leave_one_recording_out": [
+      {
+        "held_out_recording": "probe_recording_20260901_142344",
+        "fit_event_count": 4,
+        "solref_damping_ratio": 0.1977502478982796,
+        "objective": 0.9637837495262237
+      },
+      {
+        "held_out_recording": "probe_recording_20260901_142601",
+        "fit_event_count": 4,
+        "solref_damping_ratio": 0.2185231008113116,
+        "objective": 0.5319423085957801
+      },
+      {
+        "held_out_recording": "probe_recording_20260901_143213",
+        "fit_event_count": 4,
+        "solref_damping_ratio": 0.19149352848104517,
+        "objective": 0.4409606536545069
+      },
+      {
+        "held_out_recording": "probe_recording_20260901_143306",
+        "fit_event_count": 4,
+        "solref_damping_ratio": 0.21215161437790944,
+        "objective": 0.9393992425173853
+      },
+      {
+        "held_out_recording": "probe_recording_20260901_143346",
+        "fit_event_count": 4,
+        "solref_damping_ratio": 0.20351685261959365,
+        "objective": 1.014001367336367
+      }
+    ]
+  },
+  "convergence": {
+    "selected_event_count": 5,
+    "recordings_with_events": 5,
+    "leave_one_recording_out_damping_range": [
+      0.19149352848104517,
+      0.2185231008113116
+    ],
+    "leave_one_recording_out_damping_span": 0.027029572330266427,
+    "per_recording_restitution_median": {
+      "probe_recording_20260901_142344": 0.5706931145208358,
+      "probe_recording_20260901_142601": 0.6170305245146374,
+      "probe_recording_20260901_143213": 0.4928708933968191,
+      "probe_recording_20260901_143306": 0.6373520077170569,
+      "probe_recording_20260901_143346": 0.6112256947535154
+    },
+    "per_recording_restitution_median_range": [
+      0.4928708933968191,
+      0.6373520077170569
+    ],
+    "per_recording_restitution_median_span": 0.1444811143202378,
+    "criteria": {
+      "minimum_events": 5,
+      "minimum_recordings_with_events": 4,
+      "maximum_loo_damping_span": 0.05,
+      "maximum_per_recording_restitution_span": 0.2
+    }
+  },
+  "simulation_validation": {
+    "baseline": {
+      "count": 5,
+      "velocity_rmse_m_s": 1.0407506089158765,
+      "velocity_median_error_m_s": 1.0918562696078795,
+      "normal_rmse_m_s": 1.0302135160410397,
+      "tangent_rmse_m_s": 0.14772251461820426,
+      "measured_restitution_median": 0.6112256947535154,
+      "predicted_restitution_median": 0.18467894033974297,
+      "rows": [
+        {
+          "group": "probe_recording_20260901_142344",
+          "recording": "probe_recording_20260901_142344",
+          "impact_time_s": 1788243825.9749207,
+          "target": [
+            0.0001168862795288203,
+            0.15129020390690778,
+            1.5084072026797848
+          ],
+          "prediction": [
+            -0.015340651848477207,
+            0.023091152788479168,
+            0.48811852991073745
+          ],
+          "normal_error_m_s": -1.0202886727690474,
+          "tangent_error_m_s": 0.12912758106866337,
+          "velocity_error_m_s": 1.0284273955770864,
+          "measured_restitution": 0.5706931145208358,
+          "predicted_restitution": 0.18467551971059268
+        },
+        {
+          "group": "probe_recording_20260901_142601",
+          "recording": "probe_recording_20260901_142601",
+          "impact_time_s": 1788243963.3569593,
+          "target": [
+            -0.025886600459006148,
+            0.13099032210984385,
+            1.470502372732251
+          ],
+          "prediction": [
+            -0.013869818099081232,
+            0.048818789505928495,
+            0.3818088668945096
+          ],
+          "normal_error_m_s": -1.0886935058377414,
+          "tangent_error_m_s": 0.08304555273319654,
+          "velocity_error_m_s": 1.0918562696078795,
+          "measured_restitution": 0.6170305245146374,
+          "predicted_restitution": 0.16020900732484192
+        },
+        {
+          "group": "probe_recording_20260901_143213",
+          "recording": "probe_recording_20260901_143213",
+          "impact_time_s": 1788244335.30054,
+          "target": [
+            -0.0839095710346581,
+            -0.016988625107409675,
+            1.151324259996066
+          ],
+          "prediction": [
+            -0.06270538068742093,
+            0.09081295532269627,
+            0.431542371396625
+          ],
+          "normal_error_m_s": -0.719781888599441,
+          "tangent_error_m_s": 0.10986718541725944,
+          "velocity_error_m_s": 0.7281186480150668,
+          "measured_restitution": 0.4928708933968191,
+          "predicted_restitution": 0.18473915778476105
+        },
+        {
+          "group": "probe_recording_20260901_143306",
+          "recording": "probe_recording_20260901_143306",
+          "impact_time_s": 1788244387.9743311,
+          "target": [
+            -0.11226723605486358,
+            0.26418218688978246,
+            1.602647655707773
+          ],
+          "prediction": [
+            -0.04195718157504459,
+            0.011568944489170811,
+            0.46443417554152827
+          ],
+          "normal_error_m_s": -1.1382134801662447,
+          "tangent_error_m_s": 0.262215472459398,
+          "velocity_error_m_s": 1.1680269176818057,
+          "measured_restitution": 0.6373520077170569,
+          "predicted_restitution": 0.18469939613962363
+        },
+        {
+          "group": "probe_recording_20260901_143346",
+          "recording": "probe_recording_20260901_143346",
+          "impact_time_s": 1788244428.2925646,
+          "target": [
+            -0.0705178111448671,
+            0.09304188043981033,
+            1.6128575830411276
+          ],
+          "prediction": [
+            -0.032457953059892616,
+            0.03592003367206907,
+            0.48731725762129585
+          ],
+          "normal_error_m_s": -1.1255403254198317,
+          "tangent_error_m_s": 0.0686400624679619,
+          "velocity_error_m_s": 1.127631359231281,
+          "measured_restitution": 0.6112256947535154,
+          "predicted_restitution": 0.18467894033974297
+        }
+      ]
+    },
+    "fitted": {
+      "count": 5,
+      "velocity_rmse_m_s": 0.2195827067287834,
+      "velocity_median_error_m_s": 0.24646502302739234,
+      "normal_rmse_m_s": 0.16268708149439354,
+      "tangent_rmse_m_s": 0.14747704434648623,
+      "measured_restitution_median": 0.6112256947535154,
+      "predicted_restitution_median": 0.5996630231450141,
+      "rows": [
+        {
+          "group": "probe_recording_20260901_142344",
+          "recording": "probe_recording_20260901_142344",
+          "impact_time_s": 1788243825.9749207,
+          "target": [
+            0.0001168862795288203,
+            0.15129020390690778,
+            1.5084072026797848
+          ],
+          "prediction": [
+            -0.01553357154482888,
+            0.026114180355390225,
+            1.5855764013592513
+          ],
+          "normal_error_m_s": 0.07716919867946648,
+          "tangent_error_m_s": 0.12615059929418518,
+          "velocity_error_m_s": 0.1478819087214966,
+          "measured_restitution": 0.5706931145208358,
+          "predicted_restitution": 0.5998894285275723
+        },
+        {
+          "group": "probe_recording_20260901_142601",
+          "recording": "probe_recording_20260901_142601",
+          "impact_time_s": 1788243963.3569593,
+          "target": [
+            -0.025886600459006148,
+            0.13099032210984385,
+            1.470502372732251
+          ],
+          "prediction": [
+            -0.014052709089544724,
+            0.05423164194253148,
+            1.2365941180469555
+          ],
+          "normal_error_m_s": -0.23390825468529552,
+          "tangent_error_m_s": 0.07766553911466763,
+          "velocity_error_m_s": 0.24646502302739234,
+          "measured_restitution": 0.6170305245146374,
+          "predicted_restitution": 0.5188813914339452
+        },
+        {
+          "group": "probe_recording_20260901_143213",
+          "recording": "probe_recording_20260901_143213",
+          "impact_time_s": 1788244335.30054,
+          "target": [
+            -0.0839095710346581,
+            -0.016988625107409675,
+            1.151324259996066
+          ],
+          "prediction": [
+            -0.06338884854895205,
+            0.1024898052915147,
+            1.3998997967901416
+          ],
+          "normal_error_m_s": 0.24857553679407562,
+          "tangent_error_m_s": 0.12122786553398512,
+          "velocity_error_m_s": 0.27656101112483084,
+          "measured_restitution": 0.4928708933968191,
+          "predicted_restitution": 0.5992837009378577
+        },
+        {
+          "group": "probe_recording_20260901_143306",
+          "recording": "probe_recording_20260901_143306",
+          "impact_time_s": 1788244387.9743311,
+          "target": [
+            -0.11226723605486358,
+            0.26418218688978246,
+            1.602647655707773
+          ],
+          "prediction": [
+            -0.04244164803228185,
+            0.013060769402472626,
+            1.5078771646148734
+          ],
+          "normal_error_m_s": -0.09477049109289948,
+          "tangent_error_m_s": 0.2606483820466474,
+          "velocity_error_m_s": 0.27734279339028156,
+          "measured_restitution": 0.6373520077170569,
+          "predicted_restitution": 0.5996630231450141
+        },
+        {
+          "group": "probe_recording_20260901_143346",
+          "recording": "probe_recording_20260901_143346",
+          "impact_time_s": 1788244428.2925646,
+          "target": [
+            -0.0705178111448671,
+            0.09304188043981033,
+            1.6128575830411276
+          ],
+          "prediction": [
+            -0.03284306462088128,
+            0.04061743569772805,
+            1.5829237874813764
+          ],
+          "normal_error_m_s": -0.029933795559751175,
+          "tangent_error_m_s": 0.06455779528579195,
+          "velocity_error_m_s": 0.07115996802117887,
+          "measured_restitution": 0.6112256947535154,
+          "predicted_restitution": 0.5998816646419913
+        }
+      ]
+    }
+  },
+  "decision": {
+    "status": "history_mjx_candidate_not_converged",
+    "apply_to_production_xml": false,
+    "message_zh": "已改用连续下落位置历史重建状态并完成 MJX 首次反弹位置回放，但五组的候选参数仍未通过留一录制稳定性门槛；本轮不覆盖生产 XML。",
+    "mjx_candidate_stable": false
+  },
+  "events": [
+    {
+      "group": "probe_recording_20260901_142344",
+      "recording": "probe_recording_20260901_142344",
+      "impact_time_s": 1788243825.9749207,
+      "impact_position_m": [
+        -0.10303652511281498,
+        -0.42880617055628567,
+        1.0797839740549358
+      ],
+      "pre_velocity_m_s": [
+        0.029187096091559166,
+        -0.06055678674692023,
+        -2.643685748721324
+      ],
+      "post_velocity_m_s": [
+        0.10456127580389585,
+        0.15403606203660516,
+        1.5033352315377868
+      ],
+      "racket_center_m": [
+        -0.11413387209177017,
+        -0.4666173458099365,
+        1.0587818622589111
+      ],
+      "racket_normal": [
+        -0.005808973376583482,
+        0.035565916247652596,
+        0.9993504498157638
+      ],
+      "racket_contact_velocity_m_s": [
+        -0.00011284770179774905,
+        0.000325708556603312,
+        -0.0011904357047384114
+      ],
+      "tangent_offset_m": [
+        -0.02031921739026184,
+        0.03294169042629593
+      ],
+      "pre_relative_local_m_s": [
+        -0.01559608605048439,
+        0.03239673908495273,
+        -2.6431144240215168
+      ],
+      "post_relative_local_m_s": [
+        0.0001168862795288203,
+        0.15129020390690778,
+        1.5084072026797848
+      ],
+      "normal_restitution": 0.5706931145208358,
+      "impulse_friction_ratio": 0.028887548929142273,
+      "tangential_speed_ratio": 4.20772662743597,
+      "pre_fit_rmse_mm": 0.6085903547824588,
+      "post_fit_rmse_mm": 0.7118032788766884,
+      "continuity_error_mm": 35.32112432186004,
+      "normal_surface_error_mm": 1.2687947672395334,
+      "lateral_contact_offset_mm": 38.70433520285081,
+      "max_capture_latency_ms": 17.096519470214844,
+      "max_depth_disagreement_mm": 52.556106,
+      "score": 38.568230360955376
+    },
+    {
+      "group": "probe_recording_20260901_142601",
+      "recording": "probe_recording_20260901_142601",
+      "impact_time_s": 1788243963.3569593,
+      "impact_position_m": [
+        -0.09603514753204909,
+        -0.43199163449821465,
+        1.084057481780759
+      ],
+      "pre_velocity_m_s": [
+        0.05557659357645303,
+        -0.029281675060599158,
+        -2.3846792778405472
+      ],
+      "post_velocity_m_s": [
+        0.07245534298077323,
+        0.1584452269095571,
+        1.4649354176585718
+      ],
+      "racket_center_m": [
+        -0.11413322389125824,
+        -0.46661901473999023,
+        1.058802843093872
+      ],
+      "racket_normal": [
+        -0.005825694230187972,
+        0.0356150042989376,
+        0.9993486042473478
+      ],
+      "racket_contact_velocity_m_s": [
+        1.613926856680862e-05,
+        -1.9496221508368516e-05,
+        -0.001300341675258839
+      ],
+      "tangent_offset_m": [
+        -0.01316854857454821,
+        0.03599743792513901
+      ],
+      "pre_relative_local_m_s": [
+        -0.01409183815593023,
+        0.06807676058901417,
+        -2.383192264092548
+      ],
+      "post_relative_local_m_s": [
+        -0.025886600459006148,
+        0.13099032210984385,
+        1.470502372732251
+      ],
+      "normal_restitution": 0.6170305245146374,
+      "impulse_friction_ratio": 0.01660993807654656,
+      "tangential_speed_ratio": 1.920652750905113,
+      "pre_fit_rmse_mm": 0.6216573512557341,
+      "post_fit_rmse_mm": 1.0769924996333502,
+      "continuity_error_mm": 24.105526983903808,
+      "normal_surface_error_mm": 5.366008358547786,
+      "lateral_contact_offset_mm": 38.3304866748972,
+      "max_capture_latency_ms": 18.204212188720703,
+      "max_depth_disagreement_mm": 72.055719,
+      "score": 28.44118161697466
+    },
+    {
+      "group": "probe_recording_20260901_143213",
+      "recording": "probe_recording_20260901_143213",
+      "impact_time_s": 1788244335.30054,
+      "impact_position_m": [
+        -0.10963610774191634,
+        -0.48001625980794355,
+        1.079821334019905
+      ],
+      "pre_velocity_m_s": [
+        0.06660548009902292,
+        0.04843962527159558,
+        -2.338286883418659
+      ],
+      "post_velocity_m_s": [
+        -0.07503834444042268,
+        0.09259088255595231,
+        1.148865830061907
+      ],
+      "racket_center_m": [
+        -0.1141306608915329,
+        -0.4666171669960022,
+        1.0588067770004272
+      ],
+      "racket_normal": [
+        -0.005835321556998119,
+        0.03562324382141563,
+        0.99934825441189
+      ],
+      "racket_contact_velocity_m_s": [
+        -2.3402536924677107e-05,
+        1.796708850785326e-06,
+        0.000529206625771076
+      ],
+      "tangent_offset_m": [
+        0.013650121143303197,
+        -0.005906148617497445
+      ],
+      "pre_relative_local_m_s": [
+        -0.06360225362825758,
+        0.12694495134009498,
+        -2.3359550653544363
+      ],
+      "post_relative_local_m_s": [
+        -0.0839095710346581,
+        -0.016988625107409675,
+        1.151324259996066
+      ],
+      "normal_restitution": 0.4928708933968191,
+      "impulse_friction_ratio": 0.041682659884828256,
+      "tangential_speed_ratio": 0.6029578342477032,
+      "pre_fit_rmse_mm": 3.669143994963551,
+      "post_fit_rmse_mm": 1.9831572711602519,
+      "continuity_error_mm": 79.66902139634053,
+      "normal_surface_error_mm": 0.5026854399369167,
+      "lateral_contact_offset_mm": 14.873076303133118,
+      "max_capture_latency_ms": 22.948026657104492,
+      "max_depth_disagreement_mm": 102.265468,
+      "score": 87.70430838372195
+    },
+    {
+      "group": "probe_recording_20260901_143306",
+      "recording": "probe_recording_20260901_143306",
+      "impact_time_s": 1788244387.9743311,
+      "impact_position_m": [
+        -0.09701059337056553,
+        -0.4846679791212736,
+        1.073098866383772
+      ],
+      "pre_velocity_m_s": [
+        -0.001942851442088005,
+        -0.0466656956901167,
+        -2.5184466102875938
+      ],
+      "post_velocity_m_s": [
+        0.11383244533984131,
+        0.31613747672145426,
+        1.5891757483087179
+      ],
+      "racket_center_m": [
+        -0.11413415521383286,
+        -0.46661949157714844,
+        1.0587884187698364
+      ],
+      "racket_normal": [
+        -0.005805721140400233,
+        0.035579317874214866,
+        0.9993499916747215
+      ],
+      "racket_contact_velocity_m_s": [
+        -0.0004638132244090165,
+        0.00018250266196707124,
+        -0.003929548853869315
+      ],
+      "tangent_offset_m": [
+        0.025288764064778476,
+        0.0006078114725699841
+      ],
+      "pre_relative_local_m_s": [
+        -0.042603216431488074,
+        0.016195730598234544,
+        -2.5145408444672928
+      ],
+      "post_relative_local_m_s": [
+        -0.11226723605486358,
+        0.26418218688978246,
+        1.602647655707773
+      ],
+      "normal_restitution": 0.6373520077170569,
+      "impulse_friction_ratio": 0.06256347811442128,
+      "tangential_speed_ratio": 6.297963509777592,
+      "pre_fit_rmse_mm": 0.6083327604902303,
+      "post_fit_rmse_mm": 1.7816501909708067,
+      "continuity_error_mm": 36.43886230548134,
+      "normal_surface_error_mm": 7.440421798998126,
+      "lateral_contact_offset_mm": 25.296067336845447,
+      "max_capture_latency_ms": 12.945413589477539,
+      "max_depth_disagreement_mm": 86.614737,
+      "score": 41.662295087599134
+    },
+    {
+      "group": "probe_recording_20260901_143346",
+      "recording": "probe_recording_20260901_143346",
+      "impact_time_s": 1788244428.2925646,
+      "impact_position_m": [
+        -0.11681554515403704,
+        -0.40680307431157303,
+        1.0844858371050579
+      ],
+      "pre_velocity_m_s": [
+        0.031216615001964133,
+        -0.036044343871894334,
+        -2.6401457096593672
+      ],
+      "post_velocity_m_s": [
+        0.013529023826844228,
+        0.17173441209879678,
+        1.6067017261052579
+      ],
+      "racket_center_m": [
+        -0.11413314193487167,
+        -0.46661898493766785,
+        1.0588046312332153
+      ],
+      "racket_normal": [
+        -0.005829654761530301,
+        0.03561867048512679,
+        0.9993484504837848
+      ],
+      "racket_contact_velocity_m_s": [
+        -8.448445260119693e-05,
+        -9.995189743808005e-05,
+        -0.0011623104351766013
+      ],
+      "tangent_offset_m": [
+        -0.04577493647658254,
+        0.03709291561651159
+      ],
+      "pre_relative_local_m_s": [
+        -0.0329750402620283,
+        0.05038843522917601,
+        -2.638726736924129
+      ],
+      "post_relative_local_m_s": [
+        -0.0705178111448671,
+        0.09304188043981033,
+        1.6128575830411276
+      ],
+      "normal_restitution": 0.6112256947535154,
+      "impulse_friction_ratio": 0.013364975402198137,
+      "tangential_speed_ratio": 1.9386798179636782,
+      "pre_fit_rmse_mm": 0.7140874687053501,
+      "post_fit_rmse_mm": 1.5545728392467613,
+      "continuity_error_mm": 30.173693928531303,
+      "normal_surface_error_mm": 6.810673988716382,
+      "lateral_contact_offset_mm": 58.917138409539334,
+      "max_capture_latency_ms": 21.881103515625,
+      "max_depth_disagreement_mm": 87.54809,
+      "score": 35.91651272377152
+    }
+  ],
+  "mjx_validation": {
+    "schema_version": 1,
+    "backend": "MJX direct isolated contact",
+    "mujoco_version": "3.10.0",
+    "jax_version": "0.6.2",
+    "jax_devices": [
+      "TFRT_CPU_0"
+    ],
+    "timestep_s": 0.0002,
+    "steps_per_impact": 150,
+    "event_count": 5,
+    "high_quality_event_count": 4,
+    "high_quality_recordings": [
+      "probe_recording_20260901_142344",
+      "probe_recording_20260901_142601",
+      "probe_recording_20260901_143306",
+      "probe_recording_20260901_143346"
+    ],
+    "excluded_low_quality_recordings": [
+      "probe_recording_20260901_143213"
+    ],
+    "fit_all_five": {
+      "solref_damping_ratio": 0.35613038706791794,
+      "objective": 3.92580840799053,
+      "success": true,
+      "message": "Solution found.",
+      "event_count": 5,
+      "loss_kind": "robust_huber"
+    },
+    "fit_high_quality": {
+      "solref_damping_ratio": 0.3647765040175735,
+      "objective": 4.634299097837989,
+      "success": true,
+      "message": "Solution found.",
+      "event_count": 4,
+      "loss_kind": "robust_huber"
+    },
+    "fit_all_five_least_squares": {
+      "solref_damping_ratio": 0.355177840534317,
+      "objective": 0.15122523847633557,
+      "success": true,
+      "message": "Solution found.",
+      "event_count": 5,
+      "loss_kind": "least_squares"
+    },
+    "fit_high_quality_least_squares": {
+      "solref_damping_ratio": 0.35731832744359754,
+      "objective": 0.17729113227785448,
+      "success": true,
+      "message": "Solution found.",
+      "event_count": 4,
+      "loss_kind": "least_squares"
+    },
+    "leave_one_recording_out": [
+      {
+        "solref_damping_ratio": 0.3332895538788848,
+        "objective": 4.778020752224172,
+        "success": true,
+        "message": "Solution found.",
+        "event_count": 4,
+        "loss_kind": "robust_huber",
+        "held_out_recording": "probe_recording_20260901_142344"
+      },
+      {
+        "solref_damping_ratio": 0.3524528090715195,
+        "objective": 4.349954381899226,
+        "success": true,
+        "message": "Solution found.",
+        "event_count": 4,
+        "loss_kind": "robust_huber",
+        "held_out_recording": "probe_recording_20260901_142601"
+      },
+      {
+        "solref_damping_ratio": 0.3647765040175735,
+        "objective": 4.634299097837989,
+        "success": true,
+        "message": "Solution found.",
+        "event_count": 4,
+        "loss_kind": "robust_huber",
+        "held_out_recording": "probe_recording_20260901_143213"
+      },
+      {
+        "solref_damping_ratio": 0.3710650373783178,
+        "objective": 1.9634586963954543,
+        "success": true,
+        "message": "Solution found.",
+        "event_count": 4,
+        "loss_kind": "robust_huber",
+        "held_out_recording": "probe_recording_20260901_143306"
+      },
+      {
+        "solref_damping_ratio": 0.38402441225341294,
+        "objective": 3.961243698080219,
+        "success": true,
+        "message": "Solution found.",
+        "event_count": 4,
+        "loss_kind": "robust_huber",
+        "held_out_recording": "probe_recording_20260901_143346"
+      }
+    ],
+    "leave_one_recording_out_damping_range": [
+      0.3332895538788848,
+      0.38402441225341294
+    ],
+    "leave_one_recording_out_damping_span": 0.050734858374528125,
+    "all_vs_high_quality_damping_delta": 0.008646116949655558,
+    "robust_vs_least_squares_max_damping_delta": 0.007458176573975961,
+    "stable_candidate": false,
+    "evaluations": {
+      "current_production": {
+        "parameters": {
+          "pair_sliding_friction": 0.35,
+          "solref_time_s": 0.003,
+          "solref_damping_ratio": 0.15254
+        },
+        "all": {
+          "count": 5,
+          "velocity_rmse_m_s": 1.162694141332269,
+          "normal_rmse_m_s": 0.9231036969805858,
+          "tangent_rmse_m_s": 0.7069209509620982,
+          "measured_restitution_median": 0.6112256947535155,
+          "predicted_restitution_median": 0.6525068626603427,
+          "normal_errors_m_s": [
+            1.2649573917575616,
+            1.5803137150310924,
+            0.36211316096830015,
+            -0.14178120626135904,
+            0.10892972148719937
+          ]
+        },
+        "high_quality": {
+          "count": 4,
+          "velocity_rmse_m_s": 1.2814432973050285,
+          "normal_rmse_m_s": 1.016055637692847,
+          "tangent_rmse_m_s": 0.7808507317794907,
+          "measured_restitution_median": 0.6141281096340765,
+          "predicted_restitution_median": 0.8508929568142125,
+          "normal_errors_m_s": [
+            1.2649573917575616,
+            1.5803137150310924,
+            -0.14178120626135904,
+            0.10892972148719937
+          ]
+        }
+      },
+      "all_five_robust_fit": {
+        "parameters": {
+          "pair_sliding_friction": 0.35,
+          "solref_time_s": 0.003,
+          "solref_damping_ratio": 0.35613038706791794
+        },
+        "all": {
+          "count": 5,
+          "velocity_rmse_m_s": 0.6753082349481748,
+          "normal_rmse_m_s": 0.3891364985475091,
+          "tangent_rmse_m_s": 0.5519184701448248,
+          "measured_restitution_median": 0.6112256947535155,
+          "predicted_restitution_median": 0.49324624545963935,
+          "normal_errors_m_s": [
+            0.20642679578737266,
+            0.25252730858887085,
+            -0.2290604149874601,
+            -0.708073426757361,
+            -0.31131552725933553
+          ]
+        },
+        "high_quality": {
+          "count": 4,
+          "velocity_rmse_m_s": 0.7388034044310932,
+          "normal_rmse_m_s": 0.4197223483431787,
+          "tangent_rmse_m_s": 0.6079996880757923,
+          "measured_restitution_median": 0.6141281096340765,
+          "predicted_restitution_median": 0.5710195966172471,
+          "normal_errors_m_s": [
+            0.20642679578737266,
+            0.25252730858887085,
+            -0.708073426757361,
+            -0.31131552725933553
+          ]
+        }
+      },
+      "high_quality_robust_fit": {
+        "parameters": {
+          "pair_sliding_friction": 0.35,
+          "solref_time_s": 0.003,
+          "solref_damping_ratio": 0.3647765040175735
+        },
+        "all": {
+          "count": 5,
+          "velocity_rmse_m_s": 0.6729182769144763,
+          "normal_rmse_m_s": 0.399162719557339,
+          "tangent_rmse_m_s": 0.5417454482698834,
+          "measured_restitution_median": 0.6112256947535155,
+          "predicted_restitution_median": 0.4710242516158168,
+          "normal_errors_m_s": [
+            0.1572791488077374,
+            0.21409424935420907,
+            -0.24868850285731103,
+            -0.7262023768032825,
+            -0.3699532965627934
+          ]
+        },
+        "high_quality": {
+          "count": 4,
+          "velocity_rmse_m_s": 0.7345632873092581,
+          "normal_rmse_m_s": 0.42860483314139247,
+          "tangent_rmse_m_s": 0.5965577256816165,
+          "measured_restitution_median": 0.6141281096340765,
+          "predicted_restitution_median": 0.5506113013012586,
+          "normal_errors_m_s": [
+            0.1572791488077374,
+            0.21409424935420907,
+            -0.7262023768032825,
+            -0.3699532965627934
+          ]
+        }
+      },
+      "all_five_least_squares_fit": {
+        "parameters": {
+          "pair_sliding_friction": 0.35,
+          "solref_time_s": 0.003,
+          "solref_damping_ratio": 0.355177840534317
+        },
+        "all": {
+          "count": 5,
+          "velocity_rmse_m_s": 0.6758125242579364,
+          "normal_rmse_m_s": 0.38887689372902523,
+          "tangent_rmse_m_s": 0.5527181284050201,
+          "measured_restitution_median": 0.6112256947535155,
+          "predicted_restitution_median": 0.49458570700195786,
+          "normal_errors_m_s": [
+            0.2114111399866987,
+            0.2576381256078233,
+            -0.2262095108048281,
+            -0.7065084559689176,
+            -0.30778105427453806
+          ]
+        },
+        "high_quality": {
+          "count": 4,
+          "velocity_rmse_m_s": 0.739605615362578,
+          "normal_rmse_m_s": 0.4198081256964657,
+          "tangent_rmse_m_s": 0.608915103996508,
+          "measured_restitution_median": 0.6141281096340765,
+          "predicted_restitution_median": 0.5726322196359055,
+          "normal_errors_m_s": [
+            0.2114111399866987,
+            0.2576381256078233,
+            -0.7065084559689176,
+            -0.30778105427453806
+          ]
+        }
+      },
+      "high_quality_least_squares_fit": {
+        "parameters": {
+          "pair_sliding_friction": 0.35,
+          "solref_time_s": 0.003,
+          "solref_damping_ratio": 0.35731832744359754
+        },
+        "all": {
+          "count": 5,
+          "velocity_rmse_m_s": 0.675435599787354,
+          "normal_rmse_m_s": 0.3905793968841335,
+          "tangent_rmse_m_s": 0.5510544294257412,
+          "measured_restitution_median": 0.6112256947535155,
+          "predicted_restitution_median": 0.49156128599666876,
+          "normal_errors_m_s": [
+            0.20017739628289988,
+            0.24661401951340522,
+            -0.23150982104534912,
+            -0.7131406798152776,
+            -0.31576167484490925
+          ]
+        },
+        "high_quality": {
+          "count": 4,
+          "velocity_rmse_m_s": 0.7387697281799652,
+          "normal_rmse_m_s": 0.4210595353128278,
+          "tangent_rmse_m_s": 0.6070334249423546,
+          "measured_restitution_median": 0.6141281096340765,
+          "predicted_restitution_median": 0.5689949131476875,
+          "normal_errors_m_s": [
+            0.20017739628289988,
+            0.24661401951340522,
+            -0.7131406798152776,
+            -0.31576167484490925
+          ]
+        }
+      }
+    },
+    "event_rows": [
+      {
+        "recording": "probe_recording_20260901_142344",
+        "high_quality": true,
+        "incoming_normal_m_s": -2.6431144240215168,
+        "measured_outgoing_normal_m_s": 1.5084072026797848,
+        "measured_restitution": 0.5706931145208358,
+        "continuity_error_mm": 35.32112432186004,
+        "predictions": {
+          "current_production": {
+            "outgoing_normal_m_s": 2.7733645944373464,
+            "normal_error_m_s": 1.2649573917575616,
+            "restitution": 1.0492790509680823
+          },
+          "all_five_robust_fit": {
+            "outgoing_normal_m_s": 1.7148339984671574,
+            "normal_error_m_s": 0.20642679578737266,
+            "restitution": 0.6487929477748549
+          },
+          "high_quality_robust_fit": {
+            "outgoing_normal_m_s": 1.6656863514875222,
+            "normal_error_m_s": 0.1572791488077374,
+            "restitution": 0.6301983509867004
+          },
+          "all_five_least_squares_fit": {
+            "outgoing_normal_m_s": 1.7198183426664835,
+            "normal_error_m_s": 0.2114111399866987,
+            "restitution": 0.6506787322698531
+          },
+          "high_quality_least_squares_fit": {
+            "outgoing_normal_m_s": 1.7085845989626847,
+            "normal_error_m_s": 0.20017739628289988,
+            "restitution": 0.6464285402987062
+          }
+        }
+      },
+      {
+        "recording": "probe_recording_20260901_142601",
+        "high_quality": true,
+        "incoming_normal_m_s": -2.383192264092548,
+        "measured_outgoing_normal_m_s": 1.470502372732251,
+        "measured_restitution": 0.6170305245146374,
+        "continuity_error_mm": 24.105526983903808,
+        "predictions": {
+          "current_production": {
+            "outgoing_normal_m_s": 3.0508160877633435,
+            "normal_error_m_s": 1.5803137150310924,
+            "restitution": 1.2801384654229766
+          },
+          "all_five_robust_fit": {
+            "outgoing_normal_m_s": 1.7230296813211219,
+            "normal_error_m_s": 0.25252730858887085,
+            "restitution": 0.7229923104744562
+          },
+          "high_quality_robust_fit": {
+            "outgoing_normal_m_s": 1.68459662208646,
+            "normal_error_m_s": 0.21409424935420907,
+            "restitution": 0.7068655968165903
+          },
+          "all_five_least_squares_fit": {
+            "outgoing_normal_m_s": 1.7281404983400743,
+            "normal_error_m_s": 0.2576381256078233,
+            "restitution": 0.725136836157909
+          },
+          "high_quality_least_squares_fit": {
+            "outgoing_normal_m_s": 1.7171163922456563,
+            "normal_error_m_s": 0.24661401951340522,
+            "restitution": 0.7205110632983216
+          }
+        }
+      },
+      {
+        "recording": "probe_recording_20260901_143213",
+        "high_quality": false,
+        "incoming_normal_m_s": -2.3359550653544363,
+        "measured_outgoing_normal_m_s": 1.151324259996066,
+        "measured_restitution": 0.4928708933968191,
+        "continuity_error_mm": 79.66902139634053,
+        "predictions": {
+          "current_production": {
+            "outgoing_normal_m_s": 1.5134374209643662,
+            "normal_error_m_s": 0.36211316096830015,
+            "restitution": 0.6478880708840737
+          },
+          "all_five_robust_fit": {
+            "outgoing_normal_m_s": 0.9222638450086059,
+            "normal_error_m_s": -0.2290604149874601,
+            "restitution": 0.39481232267139954
+          },
+          "high_quality_robust_fit": {
+            "outgoing_normal_m_s": 0.902635757138755,
+            "normal_error_m_s": -0.24868850285731103,
+            "restitution": 0.38640972616560043
+          },
+          "all_five_least_squares_fit": {
+            "outgoing_normal_m_s": 0.9251147491912379,
+            "normal_error_m_s": -0.2262095108048281,
+            "restitution": 0.3960327674585939
+          },
+          "high_quality_least_squares_fit": {
+            "outgoing_normal_m_s": 0.9198144389507169,
+            "normal_error_m_s": -0.23150982104534912,
+            "restitution": 0.39376375538762887
+          }
+        }
+      },
+      {
+        "recording": "probe_recording_20260901_143306",
+        "high_quality": true,
+        "incoming_normal_m_s": -2.5145408444672928,
+        "measured_outgoing_normal_m_s": 1.602647655707773,
+        "measured_restitution": 0.6373520077170569,
+        "continuity_error_mm": 36.43886230548134,
+        "predictions": {
+          "current_production": {
+            "outgoing_normal_m_s": 1.4608664494464139,
+            "normal_error_m_s": -0.14178120626135904,
+            "restitution": 0.5809674766909183
+          },
+          "all_five_robust_fit": {
+            "outgoing_normal_m_s": 0.8945742289504119,
+            "normal_error_m_s": -0.708073426757361,
+            "restitution": 0.35576046852399734
+          },
+          "high_quality_robust_fit": {
+            "outgoing_normal_m_s": 0.8764452789044904,
+            "normal_error_m_s": -0.7262023768032825,
+            "restitution": 0.34855082224371897
+          },
+          "all_five_least_squares_fit": {
+            "outgoing_normal_m_s": 0.8961391997388553,
+            "normal_error_m_s": -0.7065084559689176,
+            "restitution": 0.3563828369344714
+          },
+          "high_quality_least_squares_fit": {
+            "outgoing_normal_m_s": 0.8895069758924953,
+            "normal_error_m_s": -0.7131406798152776,
+            "restitution": 0.35374528826989005
+          }
+        }
+      },
+      {
+        "recording": "probe_recording_20260901_143346",
+        "high_quality": true,
+        "incoming_normal_m_s": -2.638726736924129,
+        "measured_outgoing_normal_m_s": 1.6128575830411276,
+        "measured_restitution": 0.6112256947535154,
+        "continuity_error_mm": 30.173693928531303,
+        "predictions": {
+          "current_production": {
+            "outgoing_normal_m_s": 1.721787304528327,
+            "normal_error_m_s": 0.10892972148719937,
+            "restitution": 0.6525068626603427
+          },
+          "all_five_robust_fit": {
+            "outgoing_normal_m_s": 1.301542055781792,
+            "normal_error_m_s": -0.31131552725933553,
+            "restitution": 0.49324624545963935
+          },
+          "high_quality_robust_fit": {
+            "outgoing_normal_m_s": 1.2429042864783342,
+            "normal_error_m_s": -0.3699532965627934,
+            "restitution": 0.4710242516158168
+          },
+          "all_five_least_squares_fit": {
+            "outgoing_normal_m_s": 1.3050765287665895,
+            "normal_error_m_s": -0.30778105427453806,
+            "restitution": 0.49458570700195786
+          },
+          "high_quality_least_squares_fit": {
+            "outgoing_normal_m_s": 1.2970959081962183,
+            "normal_error_m_s": -0.31576167484490925,
+            "restitution": 0.49156128599666876
+          }
+        }
+      }
+    ],
+    "full_drop_validation": {
+      "method": "rest release from v_impact^2/(2g), gravity flight, static racket, first rebound only",
+      "gravity_m_s2": 9.81,
+      "duration_s": 0.75,
+      "steps": 3750,
+      "evaluations": {
+        "current_production": {
+          "parameters": {
+            "pair_sliding_friction": 0.35,
+            "solref_time_s": 0.003,
+            "solref_damping_ratio": 0.15254
+          },
+          "count": 5,
+          "requested_count": 5,
+          "first_rebound_success_rate": 1.0,
+          "outgoing_normal_velocity_rmse_m_s": 1.304192223696305,
+          "rebound_height_rmse_m": 0.34191103906070025,
+          "penalized_all_event_outgoing_normal_velocity_rmse_m_s": 1.304192223696305,
+          "penalized_all_event_rebound_height_rmse_m": 0.34191103906070025,
+          "rows": [
+            {
+              "recording": "probe_recording_20260901_142344",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.3560679846315287,
+              "simulated_incoming_normal_speed_m_s": 2.6506619999999494,
+              "measured_incoming_normal_speed_m_s": 2.6431144240215168,
+              "simulated_outgoing_normal_speed_m_s": 3.0002156910624365,
+              "measured_outgoing_normal_speed_m_s": 1.5084072026797848,
+              "simulated_restitution": 1.1318741095856408,
+              "measured_restitution": 0.5706931145208358,
+              "simulated_rebound_height_m": 0.4573129344318922,
+              "measured_ballistic_rebound_height_m": 0.11596800657982943
+            },
+            {
+              "recording": "probe_recording_20260901_142601",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.28948039590369856,
+              "simulated_incoming_normal_speed_m_s": 2.3897159999999764,
+              "measured_incoming_normal_speed_m_s": 2.383192264092548,
+              "simulated_outgoing_normal_speed_m_s": 3.946921300854201,
+              "measured_outgoing_normal_speed_m_s": 1.470502372732251,
+              "simulated_restitution": 1.651627767004213,
+              "measured_restitution": 0.6170305245146374,
+              "simulated_rebound_height_m": 0.79222420404366,
+              "measured_ballistic_rebound_height_m": 0.11021290663665545
+            },
+            {
+              "recording": "probe_recording_20260901_143213",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.2781185559304306,
+              "simulated_incoming_normal_speed_m_s": 2.336741999999982,
+              "measured_incoming_normal_speed_m_s": 2.3359550653544363,
+              "simulated_outgoing_normal_speed_m_s": 1.4882018366501404,
+              "measured_outgoing_normal_speed_m_s": 1.151324259996066,
+              "simulated_restitution": 0.6368704104476026,
+              "measured_restitution": 0.4928708933968191,
+              "simulated_rebound_height_m": 0.11243044115598812,
+              "measured_ballistic_rebound_height_m": 0.06756103729130933
+            },
+            {
+              "recording": "probe_recording_20260901_143306",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.322268891870249,
+              "simulated_incoming_normal_speed_m_s": 2.5172459999999632,
+              "measured_incoming_normal_speed_m_s": 2.5145408444672928,
+              "simulated_outgoing_normal_speed_m_s": 1.4236521115228784,
+              "measured_outgoing_normal_speed_m_s": 1.602647655707773,
+              "simulated_restitution": 0.5655593897151487,
+              "measured_restitution": 0.6373520077170569,
+              "simulated_rebound_height_m": 0.10217454315945497,
+              "measured_ballistic_rebound_height_m": 0.1309112899258726
+            },
+            {
+              "recording": "probe_recording_20260901_143346",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.3548867885911448,
+              "simulated_incoming_normal_speed_m_s": 2.6388899999999507,
+              "measured_incoming_normal_speed_m_s": 2.638726736924129,
+              "simulated_outgoing_normal_speed_m_s": 1.6431495240155372,
+              "measured_outgoing_normal_speed_m_s": 1.6128575830411276,
+              "simulated_restitution": 0.622666925872457,
+              "measured_restitution": 0.6112256947535154,
+              "simulated_rebound_height_m": 0.1371627495582118,
+              "measured_ballistic_rebound_height_m": 0.13258458629833167
+            }
+          ]
+        },
+        "all_five_robust_fit": {
+          "parameters": {
+            "pair_sliding_friction": 0.35,
+            "solref_time_s": 0.003,
+            "solref_damping_ratio": 0.35613038706791794
+          },
+          "count": 3,
+          "requested_count": 5,
+          "first_rebound_success_rate": 0.6,
+          "outgoing_normal_velocity_rmse_m_s": 0.2619805977145702,
+          "rebound_height_rmse_m": 0.03838720677141585,
+          "penalized_all_event_outgoing_normal_velocity_rmse_m_s": 1.0368886721587365,
+          "penalized_all_event_rebound_height_rmse_m": 0.08847278822902548,
+          "rows": [
+            {
+              "recording": "probe_recording_20260901_142344",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.3560679846315287,
+              "simulated_incoming_normal_speed_m_s": 2.6506619999999494,
+              "measured_incoming_normal_speed_m_s": 2.6431144240215168,
+              "simulated_outgoing_normal_speed_m_s": 1.7542433868178544,
+              "measured_outgoing_normal_speed_m_s": 1.5084072026797848,
+              "simulated_restitution": 0.6618133080784679,
+              "measured_restitution": 0.5706931145208358,
+              "simulated_rebound_height_m": 0.15527439246025548,
+              "measured_ballistic_rebound_height_m": 0.11596800657982943
+            },
+            {
+              "recording": "probe_recording_20260901_142601",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.28948039590369856,
+              "simulated_incoming_normal_speed_m_s": 2.3897159999999764,
+              "measured_incoming_normal_speed_m_s": 2.383192264092548,
+              "simulated_outgoing_normal_speed_m_s": 1.7645744193997617,
+              "measured_outgoing_normal_speed_m_s": 1.470502372732251,
+              "simulated_restitution": 0.7384033999855125,
+              "measured_restitution": 0.6170305245146374,
+              "simulated_rebound_height_m": 0.15688760129535917,
+              "measured_ballistic_rebound_height_m": 0.11021290663665545
+            },
+            {
+              "recording": "probe_recording_20260901_143213",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.2781185559304306,
+              "simulated_incoming_normal_speed_m_s": 2.336741999999982,
+              "measured_incoming_normal_speed_m_s": 2.3359550653544363,
+              "simulated_outgoing_normal_speed_m_s": 0.908450418930658,
+              "measured_outgoing_normal_speed_m_s": 1.151324259996066,
+              "simulated_restitution": 0.38876795937705794,
+              "measured_restitution": 0.4928708933968191,
+              "simulated_rebound_height_m": 0.041156230178396674,
+              "measured_ballistic_rebound_height_m": 0.06756103729130933
+            },
+            {
+              "recording": "probe_recording_20260901_143306",
+              "status": "no_first_rebound",
+              "equivalent_release_height_m": 0.322268891870249,
+              "measured_incoming_normal_speed_m_s": 2.5145408444672928,
+              "simulated_outgoing_normal_speed_m_s": 0.0,
+              "measured_outgoing_normal_speed_m_s": 1.602647655707773,
+              "simulated_restitution": 0.0,
+              "measured_restitution": 0.6373520077170569,
+              "simulated_rebound_height_m": 0.0,
+              "measured_ballistic_rebound_height_m": 0.1309112899258726
+            },
+            {
+              "recording": "probe_recording_20260901_143346",
+              "status": "no_first_rebound",
+              "equivalent_release_height_m": 0.3548867885911448,
+              "measured_incoming_normal_speed_m_s": 2.638726736924129,
+              "simulated_outgoing_normal_speed_m_s": 0.0,
+              "measured_outgoing_normal_speed_m_s": 1.6128575830411276,
+              "simulated_restitution": 0.0,
+              "measured_restitution": 0.6112256947535154,
+              "simulated_rebound_height_m": 0.0,
+              "measured_ballistic_rebound_height_m": 0.13258458629833167
+            }
+          ]
+        },
+        "high_quality_robust_fit": {
+          "parameters": {
+            "pair_sliding_friction": 0.35,
+            "solref_time_s": 0.003,
+            "solref_damping_ratio": 0.3647765040175735
+          },
+          "count": 3,
+          "requested_count": 5,
+          "first_rebound_success_rate": 0.6,
+          "outgoing_normal_velocity_rmse_m_s": 0.4765408279059048,
+          "rebound_height_rmse_m": 0.06056257077584448,
+          "penalized_all_event_outgoing_normal_velocity_rmse_m_s": 1.043547822897272,
+          "penalized_all_event_rebound_height_rmse_m": 0.09025412151269038,
+          "rows": [
+            {
+              "recording": "probe_recording_20260901_142344",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.3560679846315287,
+              "simulated_incoming_normal_speed_m_s": 2.6506619999999494,
+              "measured_incoming_normal_speed_m_s": 2.6431144240215168,
+              "simulated_outgoing_normal_speed_m_s": 1.7088048577674781,
+              "measured_outgoing_normal_speed_m_s": 1.5084072026797848,
+              "simulated_restitution": 0.644670975691171,
+              "measured_restitution": 0.5706931145208358,
+              "simulated_rebound_height_m": 0.14713369709416071,
+              "measured_ballistic_rebound_height_m": 0.11596800657982943
+            },
+            {
+              "recording": "probe_recording_20260901_142601",
+              "status": "no_first_rebound",
+              "equivalent_release_height_m": 0.28948039590369856,
+              "measured_incoming_normal_speed_m_s": 2.383192264092548,
+              "simulated_outgoing_normal_speed_m_s": 0.0,
+              "measured_outgoing_normal_speed_m_s": 1.470502372732251,
+              "simulated_restitution": 0.0,
+              "measured_restitution": 0.6170305245146374,
+              "simulated_rebound_height_m": 0.0,
+              "measured_ballistic_rebound_height_m": 0.11021290663665545
+            },
+            {
+              "recording": "probe_recording_20260901_143213",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.2781185559304306,
+              "simulated_incoming_normal_speed_m_s": 2.336741999999982,
+              "measured_incoming_normal_speed_m_s": 2.3359550653544363,
+              "simulated_outgoing_normal_speed_m_s": 0.8884206795432187,
+              "measured_outgoing_normal_speed_m_s": 1.151324259996066,
+              "simulated_restitution": 0.3801963073130134,
+              "measured_restitution": 0.4928708933968191,
+              "simulated_rebound_height_m": 0.03925363890721484,
+              "measured_ballistic_rebound_height_m": 0.06756103729130933
+            },
+            {
+              "recording": "probe_recording_20260901_143306",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.322268891870249,
+              "simulated_incoming_normal_speed_m_s": 2.5172459999999632,
+              "measured_incoming_normal_speed_m_s": 2.5145408444672928,
+              "simulated_outgoing_normal_speed_m_s": 0.8463435044536874,
+              "measured_outgoing_normal_speed_m_s": 1.602647655707773,
+              "simulated_restitution": 0.33621803528685706,
+              "measured_restitution": 0.6373520077170569,
+              "simulated_rebound_height_m": 0.03483389472582253,
+              "measured_ballistic_rebound_height_m": 0.1309112899258726
+            },
+            {
+              "recording": "probe_recording_20260901_143346",
+              "status": "no_first_rebound",
+              "equivalent_release_height_m": 0.3548867885911448,
+              "measured_incoming_normal_speed_m_s": 2.638726736924129,
+              "simulated_outgoing_normal_speed_m_s": 0.0,
+              "measured_outgoing_normal_speed_m_s": 1.6128575830411276,
+              "simulated_restitution": 0.0,
+              "measured_restitution": 0.6112256947535154,
+              "simulated_rebound_height_m": 0.0,
+              "measured_ballistic_rebound_height_m": 0.13258458629833167
+            }
+          ]
+        },
+        "all_five_least_squares_fit": {
+          "parameters": {
+            "pair_sliding_friction": 0.35,
+            "solref_time_s": 0.003,
+            "solref_damping_ratio": 0.355177840534317
+          },
+          "count": 3,
+          "requested_count": 5,
+          "first_rebound_success_rate": 0.6,
+          "outgoing_normal_velocity_rmse_m_s": 0.26538763321235703,
+          "rebound_height_rmse_m": 0.03913921927019038,
+          "penalized_all_event_outgoing_normal_velocity_rmse_m_s": 1.0374083939418515,
+          "penalized_all_event_rebound_height_rmse_m": 0.08867025860929442,
+          "rows": [
+            {
+              "recording": "probe_recording_20260901_142344",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.3560679846315287,
+              "simulated_incoming_normal_speed_m_s": 2.6506619999999494,
+              "measured_incoming_normal_speed_m_s": 2.6431144240215168,
+              "simulated_outgoing_normal_speed_m_s": 1.759493222431442,
+              "measured_outgoing_normal_speed_m_s": 1.5084072026797848,
+              "simulated_restitution": 0.6637938833512064,
+              "measured_restitution": 0.5706931145208358,
+              "simulated_rebound_height_m": 0.15623672865416044,
+              "measured_ballistic_rebound_height_m": 0.11596800657982943
+            },
+            {
+              "recording": "probe_recording_20260901_142601",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.28948039590369856,
+              "simulated_incoming_normal_speed_m_s": 2.3897159999999764,
+              "measured_incoming_normal_speed_m_s": 2.383192264092548,
+              "simulated_outgoing_normal_speed_m_s": 1.7708809287426128,
+              "measured_outgoing_normal_speed_m_s": 1.470502372732251,
+              "simulated_restitution": 0.7410424204142376,
+              "measured_restitution": 0.6170305245146374,
+              "simulated_rebound_height_m": 0.15803554191720426,
+              "measured_ballistic_rebound_height_m": 0.11021290663665545
+            },
+            {
+              "recording": "probe_recording_20260901_143213",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.2781185559304306,
+              "simulated_incoming_normal_speed_m_s": 2.336741999999982,
+              "measured_incoming_normal_speed_m_s": 2.3359550653544363,
+              "simulated_outgoing_normal_speed_m_s": 0.9104501821865806,
+              "measured_outgoing_normal_speed_m_s": 1.151324259996066,
+              "simulated_restitution": 0.3896237505837562,
+              "measured_restitution": 0.4928708933968191,
+              "simulated_rebound_height_m": 0.04134918820422619,
+              "measured_ballistic_rebound_height_m": 0.06756103729130933
+            },
+            {
+              "recording": "probe_recording_20260901_143306",
+              "status": "no_first_rebound",
+              "equivalent_release_height_m": 0.322268891870249,
+              "measured_incoming_normal_speed_m_s": 2.5145408444672928,
+              "simulated_outgoing_normal_speed_m_s": 0.0,
+              "measured_outgoing_normal_speed_m_s": 1.602647655707773,
+              "simulated_restitution": 0.0,
+              "measured_restitution": 0.6373520077170569,
+              "simulated_rebound_height_m": 0.0,
+              "measured_ballistic_rebound_height_m": 0.1309112899258726
+            },
+            {
+              "recording": "probe_recording_20260901_143346",
+              "status": "no_first_rebound",
+              "equivalent_release_height_m": 0.3548867885911448,
+              "measured_incoming_normal_speed_m_s": 2.638726736924129,
+              "simulated_outgoing_normal_speed_m_s": 0.0,
+              "measured_outgoing_normal_speed_m_s": 1.6128575830411276,
+              "simulated_restitution": 0.0,
+              "measured_restitution": 0.6112256947535154,
+              "simulated_rebound_height_m": 0.0,
+              "measured_ballistic_rebound_height_m": 0.13258458629833167
+            }
+          ]
+        },
+        "high_quality_least_squares_fit": {
+          "parameters": {
+            "pair_sliding_friction": 0.35,
+            "solref_time_s": 0.003,
+            "solref_damping_ratio": 0.35731832744359754
+          },
+          "count": 3,
+          "requested_count": 5,
+          "first_rebound_success_rate": 0.6,
+          "outgoing_normal_velocity_rmse_m_s": 0.26245279151120093,
+          "rebound_height_rmse_m": 0.038372421141194574,
+          "penalized_all_event_outgoing_normal_velocity_rmse_m_s": 1.0369603169682968,
+          "penalized_all_event_rebound_height_rmse_m": 0.0884689397095582,
+          "rows": [
+            {
+              "recording": "probe_recording_20260901_142344",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.3560679846315287,
+              "simulated_incoming_normal_speed_m_s": 2.6506619999999494,
+              "measured_incoming_normal_speed_m_s": 2.6431144240215168,
+              "simulated_outgoing_normal_speed_m_s": 1.7485405611122649,
+              "measured_outgoing_normal_speed_m_s": 1.5084072026797848,
+              "simulated_restitution": 0.6596618358403668,
+              "measured_restitution": 0.5706931145208358,
+              "simulated_rebound_height_m": 0.15423950752786403,
+              "measured_ballistic_rebound_height_m": 0.11596800657982943
+            },
+            {
+              "recording": "probe_recording_20260901_142601",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.28948039590369856,
+              "simulated_incoming_normal_speed_m_s": 2.3897159999999764,
+              "measured_incoming_normal_speed_m_s": 2.383192264092548,
+              "simulated_outgoing_normal_speed_m_s": 1.7684260643373473,
+              "measured_outgoing_normal_speed_m_s": 1.470502372732251,
+              "simulated_restitution": 0.740015158427765,
+              "measured_restitution": 0.6170305245146374,
+              "simulated_rebound_height_m": 0.15756805100075746,
+              "measured_ballistic_rebound_height_m": 0.11021290663665545
+            },
+            {
+              "recording": "probe_recording_20260901_143213",
+              "status": "first_rebound_found",
+              "equivalent_release_height_m": 0.2781185559304306,
+              "simulated_incoming_normal_speed_m_s": 2.336741999999982,
+              "measured_incoming_normal_speed_m_s": 2.3359550653544363,
+              "simulated_outgoing_normal_speed_m_s": 0.9059228592983617,
+              "measured_outgoing_normal_speed_m_s": 1.151324259996066,
+              "simulated_restitution": 0.38768629968493257,
+              "measured_restitution": 0.4928708933968191,
+              "simulated_rebound_height_m": 0.04091313624542518,
+              "measured_ballistic_rebound_height_m": 0.06756103729130933
+            },
+            {
+              "recording": "probe_recording_20260901_143306",
+              "status": "no_first_rebound",
+              "equivalent_release_height_m": 0.322268891870249,
+              "measured_incoming_normal_speed_m_s": 2.5145408444672928,
+              "simulated_outgoing_normal_speed_m_s": 0.0,
+              "measured_outgoing_normal_speed_m_s": 1.602647655707773,
+              "simulated_restitution": 0.0,
+              "measured_restitution": 0.6373520077170569,
+              "simulated_rebound_height_m": 0.0,
+              "measured_ballistic_rebound_height_m": 0.1309112899258726
+            },
+            {
+              "recording": "probe_recording_20260901_143346",
+              "status": "no_first_rebound",
+              "equivalent_release_height_m": 0.3548867885911448,
+              "measured_incoming_normal_speed_m_s": 2.638726736924129,
+              "simulated_outgoing_normal_speed_m_s": 0.0,
+              "measured_outgoing_normal_speed_m_s": 1.6128575830411276,
+              "simulated_restitution": 0.0,
+              "measured_restitution": 0.6112256947535154,
+              "simulated_rebound_height_m": 0.0,
+              "measured_ballistic_rebound_height_m": 0.13258458629833167
+            }
+          ]
+        }
+      },
+      "status": "superseded_velocity_derived_sensitivity_only",
+      "used_for_decision": false
+    },
+    "note": "friction and solref time remain fixed because the recordings do not observe ball spin or millisecond contact force/duration"
+  },
+  "candidate_mjx_parameters": {
+    "ball_mass_kg": 0.004,
+    "pair_sliding_friction": 0.35,
+    "solref_time_s": 0.003,
+    "solref_damping_ratio_all_five": 0.35613038706791794,
+    "solref_damping_ratio_high_quality": 0.3647765040175735,
+    "solref_damping_ratio_all_five_least_squares": 0.355177840534317,
+    "solref_damping_ratio_high_quality_least_squares": 0.35731832744359754,
+    "solimp": [
+      0.9,
+      0.995,
+      0.001
+    ],
+    "margin_m": 0.001,
+    "condim": 3,
+    "solref_damping_ratio_history_position_fit": 0.13108533844345505
+  },
+  "historical_fall_reconstruction": {
+    "schema_version": 1,
+    "method": "release-to-impact fresh positions -> robust continuous paper gravity/drag state; causal leave-tail-out validation; first rebound positions only",
+    "does_not_use_impact_velocity_to_infer_release_height": true,
+    "paper_model": {
+      "gravity_m_s2": 9.8,
+      "drag_coefficient_per_m": 0.13545,
+      "integration_step_s": 0.001
+    },
+    "record_count": 5,
+    "aggregate": {
+      "paper_drag_causal_holdout_rmse_median_mm": 2.690704509268412,
+      "paper_drag_causal_holdout_rmse_max_mm": 7.867471934970905,
+      "gravity_only_causal_holdout_rmse_median_mm": 3.1058857840416945,
+      "history_restitution_median": 0.5803299203088195,
+      "history_restitution_range": [
+        0.4460583801987834,
+        0.6195368457906358
+      ]
+    },
+    "records": [
+      {
+        "recording": "probe_recording_20260901_142344",
+        "impact_time_s": 1788243825.9749207,
+        "incoming_window": {
+          "start_s_before_impact": 0.23537468910217285,
+          "end_s_before_impact": 0.023929357528686523,
+          "sample_count": 20
+        },
+        "post_first_rebound_window": {
+          "start_s_after_impact": 0.043218135833740234,
+          "end_s_after_impact": 0.2321326732635498,
+          "sample_count": 18
+        },
+        "incoming_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788243825.739546,
+          "position_m": [
+            -0.1094838122267409,
+            -0.4135227387595317,
+            1.4274972458895352
+          ],
+          "velocity_m_s": [
+            0.05041429391002361,
+            -0.013657439616813262,
+            -0.42019303471763686
+          ],
+          "sample_count": 20,
+          "span_s": 0.21144533157348633,
+          "rmse_mm": 1.8383161674577821,
+          "axis_rmse_mm": [
+            1.058938571559613,
+            2.9742327701469926,
+            0.41328867061297464
+          ],
+          "max_residual_mm": 11.07593750264267
+        },
+        "incoming_gravity_only_fit": {
+          "model": "gravity_only",
+          "drag_coefficient_per_m": 0.0,
+          "reference_time_s": 1788243825.739546,
+          "position_m": [
+            -0.10944645886361459,
+            -0.4135167446009366,
+            1.4266896997909833
+          ],
+          "velocity_m_s": [
+            0.04961642423816296,
+            -0.013585352204710995,
+            -0.4024925923250435
+          ],
+          "sample_count": 20,
+          "span_s": 0.21144533157348633,
+          "rmse_mm": 1.8943952395669064,
+          "axis_rmse_mm": [
+            1.0620357784575625,
+            2.973692741075633,
+            0.8918696418375265
+          ],
+          "max_residual_mm": 11.123467253567608
+        },
+        "causal_leave_tail_out": {
+          "training_sample_count": 14,
+          "holdout_sample_count": 6,
+          "paper_drag_position_rmse_mm": 2.690704509268412,
+          "paper_drag_axis_rmse_mm": [
+            0.8880217246844432,
+            4.477074327657338,
+            0.9417511081555214
+          ],
+          "gravity_only_position_rmse_mm": 3.0683150340264285
+        },
+        "post_first_rebound_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788243825.9749207,
+          "position_m": [
+            -0.10708699816871046,
+            -0.4366593185621008,
+            1.0935189520877897
+          ],
+          "velocity_m_s": [
+            0.09721618083314723,
+            0.13962724673322083,
+            1.5147190443538991
+          ],
+          "sample_count": 18,
+          "span_s": 0.18891453742980957,
+          "rmse_mm": 0.5021740503782218,
+          "axis_rmse_mm": [
+            0.6066054923973766,
+            0.4647164699970875,
+            0.4154572297199664
+          ],
+          "max_residual_mm": 1.6295668405899377
+        },
+        "history_state_at_impact": {
+          "incoming_position_m": [
+            -0.09783504965160245,
+            -0.41667843646233926,
+            1.0644431242126293
+          ],
+          "incoming_velocity_m_s": [
+            0.047993144515141146,
+            -0.013001540285506428,
+            -2.637841070628627
+          ],
+          "incoming_normal_velocity_m_s": -2.6368688629123334,
+          "outgoing_position_m": [
+            -0.10708699816871046,
+            -0.4366593185621008,
+            1.0935189520877897
+          ],
+          "outgoing_velocity_m_s": [
+            0.09721618083314723,
+            0.13962724673322083,
+            1.5147190443538991
+          ],
+          "outgoing_normal_velocity_m_s": 1.5181364029875857,
+          "normal_restitution": 0.575734510100307,
+          "gravity_only_incoming_normal_velocity_m_s": -2.7081762030241254
+        },
+        "old_six_frame_impact_fit_for_diagnostic_only": {
+          "incoming_normal_velocity_m_s": -2.6442918466710355,
+          "outgoing_normal_velocity_m_s": 1.5072297797869991,
+          "normal_restitution": 0.5699937326072718
+        },
+        "mjx_initial_state": {
+          "time_s_before_impact": 0.23537468910217285,
+          "position_local_m": [
+            0.006801453734292362,
+            0.03994709297931248,
+            0.3839982024158824
+          ],
+          "velocity_local_m_s": [
+            0.048090965124953026,
+            0.0009281615871968817,
+            -0.4195212700701636
+          ],
+          "gravity_local_m_s2": [
+            -0.05689192142400621,
+            0.3485518600530867,
+            -9.793634407620608
+          ],
+          "contact_center_local_m": [
+            0.016341730381697343,
+            0.04970596219875151,
+            0.021
+          ]
+        },
+        "target_first_rebound_normal_position_range_m": [
+          0.0774348179044841,
+          0.13755245278113226
+        ]
+      },
+      {
+        "recording": "probe_recording_20260901_142601",
+        "impact_time_s": 1788243963.3569593,
+        "incoming_window": {
+          "start_s_before_impact": 0.24647879600524902,
+          "end_s_before_impact": 0.023193836212158203,
+          "sample_count": 21
+        },
+        "post_first_rebound_window": {
+          "start_s_after_impact": 0.042875051498413086,
+          "end_s_after_impact": 0.23227858543395996,
+          "sample_count": 17
+        },
+        "incoming_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788243963.1104805,
+          "position_m": [
+            -0.11171218668235829,
+            -0.4139090398251037,
+            1.3910195978781243
+          ],
+          "velocity_m_s": [
+            0.08709733419180354,
+            -0.0244186906338076,
+            -0.05857706921228481
+          ],
+          "sample_count": 21,
+          "span_s": 0.22328495979309082,
+          "rmse_mm": 0.7215206606478367,
+          "axis_rmse_mm": [
+            0.5404671843664736,
+            0.9410729041852388,
+            0.6197202617765606
+          ],
+          "max_residual_mm": 2.4443903278246104
+        },
+        "incoming_gravity_only_fit": {
+          "model": "gravity_only",
+          "drag_coefficient_per_m": 0.0,
+          "reference_time_s": 1788243963.1104805,
+          "position_m": [
+            -0.11166718229056258,
+            -0.4139167788328829,
+            1.3904930000914533
+          ],
+          "velocity_m_s": [
+            0.08614745203279425,
+            -0.024197230452202127,
+            -0.04840208481573919
+          ],
+          "sample_count": 21,
+          "span_s": 0.22328495979309082,
+          "rmse_mm": 0.8451586929169685,
+          "axis_rmse_mm": [
+            0.5471672600157325,
+            0.9354252196865139,
+            0.9841073602918887
+          ],
+          "max_residual_mm": 3.023253839806366
+        },
+        "causal_leave_tail_out": {
+          "training_sample_count": 15,
+          "holdout_sample_count": 6,
+          "paper_drag_position_rmse_mm": 1.6443032650559797,
+          "paper_drag_axis_rmse_mm": [
+            0.5597827034524462,
+            2.467849745953772,
+            1.3067366370974067
+          ],
+          "gravity_only_position_rmse_mm": 2.0979154026785145
+        },
+        "post_first_rebound_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788243963.3569593,
+          "position_m": [
+            -0.1003828218733973,
+            -0.44000394566305223,
+            1.0806307484327247
+          ],
+          "velocity_m_s": [
+            0.07029138840393702,
+            0.11149597023240226,
+            1.4824830087636496
+          ],
+          "sample_count": 17,
+          "span_s": 0.18940353393554688,
+          "rmse_mm": 0.7061457372193655,
+          "axis_rmse_mm": [
+            0.5483017035671749,
+            0.772310433321642,
+            0.7738392875960193
+          ],
+          "max_residual_mm": 1.8983800397322228
+        },
+        "history_state_at_impact": {
+          "incoming_position_m": [
+            -0.09054743946917962,
+            -0.41984280828468956,
+            1.084358934086837
+          ],
+          "incoming_velocity_m_s": [
+            0.08353641386826274,
+            -0.023420347658571466,
+            -2.4068337380409077
+          ],
+          "incoming_normal_velocity_m_s": -2.4065867100865317,
+          "outgoing_position_m": [
+            -0.1003828218733973,
+            -0.44000394566305223,
+            1.0806307484327247
+          ],
+          "outgoing_velocity_m_s": [
+            0.07029138840393702,
+            0.11149597023240226,
+            1.4824830087636496
+          ],
+          "outgoing_normal_velocity_m_s": 1.485078758910362,
+          "normal_restitution": 0.6170892379177828,
+          "gravity_only_incoming_normal_velocity_m_s": -2.4636529685068513
+        },
+        "old_six_frame_impact_fit_for_diagnostic_only": {
+          "incoming_normal_velocity_m_s": -2.3844925470449314,
+          "outgoing_normal_velocity_m_s": 1.469202089672737,
+          "normal_restitution": 0.6161487447270484
+        },
+        "mjx_initial_state": {
+          "time_s_before_impact": 0.24647879600524902,
+          "position_local_m": [
+            0.004366098034601928,
+            0.0408444318197597,
+            0.32779553686377977
+          ],
+          "velocity_local_m_s": [
+            0.08674118971196569,
+            -0.022343769145213733,
+            -0.058615703547059875
+          ],
+          "gravity_local_m_s2": [
+            -0.05705558229912634,
+            0.34903296503499986,
+            -9.79361632135175
+          ],
+          "contact_center_local_m": [
+            0.023743877090109094,
+            0.04583633416093845,
+            0.021
+          ]
+        },
+        "target_first_rebound_normal_position_range_m": [
+          0.07565769858335994,
+          0.13234980600630578
+        ]
+      },
+      {
+        "recording": "probe_recording_20260901_143213",
+        "impact_time_s": 1788244335.30054,
+        "incoming_window": {
+          "start_s_before_impact": 0.28177452087402344,
+          "end_s_before_impact": 0.025443077087402344,
+          "sample_count": 20
+        },
+        "post_first_rebound_window": {
+          "start_s_after_impact": 0.0411677360534668,
+          "end_s_after_impact": 0.21927833557128906,
+          "sample_count": 15
+        },
+        "incoming_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788244335.0187654,
+          "position_m": [
+            -0.11497702990506913,
+            -0.4623104286912334,
+            1.3694926921114579
+          ],
+          "velocity_m_s": [
+            0.03793405584802242,
+            -0.030733304032361672,
+            0.11581489968441393
+          ],
+          "sample_count": 20,
+          "span_s": 0.2563314437866211,
+          "rmse_mm": 3.5215450186638013,
+          "axis_rmse_mm": [
+            1.5705552328207688,
+            1.9493812088268088,
+            5.562113547812534
+          ],
+          "max_residual_mm": 21.52801742773249
+        },
+        "incoming_gravity_only_fit": {
+          "model": "gravity_only",
+          "drag_coefficient_per_m": 0.0,
+          "reference_time_s": 1788244335.0187654,
+          "position_m": [
+            -0.11496710138734302,
+            -0.4623338902418398,
+            1.3692140853558652
+          ],
+          "velocity_m_s": [
+            0.03764794957944457,
+            -0.03034672705362882,
+            0.12099858146108028
+          ],
+          "sample_count": 20,
+          "span_s": 0.2563314437866211,
+          "rmse_mm": 3.898361074467637,
+          "axis_rmse_mm": [
+            1.5587934898286957,
+            1.9547741611327254,
+            6.272214763208362
+          ],
+          "max_residual_mm": 24.208445499306134
+        },
+        "causal_leave_tail_out": {
+          "training_sample_count": 14,
+          "holdout_sample_count": 6,
+          "paper_drag_position_rmse_mm": 7.867471934970905,
+          "paper_drag_axis_rmse_mm": [
+            4.981736059982735,
+            3.5615490149310745,
+            12.17329118955
+          ],
+          "gravity_only_position_rmse_mm": 8.74299871478358
+        },
+        "post_first_rebound_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788244335.30054,
+          "position_m": [
+            -0.11687961399010852,
+            -0.492514605469314,
+            1.1163660476480082
+          ],
+          "velocity_m_s": [
+            -0.09222848630170653,
+            0.06459431586518118,
+            1.1413399016794947
+          ],
+          "sample_count": 15,
+          "span_s": 0.17811059951782227,
+          "rmse_mm": 1.1264747633296397,
+          "axis_rmse_mm": [
+            1.0021516474595196,
+            1.3013659384292515,
+            1.0530787943197921
+          ],
+          "max_residual_mm": 4.885262895596197
+        },
+        "history_state_at_impact": {
+          "incoming_position_m": [
+            -0.10444976010809123,
+            -0.47083938179335955,
+            1.0199966393924162
+          ],
+          "incoming_velocity_m_s": [
+            0.03616831681058886,
+            -0.029302742668275827,
+            -2.5638367459358484
+          ],
+          "incoming_normal_velocity_m_s": -2.5634206890585167,
+          "outgoing_position_m": [
+            -0.11687961399010852,
+            -0.492514605469314,
+            1.1163660476480082
+          ],
+          "outgoing_velocity_m_s": [
+            -0.09222848630170653,
+            0.06459431586518118,
+            1.1413399016794947
+          ],
+          "outgoing_normal_velocity_m_s": 1.1434352803294912,
+          "normal_restitution": 0.4460583801987834,
+          "gravity_only_incoming_normal_velocity_m_s": -2.6399715960988583
+        },
+        "old_six_frame_impact_fit_for_diagnostic_only": {
+          "incoming_normal_velocity_m_s": -2.335426002984267,
+          "outgoing_normal_velocity_m_s": 1.1518533222369887,
+          "normal_restitution": 0.4932090850941631
+        },
+        "mjx_initial_state": {
+          "time_s_before_impact": 0.28177452087402344,
+          "position_local_m": [
+            0.0009663421478702788,
+            -0.006763823856937564,
+            0.37063352917594294
+          ],
+          "velocity_local_m_s": [
+            0.03862272511426996,
+            -0.034822512501907446,
+            0.11389417814985595
+          ],
+          "gravity_local_m_s2": [
+            -0.05714985344503648,
+            0.3491137333195025,
+            -9.793612892873547
+          ],
+          "contact_center_local_m": [
+            0.00945353237486663,
+            -0.002836968293816299,
+            0.021
+          ]
+        },
+        "target_first_rebound_normal_position_range_m": [
+          0.03614852321500234,
+          0.08767099142611177
+        ]
+      },
+      {
+        "recording": "probe_recording_20260901_143306",
+        "impact_time_s": 1788244387.9743311,
+        "incoming_window": {
+          "start_s_before_impact": 0.26602721214294434,
+          "end_s_before_impact": 0.021298885345458984,
+          "sample_count": 23
+        },
+        "post_first_rebound_window": {
+          "start_s_after_impact": 0.04548239707946777,
+          "end_s_after_impact": 0.22352027893066406,
+          "sample_count": 17
+        },
+        "incoming_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788244387.708304,
+          "position_m": [
+            -0.09378288934800588,
+            -0.4661534080603549,
+            1.3952420506872303
+          ],
+          "velocity_m_s": [
+            0.012766927268834138,
+            0.0017245581498457536,
+            0.03988732114547389
+          ],
+          "sample_count": 23,
+          "span_s": 0.24472832679748535,
+          "rmse_mm": 0.9116450107723726,
+          "axis_rmse_mm": [
+            0.7817408467626468,
+            1.1751428028221484,
+            0.707962229555082
+          ],
+          "max_residual_mm": 2.591388288568777
+        },
+        "incoming_gravity_only_fit": {
+          "model": "gravity_only",
+          "drag_coefficient_per_m": 0.0,
+          "reference_time_s": 1788244387.708304,
+          "position_m": [
+            -0.09377092268746545,
+            -0.46614200145086987,
+            1.3945441851202491
+          ],
+          "velocity_m_s": [
+            0.012587331770162715,
+            0.0016188182692517589,
+            0.05154588341054991
+          ],
+          "sample_count": 23,
+          "span_s": 0.24472832679748535,
+          "rmse_mm": 1.0514042968662471,
+          "axis_rmse_mm": [
+            0.7853104712574583,
+            1.1755166741674086,
+            1.147955138014638
+          ],
+          "max_residual_mm": 3.1364941291521724
+        },
+        "causal_leave_tail_out": {
+          "training_sample_count": 17,
+          "holdout_sample_count": 6,
+          "paper_drag_position_rmse_mm": 2.5776771562383733,
+          "paper_drag_axis_rmse_mm": [
+            2.1664548117216444,
+            3.373033100091824,
+            1.965293825317861
+          ],
+          "gravity_only_position_rmse_mm": 3.1058857840416945
+        },
+        "post_first_rebound_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788244387.9743311,
+          "position_m": [
+            -0.09833797267713393,
+            -0.48676951908491317,
+            1.0911838546585118
+          ],
+          "velocity_m_s": [
+            0.055805945314840226,
+            0.13268259941126342,
+            1.4420038633586267
+          ],
+          "sample_count": 17,
+          "span_s": 0.1780378818511963,
+          "rmse_mm": 1.1966770107120268,
+          "axis_rmse_mm": [
+            0.6756882577246908,
+            1.4897512668387778,
+            1.2728684712982903
+          ],
+          "max_residual_mm": 5.845246196971636
+        },
+        "history_state_at_impact": {
+          "incoming_position_m": [
+            -0.09043571289933755,
+            -0.46570127104241993,
+            1.0652872820228596
+          ],
+          "incoming_velocity_m_s": [
+            0.01220838229807194,
+            0.0016491098245674585,
+            -2.492369164595659
+          ],
+          "incoming_normal_velocity_m_s": -2.490761308001817,
+          "outgoing_position_m": [
+            -0.09833797267713393,
+            -0.48676951908491317,
+            1.0911838546585118
+          ],
+          "outgoing_velocity_m_s": [
+            0.055805945314840226,
+            0.13268259941126342,
+            1.4420038633586267
+          ],
+          "outgoing_normal_velocity_m_s": 1.4454633113809854,
+          "normal_restitution": 0.5803299203088195,
+          "gravity_only_incoming_normal_velocity_m_s": -2.5538751677346436
+        },
+        "old_six_frame_impact_fit_for_diagnostic_only": {
+          "incoming_normal_velocity_m_s": -2.5184586528418573,
+          "outgoing_normal_velocity_m_s": 1.5987298470890174,
+          "normal_restitution": 0.6348048816624376
+        },
+        "mjx_initial_state": {
+          "time_s_before_impact": 0.26602721214294434,
+          "position_local_m": [
+            0.022303138321961492,
+            -0.011505204061740585,
+            0.3507436413446013
+          ],
+          "velocity_local_m_s": [
+            0.013485063507312081,
+            -1.792150902250097e-05,
+            0.04376643995905834
+          ],
+          "gravity_local_m_s2": [
+            -0.05686004253352353,
+            0.3486831916233535,
+            -9.79362991783141
+          ],
+          "contact_center_local_m": [
+            0.023735939288759736,
+            0.0006864101304994095,
+            0.021
+          ]
+        },
+        "target_first_rebound_normal_position_range_m": [
+          0.07659965190505212,
+          0.12685044342802557
+        ]
+      },
+      {
+        "recording": "probe_recording_20260901_143346",
+        "impact_time_s": 1788244428.2925646,
+        "incoming_window": {
+          "start_s_before_impact": 0.17999029159545898,
+          "end_s_before_impact": 0.024158239364624023,
+          "sample_count": 15
+        },
+        "post_first_rebound_window": {
+          "start_s_after_impact": 0.0426936149597168,
+          "end_s_after_impact": 0.22081661224365234,
+          "sample_count": 17
+        },
+        "incoming_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788244428.1125743,
+          "position_m": [
+            -0.11545866823557252,
+            -0.39297126833322904,
+            1.4139994582702435
+          ],
+          "velocity_m_s": [
+            0.02078030237066517,
+            -0.0024917813677018154,
+            -0.9268168183245928
+          ],
+          "sample_count": 15,
+          "span_s": 0.15583205223083496,
+          "rmse_mm": 3.490146347645408,
+          "axis_rmse_mm": [
+            2.4809133987159244,
+            5.348231162442489,
+            1.3359853012285052
+          ],
+          "max_residual_mm": 18.938709529791662
+        },
+        "incoming_gravity_only_fit": {
+          "model": "gravity_only",
+          "drag_coefficient_per_m": 0.0,
+          "reference_time_s": 1788244428.1125743,
+          "position_m": [
+            -0.11543068400004078,
+            -0.39294527639466215,
+            1.4131789373208616
+          ],
+          "velocity_m_s": [
+            0.02027660929095093,
+            -0.002729370050885172,
+            -0.9040047396589513
+          ],
+          "sample_count": 15,
+          "span_s": 0.15583205223083496,
+          "rmse_mm": 3.477837033652788,
+          "axis_rmse_mm": [
+            2.4869837772024517,
+            5.3540752320436,
+            1.1978486546678428
+          ],
+          "max_residual_mm": 18.840936693826894
+        },
+        "causal_leave_tail_out": {
+          "training_sample_count": 10,
+          "holdout_sample_count": 5,
+          "paper_drag_position_rmse_mm": 4.466070207105978,
+          "paper_drag_axis_rmse_mm": [
+            4.2384990087157925,
+            6.236946821656613,
+            1.7242301996373972
+          ],
+          "gravity_only_position_rmse_mm": 4.386628958522747
+        },
+        "post_first_rebound_paper_fit": {
+          "model": "paper_gravity_quadratic_drag",
+          "drag_coefficient_per_m": 0.13545,
+          "reference_time_s": 1788244428.2925646,
+          "position_m": [
+            -0.1237507263051683,
+            -0.41599248149678286,
+            1.075404423519837
+          ],
+          "velocity_m_s": [
+            0.03852011742234851,
+            0.1408691088984131,
+            1.6111741575926533
+          ],
+          "sample_count": 17,
+          "span_s": 0.17812299728393555,
+          "rmse_mm": 0.7084076500282469,
+          "axis_rmse_mm": [
+            0.44450857514974595,
+            0.7958114255658255,
+            0.821352845866416
+          ],
+          "max_residual_mm": 2.2588926061506274
+        },
+        "history_state_at_impact": {
+          "incoming_position_m": [
+            -0.11178521102132767,
+            -0.39341175529430583,
+            1.0945303981623598
+          ],
+          "incoming_velocity_m_s": [
+            0.019900098458990163,
+            -0.0023862354681394382,
+            -2.608151062418783
+          ],
+          "incoming_normal_velocity_m_s": -2.6066527280343297,
+          "outgoing_position_m": [
+            -0.1237507263051683,
+            -0.41599248149678286,
+            1.075404423519837
+          ],
+          "outgoing_velocity_m_s": [
+            0.03852011742234851,
+            0.1408691088984131,
+            1.6111741575926533
+          ],
+          "outgoing_normal_velocity_m_s": 1.6149174091979448,
+          "normal_restitution": 0.6195368457906358,
+          "gravity_only_incoming_normal_velocity_m_s": -2.6663867441899303
+        },
+        "old_six_frame_impact_fit_for_diagnostic_only": {
+          "incoming_normal_velocity_m_s": -2.6398913576341507,
+          "outgoing_normal_velocity_m_s": 1.6116929622330884,
+          "normal_restitution": 0.6105148825811811
+        },
+        "mjx_initial_state": {
+          "time_s_before_impact": 0.17999029159545898,
+          "position_local_m": [
+            0.000759138268978436,
+            0.06094919965091036,
+            0.3402980147362235
+          ],
+          "velocity_local_m_s": [
+            0.015471113692312636,
+            0.030580831471227792,
+            -0.9252582264108979
+          ],
+          "gravity_local_m_s2": [
+            -0.05709436341535112,
+            0.3490689023280343,
+            -9.793614814515308
+          ],
+          "contact_center_local_m": [
+            0.0025712290834132,
+            0.07188824875350916,
+            0.021
+          ]
+        },
+        "target_first_rebound_normal_position_range_m": [
+          0.08096347729238558,
+          0.1525675365034333
+        ]
+      }
+    ]
+  },
+  "mjx_history_replay": {
+    "schema_version": 1,
+    "backend": "MJX history-state full drop and first-rebound position replay",
+    "mujoco_version": "3.10.0",
+    "jax_version": "0.6.2",
+    "jax_devices": [
+      "TFRT_CPU_0"
+    ],
+    "timestep_s": 0.0002,
+    "steps": 2556,
+    "duration_s": 0.5112,
+    "initialization": "fitted state at the first measured falling sample; rigid position-history alignment at detected impact; no v^2/(2g) release-height inference",
+    "flight_force": "per-record local gravity plus paper quadratic drag applied as MJX xfrc",
+    "target": "continuous first-rebound normal positions, not logged velocity",
+    "fit_all": {
+      "solref_damping_ratio": 0.13108533844345505,
+      "objective": 10.420421871647335,
+      "success": true,
+      "event_count": 5,
+      "global_grid_step": 0.0025000000000000022,
+      "best_grid_damping_ratio": 0.13,
+      "best_grid_objective": 10.565248570256497,
+      "profile_damping_grid": [
+        0.05,
+        0.052500000000000005,
+        0.055,
+        0.0575,
+        0.060000000000000005,
+        0.0625,
+        0.065,
+        0.0675,
+        0.07,
+        0.07250000000000001,
+        0.07500000000000001,
+        0.0775,
+        0.08,
+        0.0825,
+        0.085,
+        0.0875,
+        0.09,
+        0.0925,
+        0.095,
+        0.0975,
+        0.1,
+        0.10250000000000001,
+        0.10500000000000001,
+        0.10750000000000001,
+        0.11,
+        0.1125,
+        0.115,
+        0.11750000000000001,
+        0.12000000000000001,
+        0.1225,
+        0.125,
+        0.1275,
+        0.13,
+        0.1325,
+        0.135,
+        0.1375,
+        0.14,
+        0.14250000000000002,
+        0.14500000000000002,
+        0.14750000000000002,
+        0.15000000000000002,
+        0.15250000000000002,
+        0.155,
+        0.1575,
+        0.16,
+        0.1625,
+        0.165,
+        0.1675,
+        0.16999999999999998,
+        0.1725,
+        0.175,
+        0.1775,
+        0.18,
+        0.1825,
+        0.185,
+        0.1875,
+        0.19,
+        0.1925,
+        0.195,
+        0.1975,
+        0.2,
+        0.2025,
+        0.20500000000000002,
+        0.20750000000000002,
+        0.21000000000000002,
+        0.21250000000000002,
+        0.21500000000000002,
+        0.21750000000000003,
+        0.22000000000000003,
+        0.22250000000000003,
+        0.22500000000000003,
+        0.22749999999999998,
+        0.22999999999999998,
+        0.23249999999999998,
+        0.235,
+        0.2375,
+        0.24,
+        0.2425,
+        0.245,
+        0.2475,
+        0.25,
+        0.2525,
+        0.255,
+        0.2575,
+        0.26,
+        0.2625,
+        0.265,
+        0.2675,
+        0.27,
+        0.2725,
+        0.275,
+        0.2775,
+        0.28,
+        0.28250000000000003,
+        0.28500000000000003,
+        0.28750000000000003,
+        0.29,
+        0.2925,
+        0.295,
+        0.2975,
+        0.3,
+        0.3025,
+        0.305,
+        0.3075,
+        0.31,
+        0.3125,
+        0.315,
+        0.3175,
+        0.32,
+        0.3225,
+        0.325,
+        0.3275,
+        0.33,
+        0.3325,
+        0.335,
+        0.3375,
+        0.33999999999999997,
+        0.34249999999999997,
+        0.345,
+        0.3475,
+        0.35,
+        0.3525,
+        0.355,
+        0.3575,
+        0.36,
+        0.3625,
+        0.365,
+        0.3675,
+        0.37,
+        0.3725,
+        0.375,
+        0.3775,
+        0.38,
+        0.3825,
+        0.385,
+        0.3875,
+        0.39,
+        0.3925,
+        0.395,
+        0.3975,
+        0.4,
+        0.40249999999999997,
+        0.40499999999999997,
+        0.4075,
+        0.41,
+        0.4125,
+        0.415,
+        0.4175,
+        0.42,
+        0.4225,
+        0.425,
+        0.4275,
+        0.43,
+        0.4325,
+        0.435,
+        0.4375,
+        0.44,
+        0.4425,
+        0.445,
+        0.4475,
+        0.45,
+        0.4525,
+        0.455,
+        0.4575,
+        0.46,
+        0.4625,
+        0.465,
+        0.46749999999999997,
+        0.47,
+        0.4725,
+        0.475,
+        0.4775,
+        0.48,
+        0.4825,
+        0.485,
+        0.4875,
+        0.49,
+        0.4925,
+        0.495,
+        0.4975,
+        0.5
+      ],
+      "profile_objective": [
+        35.082861811820514,
+        37.189782504066606,
+        34.185380906511135,
+        33.21916680573351,
+        31.50636607601215,
+        30.249791559487825,
+        29.675971194187063,
+        31.32349895197247,
+        31.06556457372568,
+        31.25268467200807,
+        30.141195582089733,
+        27.947911138242784,
+        26.2174270943221,
+        24.70199214336166,
+        23.278203164357066,
+        22.21124300773426,
+        21.806329256856024,
+        21.32788082115688,
+        21.383998094685044,
+        21.0591911421678,
+        20.04754229181898,
+        17.869898333567598,
+        16.86566616618611,
+        15.97802907988041,
+        15.22578735427857,
+        14.760814606483688,
+        14.56159579345736,
+        14.0539193363358,
+        13.980824535610456,
+        13.688320449516382,
+        13.043817260835832,
+        12.237745363632396,
+        10.565248570256497,
+        14.801408882026019,
+        14.474790855746264,
+        14.245477041062173,
+        14.025481872092039,
+        13.888044429682697,
+        13.728577945056509,
+        13.554709625824277,
+        13.272323740241337,
+        12.913180087340388,
+        12.544509542918757,
+        12.324781446135264,
+        12.223916242212415,
+        12.148228544767175,
+        12.142350634303906,
+        12.11719383932544,
+        12.079652961170444,
+        12.06794507890816,
+        12.083178183821847,
+        13.595901738072683,
+        13.54577410564563,
+        13.5184877218975,
+        13.613155401069955,
+        14.09744651399949,
+        14.441404172662619,
+        14.81379986256296,
+        14.871913127981358,
+        14.936104551516445,
+        15.150498845000902,
+        15.27398778184885,
+        15.360276051767352,
+        15.626211652345035,
+        15.803249001450421,
+        16.004110769092286,
+        16.372362994919527,
+        16.636723022167036,
+        16.773595839145738,
+        16.887800924711094,
+        17.11973428023914,
+        17.37520271689241,
+        17.446736121865847,
+        17.650495661551638,
+        17.80405574125539,
+        18.27726350577287,
+        18.371973312706764,
+        18.40189579796864,
+        18.433792213888278,
+        18.51928238163965,
+        18.73802520468376,
+        19.045568696951925,
+        19.21049565672838,
+        19.662769734783488,
+        19.820497828904415,
+        20.091581139763452,
+        20.298838288074027,
+        20.476872210141405,
+        20.57005210636359,
+        21.00530990991904,
+        21.113979175275336,
+        21.23068930051488,
+        21.41932404372256,
+        21.649842993452065,
+        22.096693884022663,
+        22.367808350534368,
+        22.443712094950357,
+        22.68637871524536,
+        22.929509319171416,
+        23.12899327980624,
+        23.412701754837762,
+        23.618601169421538,
+        23.98909917012089,
+        24.320539226900074,
+        24.284535102565314,
+        24.935104867738858,
+        25.191735612145997,
+        25.277483618709624,
+        25.439341317286946,
+        26.11006918093613,
+        26.379534187346223,
+        26.63411085618076,
+        26.836803458446486,
+        26.864751352549483,
+        26.845386419776247,
+        27.089475605833364,
+        27.228474670748994,
+        27.112856092478175,
+        27.32840527258284,
+        27.461909357696463,
+        27.79647943889056,
+        28.181665878900922,
+        28.36299409608762,
+        28.588380647320236,
+        28.596124112961924,
+        28.673002284366454,
+        28.85658080213628,
+        29.1773530709939,
+        29.1743018806067,
+        29.580164357671787,
+        29.917542957829216,
+        30.129319094399555,
+        30.471006611824322,
+        30.623140895229653,
+        30.764295198108734,
+        30.925297457808153,
+        31.177601035041448,
+        31.28264812669787,
+        31.564147916911416,
+        31.95302863678708,
+        32.08101062667105,
+        32.31672642071525,
+        32.59027511007428,
+        32.66342514968151,
+        32.80316066508234,
+        32.84115320134403,
+        32.92741452672807,
+        33.197699767491635,
+        33.171028401134684,
+        33.41897132222717,
+        33.55684958825494,
+        33.84586621139353,
+        33.159513169013174,
+        33.34285819545824,
+        34.461238117669446,
+        34.69744493101646,
+        34.56783712826359,
+        35.01583573828148,
+        34.84491326952961,
+        35.18949962945582,
+        35.265050178906854,
+        35.27880308582296,
+        35.51846973087773,
+        35.0164320466872,
+        34.98946657248762,
+        34.94888704334939,
+        35.5203050566952,
+        36.41521299819898,
+        34.906180389177806,
+        34.96035211229235,
+        35.40656922178891,
+        35.49784034590918,
+        35.694618686385,
+        35.90557191899085,
+        35.13785141631617,
+        35.343536858361304,
+        35.41612089717443,
+        36.32145818167794,
+        36.317594085644956,
+        36.446812596415,
+        36.46128951030755
+      ]
+    },
+    "fit_high_quality": {
+      "solref_damping_ratio": 0.13108533844345505,
+      "objective": 7.491360890234827,
+      "success": true,
+      "event_count": 4,
+      "global_grid_step": 0.0025000000000000022,
+      "best_grid_damping_ratio": 0.13,
+      "best_grid_objective": 7.723894467846453
+    },
+    "leave_one_recording_out": [
+      {
+        "solref_damping_ratio": 0.13108533844345505,
+        "objective": 8.057646331794723,
+        "success": true,
+        "event_count": 4,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.13,
+        "best_grid_objective": 8.203731674000288,
+        "held_out_recording": "probe_recording_20260901_142344"
+      },
+      {
+        "solref_damping_ratio": 0.1840898185420691,
+        "objective": 9.287847305171859,
+        "success": true,
+        "event_count": 4,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.1825,
+        "best_grid_objective": 9.30954489257897,
+        "held_out_recording": "probe_recording_20260901_142601"
+      },
+      {
+        "solref_damping_ratio": 0.13108533844345505,
+        "objective": 7.491360890234827,
+        "success": true,
+        "event_count": 4,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.13,
+        "best_grid_objective": 7.723894467846453,
+        "held_out_recording": "probe_recording_20260901_143213"
+      },
+      {
+        "solref_damping_ratio": 0.13108568633488354,
+        "objective": 11.649099538364297,
+        "success": true,
+        "event_count": 4,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.13,
+        "best_grid_objective": 11.697886568493384,
+        "held_out_recording": "probe_recording_20260901_143306"
+      },
+      {
+        "solref_damping_ratio": 0.13108533844345505,
+        "objective": 12.223497626604415,
+        "success": true,
+        "event_count": 4,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.13,
+        "best_grid_objective": 12.309968197127043,
+        "held_out_recording": "probe_recording_20260901_143346"
+      }
+    ],
+    "leave_one_recording_out_damping_range": [
+      0.13108533844345505,
+      0.1840898185420691
+    ],
+    "leave_one_recording_out_damping_span": 0.053004480098614054,
+    "all_vs_high_quality_damping_delta": 0.0,
+    "per_recording_fit": [
+      {
+        "solref_damping_ratio": 0.1358838251701131,
+        "objective": 19.619253185959142,
+        "success": true,
+        "event_count": 1,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.135,
+        "best_grid_objective": 19.64115023692595,
+        "recording": "probe_recording_20260901_142344"
+      },
+      {
+        "solref_damping_ratio": 0.12936990854483957,
+        "objective": 1.2072709803328556,
+        "success": true,
+        "event_count": 1,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.13,
+        "best_grid_objective": 1.2631950760212294,
+        "recording": "probe_recording_20260901_142601"
+      },
+      {
+        "solref_damping_ratio": 0.28469998478401354,
+        "objective": 0.007884789049527226,
+        "success": true,
+        "event_count": 1,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.28500000000000003,
+        "best_grid_objective": 0.008004922686006314,
+        "recording": "probe_recording_20260901_143213"
+      },
+      {
+        "solref_damping_ratio": 0.1779557044646001,
+        "objective": 0.01270327773128217,
+        "success": true,
+        "event_count": 1,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.1775,
+        "best_grid_objective": 0.013599842158877546,
+        "recording": "probe_recording_20260901_143306"
+      },
+      {
+        "solref_damping_ratio": 0.1590366905168291,
+        "objective": 0.00862376450259994,
+        "success": true,
+        "event_count": 1,
+        "global_grid_step": 0.0025000000000000022,
+        "best_grid_damping_ratio": 0.16,
+        "best_grid_objective": 0.017722319649749775,
+        "recording": "probe_recording_20260901_143346"
+      }
+    ],
+    "per_recording_damping_range": [
+      0.12936990854483957,
+      0.28469998478401354
+    ],
+    "per_recording_damping_span": 0.15533007623917397,
+    "high_quality_per_recording_damping_range": [
+      0.12936990854483957,
+      0.1779557044646001
+    ],
+    "high_quality_per_recording_damping_span": 0.04858579591976053,
+    "stability_thresholds": {
+      "leave_one_recording_out_damping_span_max": 0.05,
+      "high_quality_per_recording_damping_span_max": 0.05,
+      "all_vs_high_quality_damping_delta_max": 0.05,
+      "high_quality_position_samples_normal_rmse_max_mm": 20.0,
+      "high_quality_per_record_normal_rmse_max_mm": 30.0,
+      "first_rebound_required_for_all": true
+    },
+    "stable_candidate": false,
+    "evaluations": {
+      "current_production": {
+        "name": "current_production",
+        "parameters": {
+          "pair_sliding_friction": 0.35,
+          "solref_time_s": 0.003,
+          "solref_damping_ratio": 0.15254
+        },
+        "first_rebound_count": 5,
+        "requested_count": 5,
+        "per_record_normal_position_rmse_median_mm": 60.42534448652601,
+        "all_position_samples_normal_rmse_mm": 52.23736287421351,
+        "high_quality_position_samples_normal_rmse_mm": 50.281238163945574,
+        "high_quality_per_record_normal_rmse_max_mm": 71.77725223703534,
+        "first_apex_error_rmse_mm": 47.18469296863862,
+        "rows": [
+          {
+            "recording": "probe_recording_20260901_142344",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 67.81422815586413,
+            "normal_position_bias_mm": -63.05946566212474,
+            "simulated_first_apex_above_contact_mm": 55.91455116551937,
+            "history_fit_first_apex_above_contact_mm": 116.55245278113226,
+            "simulated_outgoing_normal_velocity_m_s": 1.0694217707539488,
+            "history_fit_outgoing_normal_velocity_m_s": 1.5181364029875857,
+            "minimum_normal_velocity_m_s": -2.635678380463824
+          },
+          {
+            "recording": "probe_recording_20260901_142601",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 71.77725223703534,
+            "normal_position_bias_mm": -66.33718277954526,
+            "simulated_first_apex_above_contact_mm": 49.71023470806509,
+            "history_fit_first_apex_above_contact_mm": 111.34980600630577,
+            "simulated_outgoing_normal_velocity_m_s": 1.007224049470492,
+            "history_fit_outgoing_normal_velocity_m_s": 1.485078758910362,
+            "minimum_normal_velocity_m_s": -2.406182885790106
+          },
+          {
+            "recording": "probe_recording_20260901_143213",
+            "high_quality": false,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 60.42534448652601,
+            "normal_position_bias_mm": 55.94273260535701,
+            "simulated_first_apex_above_contact_mm": 124.85034525170923,
+            "history_fit_first_apex_above_contact_mm": 66.67099142611177,
+            "simulated_outgoing_normal_velocity_m_s": 1.5798409013594104,
+            "history_fit_outgoing_normal_velocity_m_s": 1.1434352803294912,
+            "minimum_normal_velocity_m_s": -2.558445750177054
+          },
+          {
+            "recording": "probe_recording_20260901_143306",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 14.589654151286526,
+            "normal_position_bias_mm": 13.11998812665382,
+            "simulated_first_apex_above_contact_mm": 121.09671897228837,
+            "history_fit_first_apex_above_contact_mm": 105.85044342802556,
+            "simulated_outgoing_normal_velocity_m_s": 1.5601046111836359,
+            "history_fit_outgoing_normal_velocity_m_s": 1.4454633113809854,
+            "minimum_normal_velocity_m_s": -2.488407084344108
+          },
+          {
+            "recording": "probe_recording_20260901_143346",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 5.23565858936988,
+            "normal_position_bias_mm": 4.429220289860041,
+            "simulated_first_apex_above_contact_mm": 137.75609538351048,
+            "history_fit_first_apex_above_contact_mm": 131.5675365034333,
+            "simulated_outgoing_normal_velocity_m_s": 1.6657090352577444,
+            "history_fit_outgoing_normal_velocity_m_s": 1.6149174091979448,
+            "minimum_normal_velocity_m_s": -2.60536305328984
+          }
+        ]
+      },
+      "old_contact_state_candidate": {
+        "name": "old_contact_state_candidate",
+        "parameters": {
+          "pair_sliding_friction": 0.35,
+          "solref_time_s": 0.003,
+          "solref_damping_ratio": 0.35613038706791794
+        },
+        "first_rebound_count": 5,
+        "requested_count": 5,
+        "per_record_normal_position_rmse_median_mm": 100.07585448104975,
+        "all_position_samples_normal_rmse_mm": 96.11933933544793,
+        "high_quality_position_samples_normal_rmse_mm": 105.55263981194551,
+        "high_quality_per_record_normal_rmse_max_mm": 124.25468118513061,
+        "first_apex_error_rmse_mm": 77.08684771303655,
+        "rows": [
+          {
+            "recording": "probe_recording_20260901_142344",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 115.95416186496955,
+            "normal_position_bias_mm": -107.70821792381082,
+            "simulated_first_apex_above_contact_mm": 24.93045662000738,
+            "history_fit_first_apex_above_contact_mm": 116.55245278113226,
+            "simulated_outgoing_normal_velocity_m_s": 0.728027319598487,
+            "history_fit_outgoing_normal_velocity_m_s": 1.5181364029875857,
+            "minimum_normal_velocity_m_s": -2.635678380463824
+          },
+          {
+            "recording": "probe_recording_20260901_142601",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 124.25468118513061,
+            "normal_position_bias_mm": -114.75778408828464,
+            "simulated_first_apex_above_contact_mm": 18.68793495996276,
+            "history_fit_first_apex_above_contact_mm": 111.34980600630577,
+            "simulated_outgoing_normal_velocity_m_s": 0.6421115064878333,
+            "history_fit_outgoing_normal_velocity_m_s": 1.485078758910362,
+            "minimum_normal_velocity_m_s": -2.406182885790106
+          },
+          {
+            "recording": "probe_recording_20260901_143213",
+            "high_quality": false,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 22.08480156445415,
+            "normal_position_bias_mm": -20.903929210617054,
+            "simulated_first_apex_above_contact_mm": 47.42927556750645,
+            "history_fit_first_apex_above_contact_mm": 66.67099142611177,
+            "simulated_outgoing_normal_velocity_m_s": 0.9758022920249765,
+            "history_fit_outgoing_normal_velocity_m_s": 1.1434352803294912,
+            "minimum_normal_velocity_m_s": -2.558445750177054
+          },
+          {
+            "recording": "probe_recording_20260901_143306",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 74.36490509171382,
+            "normal_position_bias_mm": -69.5408935314237,
+            "simulated_first_apex_above_contact_mm": 42.3931485168231,
+            "history_fit_first_apex_above_contact_mm": 105.85044342802556,
+            "simulated_outgoing_normal_velocity_m_s": 0.930587483435388,
+            "history_fit_outgoing_normal_velocity_m_s": 1.4454633113809854,
+            "minimum_normal_velocity_m_s": -2.488407084344108
+          },
+          {
+            "recording": "probe_recording_20260901_143346",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 100.07585448104975,
+            "normal_position_bias_mm": -93.08922064169269,
+            "simulated_first_apex_above_contact_mm": 40.27664967087191,
+            "history_fit_first_apex_above_contact_mm": 131.5675365034333,
+            "simulated_outgoing_normal_velocity_m_s": 0.9079902345970589,
+            "history_fit_outgoing_normal_velocity_m_s": 1.6149174091979448,
+            "minimum_normal_velocity_m_s": -2.60536305328984
+          }
+        ]
+      },
+      "history_position_fit_all": {
+        "name": "history_position_fit_all",
+        "parameters": {
+          "pair_sliding_friction": 0.35,
+          "solref_time_s": 0.003,
+          "solref_damping_ratio": 0.13108533844345505
+        },
+        "first_rebound_count": 5,
+        "requested_count": 5,
+        "per_record_normal_position_rmse_median_mm": 25.18888462090323,
+        "all_position_samples_normal_rmse_mm": 44.65442642409553,
+        "high_quality_position_samples_normal_rmse_mm": 36.701021257729046,
+        "high_quality_per_record_normal_rmse_max_mm": 64.18566484967172,
+        "first_apex_error_rmse_mm": 43.697929405078725,
+        "rows": [
+          {
+            "recording": "probe_recording_20260901_142344",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 64.18566484967172,
+            "normal_position_bias_mm": -59.67881007764445,
+            "simulated_first_apex_above_contact_mm": 58.68940222545192,
+            "history_fit_first_apex_above_contact_mm": 116.55245278113226,
+            "simulated_outgoing_normal_velocity_m_s": 1.094964371132078,
+            "history_fit_outgoing_normal_velocity_m_s": 1.5181364029875857,
+            "minimum_normal_velocity_m_s": -2.635678380463824
+          },
+          {
+            "recording": "probe_recording_20260901_142601",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 11.747993016624479,
+            "normal_position_bias_mm": -11.141751952882942,
+            "simulated_first_apex_above_contact_mm": 99.80532138394648,
+            "history_fit_first_apex_above_contact_mm": 111.34980600630577,
+            "simulated_outgoing_normal_velocity_m_s": 1.4204062943407796,
+            "history_fit_outgoing_normal_velocity_m_s": 1.485078758910362,
+            "minimum_normal_velocity_m_s": -2.406182885790106
+          },
+          {
+            "recording": "probe_recording_20260901_143213",
+            "high_quality": false,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 70.50149539993103,
+            "normal_position_bias_mm": 65.34161808705397,
+            "simulated_first_apex_above_contact_mm": 136.30607257242906,
+            "history_fit_first_apex_above_contact_mm": 66.67099142611177,
+            "simulated_outgoing_normal_velocity_m_s": 1.649902833569072,
+            "history_fit_outgoing_normal_velocity_m_s": 1.1434352803294912,
+            "minimum_normal_velocity_m_s": -2.558445750177054
+          },
+          {
+            "recording": "probe_recording_20260901_143306",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 25.18888462090323,
+            "normal_position_bias_mm": 23.01037758649836,
+            "simulated_first_apex_above_contact_mm": 132.94920018050004,
+            "history_fit_first_apex_above_contact_mm": 105.85044342802556,
+            "simulated_outgoing_normal_velocity_m_s": 1.6355154317824785,
+            "history_fit_outgoing_normal_velocity_m_s": 1.4454633113809854,
+            "minimum_normal_velocity_m_s": -2.488407084344108
+          },
+          {
+            "recording": "probe_recording_20260901_143346",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 18.233406335584746,
+            "normal_position_bias_mm": 16.551860052265297,
+            "simulated_first_apex_above_contact_mm": 153.53911548326846,
+            "history_fit_first_apex_above_contact_mm": 131.5675365034333,
+            "simulated_outgoing_normal_velocity_m_s": 1.760210857853275,
+            "history_fit_outgoing_normal_velocity_m_s": 1.6149174091979448,
+            "minimum_normal_velocity_m_s": -2.60536305328984
+          }
+        ]
+      },
+      "history_position_fit_high_quality": {
+        "name": "history_position_fit_high_quality",
+        "parameters": {
+          "pair_sliding_friction": 0.35,
+          "solref_time_s": 0.003,
+          "solref_damping_ratio": 0.13108533844345505
+        },
+        "first_rebound_count": 5,
+        "requested_count": 5,
+        "per_record_normal_position_rmse_median_mm": 25.18888462090323,
+        "all_position_samples_normal_rmse_mm": 44.65442642409553,
+        "high_quality_position_samples_normal_rmse_mm": 36.701021257729046,
+        "high_quality_per_record_normal_rmse_max_mm": 64.18566484967172,
+        "first_apex_error_rmse_mm": 43.697929405078725,
+        "rows": [
+          {
+            "recording": "probe_recording_20260901_142344",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 64.18566484967172,
+            "normal_position_bias_mm": -59.67881007764445,
+            "simulated_first_apex_above_contact_mm": 58.68940222545192,
+            "history_fit_first_apex_above_contact_mm": 116.55245278113226,
+            "simulated_outgoing_normal_velocity_m_s": 1.094964371132078,
+            "history_fit_outgoing_normal_velocity_m_s": 1.5181364029875857,
+            "minimum_normal_velocity_m_s": -2.635678380463824
+          },
+          {
+            "recording": "probe_recording_20260901_142601",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 11.747993016624479,
+            "normal_position_bias_mm": -11.141751952882942,
+            "simulated_first_apex_above_contact_mm": 99.80532138394648,
+            "history_fit_first_apex_above_contact_mm": 111.34980600630577,
+            "simulated_outgoing_normal_velocity_m_s": 1.4204062943407796,
+            "history_fit_outgoing_normal_velocity_m_s": 1.485078758910362,
+            "minimum_normal_velocity_m_s": -2.406182885790106
+          },
+          {
+            "recording": "probe_recording_20260901_143213",
+            "high_quality": false,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 70.50149539993103,
+            "normal_position_bias_mm": 65.34161808705397,
+            "simulated_first_apex_above_contact_mm": 136.30607257242906,
+            "history_fit_first_apex_above_contact_mm": 66.67099142611177,
+            "simulated_outgoing_normal_velocity_m_s": 1.649902833569072,
+            "history_fit_outgoing_normal_velocity_m_s": 1.1434352803294912,
+            "minimum_normal_velocity_m_s": -2.558445750177054
+          },
+          {
+            "recording": "probe_recording_20260901_143306",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 25.18888462090323,
+            "normal_position_bias_mm": 23.01037758649836,
+            "simulated_first_apex_above_contact_mm": 132.94920018050004,
+            "history_fit_first_apex_above_contact_mm": 105.85044342802556,
+            "simulated_outgoing_normal_velocity_m_s": 1.6355154317824785,
+            "history_fit_outgoing_normal_velocity_m_s": 1.4454633113809854,
+            "minimum_normal_velocity_m_s": -2.488407084344108
+          },
+          {
+            "recording": "probe_recording_20260901_143346",
+            "high_quality": true,
+            "status": "first_rebound_found",
+            "normal_position_rmse_mm": 18.233406335584746,
+            "normal_position_bias_mm": 16.551860052265297,
+            "simulated_first_apex_above_contact_mm": 153.53911548326846,
+            "history_fit_first_apex_above_contact_mm": 131.5675365034333,
+            "simulated_outgoing_normal_velocity_m_s": 1.760210857853275,
+            "history_fit_outgoing_normal_velocity_m_s": 1.6149174091979448,
+            "minimum_normal_velocity_m_s": -2.60536305328984
+          }
+        ]
+      }
+    }
+  }
+}

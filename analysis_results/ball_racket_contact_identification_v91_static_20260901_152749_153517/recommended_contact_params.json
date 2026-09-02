@@ -1,0 +1,20 @@
+{
+  "ball_mass_kg": 0.004,
+  "pair_sliding_friction": 0.35,
+  "solref_time_s": 0.003,
+  "solref_damping_ratio": 0.16624610111870175,
+  "solimp": [
+    0.9,
+    0.995,
+    0.001
+  ],
+  "margin_m": 0.001,
+  "condim": 3,
+  "fit_backend": "CPU MuJoCo isolated-contact proxy",
+  "fit_scope": "normal restitution only; friction/time retained as priors",
+  "status": "fixed_base_full_robot_not_converged_do_not_apply",
+  "production_xml_updated": false,
+  "full_robot_history_solref_damping_ratio": 0.20250944772590118,
+  "runtime_builder_inherits_source_contact_parameters": true,
+  "reason": "已用固定底座完整机器人 MJX 对 6 组位置历史做同高度首次反弹回放；候选阻尼比为 0.202509，但未通过跨录制稳定性门槛，不覆盖生产 XML。"
+}

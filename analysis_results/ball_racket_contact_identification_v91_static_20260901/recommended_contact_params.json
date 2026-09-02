@@ -1,0 +1,16 @@
+{
+  "status": "history_candidate_not_converged_do_not_apply",
+  "production_xml_updated": false,
+  "current_production": {
+    "pair_sliding_friction": 0.35,
+    "solref_time_s": 0.003,
+    "solref_damping_ratio": 0.15254
+  },
+  "mjx_candidate_robust_all_five": 0.35613038706791794,
+  "mjx_candidate_robust_high_quality": 0.3647765040175735,
+  "mjx_candidate_least_squares_all_five": 0.355177840534317,
+  "mjx_candidate_least_squares_high_quality": 0.35731832744359754,
+  "reason": "已改用连续下落位置历史重建状态并完成 MJX 首次反弹位置回放，但五组的候选参数仍未通过留一录制稳定性门槛；本轮不覆盖生产 XML。",
+  "mjx_candidate_history_position_fit": 0.13108533844345505,
+  "supersedes_velocity_derived_full_drop_conclusion": true
+}

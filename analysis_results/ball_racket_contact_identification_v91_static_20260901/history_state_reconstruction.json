@@ -1,0 +1,798 @@
+{
+  "schema_version": 1,
+  "method": "release-to-impact fresh positions -> robust continuous paper gravity/drag state; causal leave-tail-out validation; first rebound positions only",
+  "does_not_use_impact_velocity_to_infer_release_height": true,
+  "paper_model": {
+    "gravity_m_s2": 9.8,
+    "drag_coefficient_per_m": 0.13545,
+    "integration_step_s": 0.001
+  },
+  "record_count": 5,
+  "aggregate": {
+    "paper_drag_causal_holdout_rmse_median_mm": 2.690704509268412,
+    "paper_drag_causal_holdout_rmse_max_mm": 7.867471934970905,
+    "gravity_only_causal_holdout_rmse_median_mm": 3.1058857840416945,
+    "history_restitution_median": 0.5803299203088195,
+    "history_restitution_range": [
+      0.4460583801987834,
+      0.6195368457906358
+    ]
+  },
+  "records": [
+    {
+      "recording": "probe_recording_20260901_142344",
+      "impact_time_s": 1788243825.9749207,
+      "incoming_window": {
+        "start_s_before_impact": 0.23537468910217285,
+        "end_s_before_impact": 0.023929357528686523,
+        "sample_count": 20
+      },
+      "post_first_rebound_window": {
+        "start_s_after_impact": 0.043218135833740234,
+        "end_s_after_impact": 0.2321326732635498,
+        "sample_count": 18
+      },
+      "incoming_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788243825.739546,
+        "position_m": [
+          -0.1094838122267409,
+          -0.4135227387595317,
+          1.4274972458895352
+        ],
+        "velocity_m_s": [
+          0.05041429391002361,
+          -0.013657439616813262,
+          -0.42019303471763686
+        ],
+        "sample_count": 20,
+        "span_s": 0.21144533157348633,
+        "rmse_mm": 1.8383161674577821,
+        "axis_rmse_mm": [
+          1.058938571559613,
+          2.9742327701469926,
+          0.41328867061297464
+        ],
+        "max_residual_mm": 11.07593750264267
+      },
+      "incoming_gravity_only_fit": {
+        "model": "gravity_only",
+        "drag_coefficient_per_m": 0.0,
+        "reference_time_s": 1788243825.739546,
+        "position_m": [
+          -0.10944645886361459,
+          -0.4135167446009366,
+          1.4266896997909833
+        ],
+        "velocity_m_s": [
+          0.04961642423816296,
+          -0.013585352204710995,
+          -0.4024925923250435
+        ],
+        "sample_count": 20,
+        "span_s": 0.21144533157348633,
+        "rmse_mm": 1.8943952395669064,
+        "axis_rmse_mm": [
+          1.0620357784575625,
+          2.973692741075633,
+          0.8918696418375265
+        ],
+        "max_residual_mm": 11.123467253567608
+      },
+      "causal_leave_tail_out": {
+        "training_sample_count": 14,
+        "holdout_sample_count": 6,
+        "paper_drag_position_rmse_mm": 2.690704509268412,
+        "paper_drag_axis_rmse_mm": [
+          0.8880217246844432,
+          4.477074327657338,
+          0.9417511081555214
+        ],
+        "gravity_only_position_rmse_mm": 3.0683150340264285
+      },
+      "post_first_rebound_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788243825.9749207,
+        "position_m": [
+          -0.10708699816871046,
+          -0.4366593185621008,
+          1.0935189520877897
+        ],
+        "velocity_m_s": [
+          0.09721618083314723,
+          0.13962724673322083,
+          1.5147190443538991
+        ],
+        "sample_count": 18,
+        "span_s": 0.18891453742980957,
+        "rmse_mm": 0.5021740503782218,
+        "axis_rmse_mm": [
+          0.6066054923973766,
+          0.4647164699970875,
+          0.4154572297199664
+        ],
+        "max_residual_mm": 1.6295668405899377
+      },
+      "history_state_at_impact": {
+        "incoming_position_m": [
+          -0.09783504965160245,
+          -0.41667843646233926,
+          1.0644431242126293
+        ],
+        "incoming_velocity_m_s": [
+          0.047993144515141146,
+          -0.013001540285506428,
+          -2.637841070628627
+        ],
+        "incoming_normal_velocity_m_s": -2.6368688629123334,
+        "outgoing_position_m": [
+          -0.10708699816871046,
+          -0.4366593185621008,
+          1.0935189520877897
+        ],
+        "outgoing_velocity_m_s": [
+          0.09721618083314723,
+          0.13962724673322083,
+          1.5147190443538991
+        ],
+        "outgoing_normal_velocity_m_s": 1.5181364029875857,
+        "normal_restitution": 0.575734510100307,
+        "gravity_only_incoming_normal_velocity_m_s": -2.7081762030241254
+      },
+      "old_six_frame_impact_fit_for_diagnostic_only": {
+        "incoming_normal_velocity_m_s": -2.6442918466710355,
+        "outgoing_normal_velocity_m_s": 1.5072297797869991,
+        "normal_restitution": 0.5699937326072718
+      },
+      "mjx_initial_state": {
+        "time_s_before_impact": 0.23537468910217285,
+        "position_local_m": [
+          0.006801453734292362,
+          0.03994709297931248,
+          0.3839982024158824
+        ],
+        "velocity_local_m_s": [
+          0.048090965124953026,
+          0.0009281615871968817,
+          -0.4195212700701636
+        ],
+        "gravity_local_m_s2": [
+          -0.05689192142400621,
+          0.3485518600530867,
+          -9.793634407620608
+        ],
+        "contact_center_local_m": [
+          0.016341730381697343,
+          0.04970596219875151,
+          0.021
+        ]
+      },
+      "target_first_rebound_normal_position_range_m": [
+        0.0774348179044841,
+        0.13755245278113226
+      ]
+    },
+    {
+      "recording": "probe_recording_20260901_142601",
+      "impact_time_s": 1788243963.3569593,
+      "incoming_window": {
+        "start_s_before_impact": 0.24647879600524902,
+        "end_s_before_impact": 0.023193836212158203,
+        "sample_count": 21
+      },
+      "post_first_rebound_window": {
+        "start_s_after_impact": 0.042875051498413086,
+        "end_s_after_impact": 0.23227858543395996,
+        "sample_count": 17
+      },
+      "incoming_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788243963.1104805,
+        "position_m": [
+          -0.11171218668235829,
+          -0.4139090398251037,
+          1.3910195978781243
+        ],
+        "velocity_m_s": [
+          0.08709733419180354,
+          -0.0244186906338076,
+          -0.05857706921228481
+        ],
+        "sample_count": 21,
+        "span_s": 0.22328495979309082,
+        "rmse_mm": 0.7215206606478367,
+        "axis_rmse_mm": [
+          0.5404671843664736,
+          0.9410729041852388,
+          0.6197202617765606
+        ],
+        "max_residual_mm": 2.4443903278246104
+      },
+      "incoming_gravity_only_fit": {
+        "model": "gravity_only",
+        "drag_coefficient_per_m": 0.0,
+        "reference_time_s": 1788243963.1104805,
+        "position_m": [
+          -0.11166718229056258,
+          -0.4139167788328829,
+          1.3904930000914533
+        ],
+        "velocity_m_s": [
+          0.08614745203279425,
+          -0.024197230452202127,
+          -0.04840208481573919
+        ],
+        "sample_count": 21,
+        "span_s": 0.22328495979309082,
+        "rmse_mm": 0.8451586929169685,
+        "axis_rmse_mm": [
+          0.5471672600157325,
+          0.9354252196865139,
+          0.9841073602918887
+        ],
+        "max_residual_mm": 3.023253839806366
+      },
+      "causal_leave_tail_out": {
+        "training_sample_count": 15,
+        "holdout_sample_count": 6,
+        "paper_drag_position_rmse_mm": 1.6443032650559797,
+        "paper_drag_axis_rmse_mm": [
+          0.5597827034524462,
+          2.467849745953772,
+          1.3067366370974067
+        ],
+        "gravity_only_position_rmse_mm": 2.0979154026785145
+      },
+      "post_first_rebound_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788243963.3569593,
+        "position_m": [
+          -0.1003828218733973,
+          -0.44000394566305223,
+          1.0806307484327247
+        ],
+        "velocity_m_s": [
+          0.07029138840393702,
+          0.11149597023240226,
+          1.4824830087636496
+        ],
+        "sample_count": 17,
+        "span_s": 0.18940353393554688,
+        "rmse_mm": 0.7061457372193655,
+        "axis_rmse_mm": [
+          0.5483017035671749,
+          0.772310433321642,
+          0.7738392875960193
+        ],
+        "max_residual_mm": 1.8983800397322228
+      },
+      "history_state_at_impact": {
+        "incoming_position_m": [
+          -0.09054743946917962,
+          -0.41984280828468956,
+          1.084358934086837
+        ],
+        "incoming_velocity_m_s": [
+          0.08353641386826274,
+          -0.023420347658571466,
+          -2.4068337380409077
+        ],
+        "incoming_normal_velocity_m_s": -2.4065867100865317,
+        "outgoing_position_m": [
+          -0.1003828218733973,
+          -0.44000394566305223,
+          1.0806307484327247
+        ],
+        "outgoing_velocity_m_s": [
+          0.07029138840393702,
+          0.11149597023240226,
+          1.4824830087636496
+        ],
+        "outgoing_normal_velocity_m_s": 1.485078758910362,
+        "normal_restitution": 0.6170892379177828,
+        "gravity_only_incoming_normal_velocity_m_s": -2.4636529685068513
+      },
+      "old_six_frame_impact_fit_for_diagnostic_only": {
+        "incoming_normal_velocity_m_s": -2.3844925470449314,
+        "outgoing_normal_velocity_m_s": 1.469202089672737,
+        "normal_restitution": 0.6161487447270484
+      },
+      "mjx_initial_state": {
+        "time_s_before_impact": 0.24647879600524902,
+        "position_local_m": [
+          0.004366098034601928,
+          0.0408444318197597,
+          0.32779553686377977
+        ],
+        "velocity_local_m_s": [
+          0.08674118971196569,
+          -0.022343769145213733,
+          -0.058615703547059875
+        ],
+        "gravity_local_m_s2": [
+          -0.05705558229912634,
+          0.34903296503499986,
+          -9.79361632135175
+        ],
+        "contact_center_local_m": [
+          0.023743877090109094,
+          0.04583633416093845,
+          0.021
+        ]
+      },
+      "target_first_rebound_normal_position_range_m": [
+        0.07565769858335994,
+        0.13234980600630578
+      ]
+    },
+    {
+      "recording": "probe_recording_20260901_143213",
+      "impact_time_s": 1788244335.30054,
+      "incoming_window": {
+        "start_s_before_impact": 0.28177452087402344,
+        "end_s_before_impact": 0.025443077087402344,
+        "sample_count": 20
+      },
+      "post_first_rebound_window": {
+        "start_s_after_impact": 0.0411677360534668,
+        "end_s_after_impact": 0.21927833557128906,
+        "sample_count": 15
+      },
+      "incoming_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788244335.0187654,
+        "position_m": [
+          -0.11497702990506913,
+          -0.4623104286912334,
+          1.3694926921114579
+        ],
+        "velocity_m_s": [
+          0.03793405584802242,
+          -0.030733304032361672,
+          0.11581489968441393
+        ],
+        "sample_count": 20,
+        "span_s": 0.2563314437866211,
+        "rmse_mm": 3.5215450186638013,
+        "axis_rmse_mm": [
+          1.5705552328207688,
+          1.9493812088268088,
+          5.562113547812534
+        ],
+        "max_residual_mm": 21.52801742773249
+      },
+      "incoming_gravity_only_fit": {
+        "model": "gravity_only",
+        "drag_coefficient_per_m": 0.0,
+        "reference_time_s": 1788244335.0187654,
+        "position_m": [
+          -0.11496710138734302,
+          -0.4623338902418398,
+          1.3692140853558652
+        ],
+        "velocity_m_s": [
+          0.03764794957944457,
+          -0.03034672705362882,
+          0.12099858146108028
+        ],
+        "sample_count": 20,
+        "span_s": 0.2563314437866211,
+        "rmse_mm": 3.898361074467637,
+        "axis_rmse_mm": [
+          1.5587934898286957,
+          1.9547741611327254,
+          6.272214763208362
+        ],
+        "max_residual_mm": 24.208445499306134
+      },
+      "causal_leave_tail_out": {
+        "training_sample_count": 14,
+        "holdout_sample_count": 6,
+        "paper_drag_position_rmse_mm": 7.867471934970905,
+        "paper_drag_axis_rmse_mm": [
+          4.981736059982735,
+          3.5615490149310745,
+          12.17329118955
+        ],
+        "gravity_only_position_rmse_mm": 8.74299871478358
+      },
+      "post_first_rebound_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788244335.30054,
+        "position_m": [
+          -0.11687961399010852,
+          -0.492514605469314,
+          1.1163660476480082
+        ],
+        "velocity_m_s": [
+          -0.09222848630170653,
+          0.06459431586518118,
+          1.1413399016794947
+        ],
+        "sample_count": 15,
+        "span_s": 0.17811059951782227,
+        "rmse_mm": 1.1264747633296397,
+        "axis_rmse_mm": [
+          1.0021516474595196,
+          1.3013659384292515,
+          1.0530787943197921
+        ],
+        "max_residual_mm": 4.885262895596197
+      },
+      "history_state_at_impact": {
+        "incoming_position_m": [
+          -0.10444976010809123,
+          -0.47083938179335955,
+          1.0199966393924162
+        ],
+        "incoming_velocity_m_s": [
+          0.03616831681058886,
+          -0.029302742668275827,
+          -2.5638367459358484
+        ],
+        "incoming_normal_velocity_m_s": -2.5634206890585167,
+        "outgoing_position_m": [
+          -0.11687961399010852,
+          -0.492514605469314,
+          1.1163660476480082
+        ],
+        "outgoing_velocity_m_s": [
+          -0.09222848630170653,
+          0.06459431586518118,
+          1.1413399016794947
+        ],
+        "outgoing_normal_velocity_m_s": 1.1434352803294912,
+        "normal_restitution": 0.4460583801987834,
+        "gravity_only_incoming_normal_velocity_m_s": -2.6399715960988583
+      },
+      "old_six_frame_impact_fit_for_diagnostic_only": {
+        "incoming_normal_velocity_m_s": -2.335426002984267,
+        "outgoing_normal_velocity_m_s": 1.1518533222369887,
+        "normal_restitution": 0.4932090850941631
+      },
+      "mjx_initial_state": {
+        "time_s_before_impact": 0.28177452087402344,
+        "position_local_m": [
+          0.0009663421478702788,
+          -0.006763823856937564,
+          0.37063352917594294
+        ],
+        "velocity_local_m_s": [
+          0.03862272511426996,
+          -0.034822512501907446,
+          0.11389417814985595
+        ],
+        "gravity_local_m_s2": [
+          -0.05714985344503648,
+          0.3491137333195025,
+          -9.793612892873547
+        ],
+        "contact_center_local_m": [
+          0.00945353237486663,
+          -0.002836968293816299,
+          0.021
+        ]
+      },
+      "target_first_rebound_normal_position_range_m": [
+        0.03614852321500234,
+        0.08767099142611177
+      ]
+    },
+    {
+      "recording": "probe_recording_20260901_143306",
+      "impact_time_s": 1788244387.9743311,
+      "incoming_window": {
+        "start_s_before_impact": 0.26602721214294434,
+        "end_s_before_impact": 0.021298885345458984,
+        "sample_count": 23
+      },
+      "post_first_rebound_window": {
+        "start_s_after_impact": 0.04548239707946777,
+        "end_s_after_impact": 0.22352027893066406,
+        "sample_count": 17
+      },
+      "incoming_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788244387.708304,
+        "position_m": [
+          -0.09378288934800588,
+          -0.4661534080603549,
+          1.3952420506872303
+        ],
+        "velocity_m_s": [
+          0.012766927268834138,
+          0.0017245581498457536,
+          0.03988732114547389
+        ],
+        "sample_count": 23,
+        "span_s": 0.24472832679748535,
+        "rmse_mm": 0.9116450107723726,
+        "axis_rmse_mm": [
+          0.7817408467626468,
+          1.1751428028221484,
+          0.707962229555082
+        ],
+        "max_residual_mm": 2.591388288568777
+      },
+      "incoming_gravity_only_fit": {
+        "model": "gravity_only",
+        "drag_coefficient_per_m": 0.0,
+        "reference_time_s": 1788244387.708304,
+        "position_m": [
+          -0.09377092268746545,
+          -0.46614200145086987,
+          1.3945441851202491
+        ],
+        "velocity_m_s": [
+          0.012587331770162715,
+          0.0016188182692517589,
+          0.05154588341054991
+        ],
+        "sample_count": 23,
+        "span_s": 0.24472832679748535,
+        "rmse_mm": 1.0514042968662471,
+        "axis_rmse_mm": [
+          0.7853104712574583,
+          1.1755166741674086,
+          1.147955138014638
+        ],
+        "max_residual_mm": 3.1364941291521724
+      },
+      "causal_leave_tail_out": {
+        "training_sample_count": 17,
+        "holdout_sample_count": 6,
+        "paper_drag_position_rmse_mm": 2.5776771562383733,
+        "paper_drag_axis_rmse_mm": [
+          2.1664548117216444,
+          3.373033100091824,
+          1.965293825317861
+        ],
+        "gravity_only_position_rmse_mm": 3.1058857840416945
+      },
+      "post_first_rebound_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788244387.9743311,
+        "position_m": [
+          -0.09833797267713393,
+          -0.48676951908491317,
+          1.0911838546585118
+        ],
+        "velocity_m_s": [
+          0.055805945314840226,
+          0.13268259941126342,
+          1.4420038633586267
+        ],
+        "sample_count": 17,
+        "span_s": 0.1780378818511963,
+        "rmse_mm": 1.1966770107120268,
+        "axis_rmse_mm": [
+          0.6756882577246908,
+          1.4897512668387778,
+          1.2728684712982903
+        ],
+        "max_residual_mm": 5.845246196971636
+      },
+      "history_state_at_impact": {
+        "incoming_position_m": [
+          -0.09043571289933755,
+          -0.46570127104241993,
+          1.0652872820228596
+        ],
+        "incoming_velocity_m_s": [
+          0.01220838229807194,
+          0.0016491098245674585,
+          -2.492369164595659
+        ],
+        "incoming_normal_velocity_m_s": -2.490761308001817,
+        "outgoing_position_m": [
+          -0.09833797267713393,
+          -0.48676951908491317,
+          1.0911838546585118
+        ],
+        "outgoing_velocity_m_s": [
+          0.055805945314840226,
+          0.13268259941126342,
+          1.4420038633586267
+        ],
+        "outgoing_normal_velocity_m_s": 1.4454633113809854,
+        "normal_restitution": 0.5803299203088195,
+        "gravity_only_incoming_normal_velocity_m_s": -2.5538751677346436
+      },
+      "old_six_frame_impact_fit_for_diagnostic_only": {
+        "incoming_normal_velocity_m_s": -2.5184586528418573,
+        "outgoing_normal_velocity_m_s": 1.5987298470890174,
+        "normal_restitution": 0.6348048816624376
+      },
+      "mjx_initial_state": {
+        "time_s_before_impact": 0.26602721214294434,
+        "position_local_m": [
+          0.022303138321961492,
+          -0.011505204061740585,
+          0.3507436413446013
+        ],
+        "velocity_local_m_s": [
+          0.013485063507312081,
+          -1.792150902250097e-05,
+          0.04376643995905834
+        ],
+        "gravity_local_m_s2": [
+          -0.05686004253352353,
+          0.3486831916233535,
+          -9.79362991783141
+        ],
+        "contact_center_local_m": [
+          0.023735939288759736,
+          0.0006864101304994095,
+          0.021
+        ]
+      },
+      "target_first_rebound_normal_position_range_m": [
+        0.07659965190505212,
+        0.12685044342802557
+      ]
+    },
+    {
+      "recording": "probe_recording_20260901_143346",
+      "impact_time_s": 1788244428.2925646,
+      "incoming_window": {
+        "start_s_before_impact": 0.17999029159545898,
+        "end_s_before_impact": 0.024158239364624023,
+        "sample_count": 15
+      },
+      "post_first_rebound_window": {
+        "start_s_after_impact": 0.0426936149597168,
+        "end_s_after_impact": 0.22081661224365234,
+        "sample_count": 17
+      },
+      "incoming_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788244428.1125743,
+        "position_m": [
+          -0.11545866823557252,
+          -0.39297126833322904,
+          1.4139994582702435
+        ],
+        "velocity_m_s": [
+          0.02078030237066517,
+          -0.0024917813677018154,
+          -0.9268168183245928
+        ],
+        "sample_count": 15,
+        "span_s": 0.15583205223083496,
+        "rmse_mm": 3.490146347645408,
+        "axis_rmse_mm": [
+          2.4809133987159244,
+          5.348231162442489,
+          1.3359853012285052
+        ],
+        "max_residual_mm": 18.938709529791662
+      },
+      "incoming_gravity_only_fit": {
+        "model": "gravity_only",
+        "drag_coefficient_per_m": 0.0,
+        "reference_time_s": 1788244428.1125743,
+        "position_m": [
+          -0.11543068400004078,
+          -0.39294527639466215,
+          1.4131789373208616
+        ],
+        "velocity_m_s": [
+          0.02027660929095093,
+          -0.002729370050885172,
+          -0.9040047396589513
+        ],
+        "sample_count": 15,
+        "span_s": 0.15583205223083496,
+        "rmse_mm": 3.477837033652788,
+        "axis_rmse_mm": [
+          2.4869837772024517,
+          5.3540752320436,
+          1.1978486546678428
+        ],
+        "max_residual_mm": 18.840936693826894
+      },
+      "causal_leave_tail_out": {
+        "training_sample_count": 10,
+        "holdout_sample_count": 5,
+        "paper_drag_position_rmse_mm": 4.466070207105978,
+        "paper_drag_axis_rmse_mm": [
+          4.2384990087157925,
+          6.236946821656613,
+          1.7242301996373972
+        ],
+        "gravity_only_position_rmse_mm": 4.386628958522747
+      },
+      "post_first_rebound_paper_fit": {
+        "model": "paper_gravity_quadratic_drag",
+        "drag_coefficient_per_m": 0.13545,
+        "reference_time_s": 1788244428.2925646,
+        "position_m": [
+          -0.1237507263051683,
+          -0.41599248149678286,
+          1.075404423519837
+        ],
+        "velocity_m_s": [
+          0.03852011742234851,
+          0.1408691088984131,
+          1.6111741575926533
+        ],
+        "sample_count": 17,
+        "span_s": 0.17812299728393555,
+        "rmse_mm": 0.7084076500282469,
+        "axis_rmse_mm": [
+          0.44450857514974595,
+          0.7958114255658255,
+          0.821352845866416
+        ],
+        "max_residual_mm": 2.2588926061506274
+      },
+      "history_state_at_impact": {
+        "incoming_position_m": [
+          -0.11178521102132767,
+          -0.39341175529430583,
+          1.0945303981623598
+        ],
+        "incoming_velocity_m_s": [
+          0.019900098458990163,
+          -0.0023862354681394382,
+          -2.608151062418783
+        ],
+        "incoming_normal_velocity_m_s": -2.6066527280343297,
+        "outgoing_position_m": [
+          -0.1237507263051683,
+          -0.41599248149678286,
+          1.075404423519837
+        ],
+        "outgoing_velocity_m_s": [
+          0.03852011742234851,
+          0.1408691088984131,
+          1.6111741575926533
+        ],
+        "outgoing_normal_velocity_m_s": 1.6149174091979448,
+        "normal_restitution": 0.6195368457906358,
+        "gravity_only_incoming_normal_velocity_m_s": -2.6663867441899303
+      },
+      "old_six_frame_impact_fit_for_diagnostic_only": {
+        "incoming_normal_velocity_m_s": -2.6398913576341507,
+        "outgoing_normal_velocity_m_s": 1.6116929622330884,
+        "normal_restitution": 0.6105148825811811
+      },
+      "mjx_initial_state": {
+        "time_s_before_impact": 0.17999029159545898,
+        "position_local_m": [
+          0.000759138268978436,
+          0.06094919965091036,
+          0.3402980147362235
+        ],
+        "velocity_local_m_s": [
+          0.015471113692312636,
+          0.030580831471227792,
+          -0.9252582264108979
+        ],
+        "gravity_local_m_s2": [
+          -0.05709436341535112,
+          0.3490689023280343,
+          -9.793614814515308
+        ],
+        "contact_center_local_m": [
+          0.0025712290834132,
+          0.07188824875350916,
+          0.021
+        ]
+      },
+      "target_first_rebound_normal_position_range_m": [
+        0.08096347729238558,
+        0.1525675365034333
+      ]
+    }
+  ]
+}

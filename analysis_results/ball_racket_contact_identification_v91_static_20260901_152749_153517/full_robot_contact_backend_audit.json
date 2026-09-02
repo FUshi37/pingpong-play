@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "purpose": "same-state CPU MuJoCo versus MJX contact response audit",
+  "timestep_s": 0.0002,
+  "solref_damping_ratio": 0.15254,
+  "only_expected_ball_racket_contact_geoms": true,
+  "cpu_all_position_samples_normal_rmse_mm": 59.50806093423914,
+  "mjx_all_position_samples_normal_rmse_mm": 116.11034405434067,
+  "maximum_per_record_cpu_mjx_rmse_delta_mm": 233.63548542785344,
+  "backend_consistency_limit_mm": 5.0,
+  "backend_consistency_pass": false,
+  "cpu_records": [
+    {
+      "recording": "probe_recording_20260901_152749",
+      "normal_position_rmse_mm": 93.5482205346812,
+      "normal_position_bias_mm": -78.58868171050096,
+      "first_ball_contact_step": 856,
+      "ball_contact_constraint_samples": 14,
+      "ball_contact_geom_pairs": {
+        "ball <-> racket_rubber_fore": 14
+      }
+    },
+    {
+      "recording": "probe_recording_20260901_152902",
+      "normal_position_rmse_mm": 51.121275284162,
+      "normal_position_bias_mm": -10.539796807056424,
+      "first_ball_contact_step": 1059,
+      "ball_contact_constraint_samples": 14,
+      "ball_contact_geom_pairs": {
+        "ball <-> racket_rubber_fore": 14
+      }
+    },
+    {
+      "recording": "probe_recording_20260901_153128",
+      "normal_position_rmse_mm": 45.288833079619,
+      "normal_position_bias_mm": 8.722644071959955,
+      "first_ball_contact_step": 1099,
+      "ball_contact_constraint_samples": 14,
+      "ball_contact_geom_pairs": {
+        "ball <-> racket_rubber_fore": 14
+      }
+    },
+    {
+      "recording": "probe_recording_20260901_153257",
+      "normal_position_rmse_mm": 56.65172719450576,
+      "normal_position_bias_mm": -26.64695035088297,
+      "first_ball_contact_step": 1106,
+      "ball_contact_constraint_samples": 14,
+      "ball_contact_geom_pairs": {
+        "ball <-> racket_rubber_fore": 14
+      }
+    },
+    {
+      "recording": "probe_recording_20260901_153452",
+      "normal_position_rmse_mm": 70.17351951158165,
+      "normal_position_bias_mm": -47.339942167985086,
+      "first_ball_contact_step": 1014,
+      "ball_contact_constraint_samples": 14,
+      "ball_contact_geom_pairs": {
+        "ball <-> racket_rubber_fore": 14
+      }
+    },
+    {
+      "recording": "probe_recording_20260901_153517",
+      "normal_position_rmse_mm": 26.718146517782763,
+      "normal_position_bias_mm": -1.971406360871647,
+      "first_ball_contact_step": 831,
+      "ball_contact_constraint_samples": 15,
+      "ball_contact_geom_pairs": {
+        "ball <-> racket_rubber_fore": 15
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "recording": "probe_recording_20260901_152749",
+      "cpu_normal_position_rmse_mm": 93.5482205346812,
+      "mjx_normal_position_rmse_mm": 47.82062306809702,
+      "absolute_rmse_delta_mm": 45.727597466584186
+    },
+    {
+      "recording": "probe_recording_20260901_152902",
+      "cpu_normal_position_rmse_mm": 51.121275284162,
+      "mjx_normal_position_rmse_mm": 10.30210521060468,
+      "absolute_rmse_delta_mm": 40.81917007355732
+    },
+    {
+      "recording": "probe_recording_20260901_153128",
+      "cpu_normal_position_rmse_mm": 45.288833079619,
+      "mjx_normal_position_rmse_mm": 44.183481534774,
+      "absolute_rmse_delta_mm": 1.105351544845
+    },
+    {
+      "recording": "probe_recording_20260901_153257",
+      "cpu_normal_position_rmse_mm": 56.65172719450576,
+      "mjx_normal_position_rmse_mm": 46.65102456020858,
+      "absolute_rmse_delta_mm": 10.000702634297177
+    },
+    {
+      "recording": "probe_recording_20260901_153452",
+      "cpu_normal_position_rmse_mm": 70.17351951158165,
+      "mjx_normal_position_rmse_mm": 46.87373018474296,
+      "absolute_rmse_delta_mm": 23.299789326838685
+    },
+    {
+      "recording": "probe_recording_20260901_153517",
+      "cpu_normal_position_rmse_mm": 26.718146517782763,
+      "mjx_normal_position_rmse_mm": 260.3536319456362,
+      "absolute_rmse_delta_mm": 233.63548542785344
+    }
+  ]
+}

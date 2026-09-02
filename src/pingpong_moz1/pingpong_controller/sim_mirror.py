@@ -41,6 +41,7 @@ else:
     _CV2_IMPORT_ERROR = None
 
 from pingpong_controller.mjx_rl_policy import (
+    Gpu1QaccFtV153PolicyController,
     Gpu0QvelRealRmpV85PolicyController,
     MjxRLPolicyController,
     Simcode2IdealPd67PolicyController,
@@ -52,6 +53,7 @@ from pingpong_controller.mjx_rl_policy import (
 )
 from pingpong_controller.rl_policy import (
     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
@@ -156,8 +158,14 @@ class SimMirrorConfig:
     simcode7_model_path: Path | None = None
     simcode7_v85_model_path: Path | None = None
     simcode7_v91_model_path: Path | None = None
+    simcode7_v97_model_path: Path | None = None
     simcode7_policy_xml_path: Path | None = None
     simcode7_sim_xml_path: Path | None = None
+    simcode8_policy_xml_path: Path | None = None
+    simcode8_sim_xml_path: Path | None = None
+    gpu1_qacc_ft_model_path: Path | None = None
+    gpu1_qacc_ft_policy_xml_path: Path | None = None
+    gpu1_qacc_ft_sim_xml_path: Path | None = None
 
 
 def normalize_policy_profile(value: object) -> str:
@@ -212,19 +220,31 @@ def sim_mirror_config_for_policy_profile(
     elif canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
         policy_model = str(getattr(
             base_cfg, "policy_model", "v85") or "v85").strip().lower()
-        if policy_model not in {"v85", "v91"}:
+        if policy_model not in {"v85", "v91", "v97"}:
             raise ValueError(
                 f"unknown GPU0-QVEL/REAL-RMP mirror model: {policy_model!r}")
-        selected_model_path = (
-            base_cfg.simcode7_v91_model_path
-            if policy_model == "v91"
-            else base_cfg.simcode7_v85_model_path
-        )
+        selected_model_path = {
+            "v85": base_cfg.simcode7_v85_model_path,
+            "v91": base_cfg.simcode7_v91_model_path,
+            "v97": base_cfg.simcode7_v97_model_path,
+        }[policy_model]
         alternate_paths = {
             "model_path": (
                 selected_model_path or base_cfg.simcode7_model_path),
-            "policy_xml_path": base_cfg.simcode7_policy_xml_path,
-            "sim_xml_path": base_cfg.simcode7_sim_xml_path,
+            "policy_xml_path": (
+                base_cfg.simcode8_policy_xml_path
+                if policy_model == "v97"
+                else base_cfg.simcode7_policy_xml_path),
+            "sim_xml_path": (
+                base_cfg.simcode8_sim_xml_path
+                if policy_model == "v97"
+                else base_cfg.simcode7_sim_xml_path),
+        }
+    elif canonical == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
+        alternate_paths = {
+            "model_path": base_cfg.gpu1_qacc_ft_model_path,
+            "policy_xml_path": base_cfg.gpu1_qacc_ft_policy_xml_path,
+            "sim_xml_path": base_cfg.gpu1_qacc_ft_sim_xml_path,
         }
     else:
         raise ValueError(f"unsupported sim mirror policy profile: {canonical}")
@@ -250,6 +270,8 @@ def sim_mirror_config_for_policy_profile(
         backend=(
             "mjx"
             if canonical == OBSERVATION_PROFILE_SIMCODE4_SERVO67
+            else "mujoco"
+            if canonical == OBSERVATION_PROFILE_GPU1_QACC_FT_V153
             else base_cfg.backend),
         model_path=Path(alternate_paths["model_path"]),
         policy_xml_path=Path(alternate_paths["policy_xml_path"]),
@@ -495,6 +517,7 @@ class RealBallSimMirror:
             self.policy_profile in {
                 OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
                 OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
             })
         self._real_rmp_profile = (
             self.policy_profile
@@ -544,6 +567,8 @@ class RealBallSimMirror:
                 Simcode6Qvel67PolicyController),
             OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: (
                 Gpu0QvelRealRmpV85PolicyController),
+            OBSERVATION_PROFILE_GPU1_QACC_FT_V153: (
+                Gpu1QaccFtV153PolicyController),
         }[self.policy_profile]
         self.policy = policy_cls(
             str(Path(cfg.model_path).expanduser().resolve()),
@@ -728,7 +753,36 @@ class RealBallSimMirror:
 
     def _initialize_recovered_rmp(self) -> None:
         """Restore simcode7's nominal 1 kHz recovered-RMP plant on CPU."""
-        from recovered_rmp import JointLimits, JointRMPPlanner, RMPParams
+        try:
+            from recovered_rmp import JointLimits, JointRMPPlanner, RMPParams
+        except ModuleNotFoundError as exc:
+            if exc.name != "recovered_rmp":
+                raise
+            # Source-tree launches do not necessarily put the workspace root
+            # on sys.path (an absolute script path makes sys.path[0] the tools
+            # directory). Resolve the bundled plant from the authenticated
+            # checkpoint path instead of depending on the caller's cwd.
+            checkpoint = Path(self.cfg.model_path).expanduser().resolve()
+            candidates = (
+                list(checkpoint.parents)
+                + list(Path(__file__).resolve().parents)
+                + [Path.cwd().resolve()]
+            )
+            workspace_root = next(
+                (
+                    root for root in candidates
+                    if (root / "recovered_rmp" / "__init__.py").is_file()
+                ),
+                None,
+            )
+            if workspace_root is None:
+                raise RuntimeError(
+                    "GPU0 CPU mirror cannot locate bundled recovered_rmp"
+                ) from exc
+            root_text = str(workspace_root)
+            if root_text not in sys.path:
+                sys.path.insert(0, root_text)
+            from recovered_rmp import JointLimits, JointRMPPlanner, RMPParams
 
         env_cfg = self.checkpoint_env_cfg
         if not bool(env_cfg.get("recovered_rmp_motion_mode", False)):
@@ -1371,6 +1425,7 @@ class RealBallSimMirror:
         ball_obs_age_s: float,
         options: Any,
         num_steps: int = 1,
+        confirmed_hit_count: int = 0,
     ) -> dict[str, Any]:
         q_nominal = np.asarray(self.policy.last_cmd_q, dtype=np.float32)
         q_actuator = self.data.ctrl[self.arm_aids].astype(np.float32)
@@ -1409,6 +1464,7 @@ class RealBallSimMirror:
                 arm_dq=arm_dq,
                 observation_scales=getattr(
                     options, "policy_observation_scales", ()),
+                confirmed_hit_count=int(confirmed_hit_count),
             )
             if self._real_rmp_profile:
                 # The actor performs the one and only qvel->q_ref integration.

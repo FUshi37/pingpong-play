@@ -49,6 +49,7 @@ from pingpong_controller.rl_policy import (
     EXPECTED_OBS_DIM_GPU0_REAL_RMP,
     EXPECTED_OBS_DIM_WITH_DELAY,
     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
@@ -558,6 +559,277 @@ class Simcode6Qvel67PolicyController(MjxRLPolicyController):
                 + "; ".join(mismatches))
 
 
+class Gpu1QaccFtV153PolicyController(MjxRLPolicyController):
+    """Authenticated real/mirror adapter for GPU1-QACC-FT V153.
+
+    The physical robot receives the latest command-state ``q_cmd``.  The
+    checkpoint's delayed second-order actuator is deliberately *not* replayed
+    here; the CPU simulation mirror reconstructs it from ``env_cfg``.  The
+    actor's only changed observation dimension is obs[49]: zero before the
+    first confirmed hit and represented-ball age afterwards.
+    """
+
+    CHECKPOINT_SHA256 = (
+        "a02b0421029e808b84ea0ee5cf615b3e65c6df3bc28c0f4766ad9953c0e85176"
+    )
+    PROFILE_NAME = (
+        "goal_d455_sport_taskspace_record_new3_sim2real_fixed_base_ball4g_"
+        "dual_domain_homotopy_v153"
+    )
+    ZERO_OBSERVATION_ACTOR_MEAN = np.asarray(
+        [0.264987797, 0.095902964, -0.141679987, 0.130324334,
+         -0.013870809, -0.059728369, -0.005993952],
+        dtype=np.float32,
+    )
+    LOST_BALL_TIMEOUT_S = 0.350
+    MAXIMUM_JOINT_FEEDBACK_AGE_S = 0.010
+
+    _REQUIRED_EXACT = {
+        "action_command_mode": "acceleration",
+        "action_acc_scale": 1.0,
+        "policy_integration_feedback_source": "command",
+        "recovered_rmp_motion_mode": False,
+        "include_qvel_reference_error_obs": False,
+        "enable_delay_conditioning": True,
+        "high_latency_obs": False,
+        "include_tau_act_norm": True,
+        "include_command_state": True,
+        "include_active_command_error": True,
+        "include_phase_features": True,
+        "use_delay_embedding": False,
+        "ball_obs_rate_hz": 60.0,
+        "ball_obs_fractional_rate": True,
+        "ball_obs_age_tracks_stale": False,
+        "ball_obs_age_clip": 0.5,
+        "ball_obs_velocity_observer_mode": "raw",
+        "ball_obs_camera_missing_prob": 0.0,
+        "ball_obs_dropout_prob": 0.0,
+        "ball_obs_dropout_burst_prob": 0.0,
+        "dr_post_hit_ball_obs_latency": True,
+        "dr_post_hit_ball_obs_latency_probability": 1.0,
+        "dr_post_hit_ball_obs_latency_min_confirmed_hits": 1,
+        "dr_post_hit_ball_obs_latency_timestamp_consistent_age": True,
+        "arm_action_limiter": True,
+        "actuator_cmd_filter": True,
+        "actuator_cmd_model": "second_order",
+        "actuator_compensation_mode": "none",
+        "arm_servo_target_tracking_planner": False,
+        "right_arm_pd_profile": "sport_taskspace_fit_v1",
+        "action_filter_tau_ms": 0.0,
+        "action_jerk_limit": 0.0,
+        "enable_anti_windup": False,
+        "delay_min_ms": 45.0,
+        "delay_max_ms": 45.0,
+        "simulation_base_mode": "aligned_fixed",
+        "ball_reset_mode": "falling_contact",
+        "dr_ball_normalized_inertia_range": (0.4, 0.4),
+    }
+    _REQUIRED_VECTOR = {
+        "arm_vel_limit_deg_s": (
+            210.0, 210.0, 240.0, 240.0, 300.0, 300.0, 300.0),
+        "arm_acc_limit_deg_s2": (
+            1300.0, 1300.0, 1800.0, 3000.0, 3000.0, 3000.0, 3000.0),
+        "actuator_cmd_delay_ms_per_joint": (
+            45.0, 50.0, 45.0, 40.0, 35.0, 45.0, 50.0),
+        "actuator_cmd_natural_frequency_rad_s": (
+            21.8911379437, 22.0895753812, 22.6504705, 21.730533,
+            20.1549483562, 22.2451380938, 23.0546718187),
+        "actuator_cmd_damping_ratio": (
+            0.3330028, 0.3295521, 0.3111642, 0.3114,
+            0.3131064, 0.3112326, 0.28553475),
+        "actuator_cmd_gain_per_joint": (
+            0.99788351, 0.9966119, 0.99231151, 0.99094239,
+            0.982326685, 0.992694585, 0.983194325),
+    }
+
+    def __init__(self, model_path: str, **kwargs) -> None:
+        kwargs["enable_delay_conditioning"] = True
+        kwargs["use_valid_ball_obs_age"] = True
+        kwargs["observation_profile"] = OBSERVATION_PROFILE_GPU1_QACC_FT_V153
+        kwargs["expected_obs_dim"] = EXPECTED_OBS_DIM_WITH_DELAY
+        kwargs["ball_obs_age_clip_s"] = 0.5
+        super().__init__(model_path, **kwargs)
+        self.policy_model_id = "v153"
+        self.policy_model_label = "V153"
+        # V153 was trained with simulation_base_mode=aligned_fixed.  Unlike
+        # earlier floating-base profiles, obs[14:20] is exactly zero on both
+        # hardware and the sim mirror; never reuse the XML warm-settle drift.
+        self._base_obs_q = np.zeros(3, dtype=np.float32)
+        self._base_obs_dq = np.zeros(3, dtype=np.float32)
+        self.maximum_joint_feedback_age_s = self.MAXIMUM_JOINT_FEEDBACK_AGE_S
+        self._gpu1_requires_measured_reset = True
+        golden = self._policy_action(
+            np.zeros(EXPECTED_OBS_DIM_WITH_DELAY, dtype=np.float32))
+        if not np.allclose(
+                golden, self.ZERO_OBSERVATION_ACTOR_MEAN,
+                rtol=0.0, atol=2e-7):
+            raise RuntimeError(
+                "GPU1-QACC-FT V153 actor failed its zero-observation golden vector")
+
+    @staticmethod
+    def _sha256(path: str) -> str:
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _load_model(self, model_path: str, device: str) -> None:
+        path = Path(model_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"GPU1-QACC-FT V153 checkpoint not found: {path}")
+        actual = self._sha256(str(path))
+        if actual != self.CHECKPOINT_SHA256:
+            raise RuntimeError(
+                "GPU1-QACC-FT V153 checkpoint SHA-256 mismatch: "
+                f"{actual}")
+        self._checkpoint_sha256 = actual
+        super()._load_model(str(path), device)
+
+    def _validate_checkpoint_contract(self, payload: dict) -> None:
+        expected_payload = {
+            "obs_dim": 67,
+            "critic_obs_dim": 279,
+            "act_dim": 7,
+            "stage_name": "record_new3_sim2real_v153_b2_b3_energy_p025_60hz",
+            "stage_index": 59,
+            "stage_update": 441,
+            "global_update": 1_092,
+            "step": 14_841_511_936,
+        }
+        mismatches = [
+            f"{key}={payload.get(key)!r} (expected {expected!r})"
+            for key, expected in expected_payload.items()
+            if payload.get(key) != expected
+        ]
+        args = payload.get("args")
+        if not isinstance(args, dict):
+            mismatches.append("args is missing")
+        else:
+            if args.get("curriculum_profile") != self.PROFILE_NAME:
+                mismatches.append("args.curriculum_profile changed")
+            if args.get("seed") != 82_731:
+                mismatches.append("args.seed must be 82731")
+        cfg = payload.get("env_cfg")
+        if not isinstance(cfg, dict):
+            mismatches.append("env_cfg is missing")
+            cfg = {}
+        for key, expected in self._REQUIRED_EXACT.items():
+            actual = cfg.get(key)
+            if key == "dr_ball_normalized_inertia_range":
+                actual = tuple(actual or ())
+            if actual != expected:
+                mismatches.append(
+                    f"{key}={cfg.get(key)!r} (expected {expected!r})")
+        if tuple(cfg.get("dr_obs_latency_steps_range", ())) != (0, 2):
+            mismatches.append("dr_obs_latency_steps_range must be (0, 2)")
+        for key, expected in self._REQUIRED_VECTOR.items():
+            try:
+                actual = np.asarray(cfg.get(key), dtype=np.float64)
+                valid = bool(
+                    actual.shape == (7,)
+                    and np.allclose(actual, expected, rtol=0.0, atol=1e-8))
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                mismatches.append(f"{key} does not match V153")
+        try:
+            ball_mass = np.asarray(
+                cfg.get("dr_ball_mass_range"), dtype=np.float64)
+            mass_valid = bool(
+                ball_mass.shape == (2,)
+                and np.allclose(
+                    ball_mass, (0.0039, 0.0041), rtol=0.0, atol=1e-12))
+        except (TypeError, ValueError):
+            mass_valid = False
+        if not mass_valid:
+            mismatches.append("dr_ball_mass_range must be (0.0039, 0.0041)")
+        if mismatches:
+            raise RuntimeError(
+                "GPU1-QACC-FT V153 checkpoint deployment contract mismatch: "
+                + "; ".join(mismatches))
+
+    def reset(self) -> None:
+        super().reset()
+        self._gpu1_requires_measured_reset = True
+
+    def _seed_from_measurement(self, q: np.ndarray) -> None:
+        self.arm_cmd_q = q.copy()
+        self.arm_cmd_qvel = np.zeros(self.n_arm, dtype=np.float32)
+        self.prev_action = np.zeros(self.n_arm, dtype=np.float32)
+        self._cmd_history = [
+            q.copy() for _ in range(self._command_buffer_len)]
+        racket_pos, fk_ok = self._compute_racket_pose_base(q)
+        if not fk_ok:
+            raise RuntimeError(
+                "GPU1-QACC-FT requires encoder FK for right_ee_site")
+        self._prev_racket_pos_base = np.asarray(
+            racket_pos, dtype=np.float32).reshape(3).copy()
+        self._prev_racket_sample_pos_base = self._prev_racket_pos_base.copy()
+        self._prev_racket_sample_stamp_s = None
+        self._last_racket_sample_vel_base = np.zeros(3, dtype=np.float32)
+        self._gpu1_requires_measured_reset = False
+
+    def predict(
+        self,
+        ball_pos_m: np.ndarray,
+        ball_vel_m_s: np.ndarray,
+        *,
+        ball_valid: bool,
+        ball_obs_age_s: float = 0.0,
+        dt: Optional[float] = None,
+        arm_q: Optional[np.ndarray] = None,
+        arm_dq: Optional[np.ndarray] = None,
+        arm_sample_stamp_s: Optional[float] = None,
+        observation_scales=None,
+        confirmed_hit_count: int = 0,
+    ) -> np.ndarray:
+        step_dt = self.dt if dt is None else float(dt)
+        if not np.isclose(step_dt, 0.005, rtol=0.0, atol=1e-12):
+            raise RuntimeError(
+                "GPU1-QACC-FT requires an exact 0.005 s policy tick")
+        if not bool(ball_valid):
+            raise RuntimeError(
+                "GPU1-QACC-FT refuses inference without a valid ball state")
+        actual_age_s = float(ball_obs_age_s)
+        if (not np.isfinite(actual_age_s) or actual_age_s < 0.0
+                or actual_age_s > self.LOST_BALL_TIMEOUT_S):
+            raise RuntimeError(
+                "GPU1-QACC-FT represented ball age exceeds 350 ms")
+        hit_count = int(confirmed_hit_count)
+        if hit_count < 0:
+            raise ValueError("confirmed_hit_count must be non-negative")
+        if arm_q is None or arm_dq is None:
+            raise RuntimeError(
+                "GPU1-QACC-FT requires fresh measured q/dq feedback")
+        q = np.asarray(arm_q, dtype=np.float32).reshape(self.n_arm)
+        dq = np.asarray(arm_dq, dtype=np.float32).reshape(self.n_arm)
+        if (not np.all(np.isfinite(q)) or not np.all(np.isfinite(dq))
+                or np.any(q < self.arm_q_low) or np.any(q > self.arm_q_high)):
+            raise RuntimeError("GPU1-QACC-FT measured joint state is invalid")
+        if observation_scales is not None:
+            scales = np.asarray(observation_scales, dtype=np.float32).reshape(-1)
+            if scales.size and (
+                    scales.shape != (EXPECTED_OBS_DIM_WITH_DELAY,)
+                    or not np.all(scales == np.float32(1.0))):
+                raise RuntimeError(
+                    "GPU1-QACC-FT forbids actor observation scaling")
+        if self._gpu1_requires_measured_reset:
+            self._seed_from_measurement(q)
+        return super().predict(
+            ball_pos_m,
+            ball_vel_m_s,
+            ball_valid=True,
+            ball_obs_age_s=(actual_age_s if hit_count >= 1 else 0.0),
+            dt=step_dt,
+            arm_q=q,
+            arm_dq=dq,
+            arm_sample_stamp_s=arm_sample_stamp_s,
+            observation_scales=observation_scales,
+        )
+
+
 class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
     """Exact 57-D measured-feedback adapter for GPU0-QVEL/REAL-RMP.
 
@@ -571,6 +843,9 @@ class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
     )
     V91_CHECKPOINT_SHA256 = (
         "92b5d39592a81236ee5ee5806499a0a8d4b422f131b312ad87ea1efc90507c66"
+    )
+    V97_CHECKPOINT_SHA256 = (
+        "f166a4b8adb6b5b6a846b14407baa5da32ba3535492d23cb0ad5978cece8568d"
     )
     PROFILE_NAME = "goal_d455_measured_qvel_rmp_vertical_v85"
     STAGE_NAME = "rmp85_complete_nonexecution_full_episode_polish"
@@ -600,6 +875,11 @@ class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
     V91_ZERO_OBSERVATION_ACTOR_MEAN = np.asarray(
         [-0.01141354, 0.01237924, 0.01954993, 0.06344163,
          0.11612345, -0.12466098, 0.01851650],
+        dtype=np.float32,
+    )
+    V97_ZERO_OBSERVATION_ACTOR_MEAN = np.asarray(
+        [-0.013275788, 0.009566929, 0.019368205, 0.067597359,
+         0.120253950, -0.124855369, 0.022645233],
         dtype=np.float32,
     )
     CHECKPOINT_CONTRACTS = {
@@ -638,6 +918,26 @@ class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
                 "resume_start_stage": "rmp91_wide_xy_no_hold_margin",
             },
             "zero_observation_actor_mean": V91_ZERO_OBSERVATION_ACTOR_MEAN,
+        },
+        V97_CHECKPOINT_SHA256: {
+            "model_id": "v97",
+            "label": "V97",
+            "payload": {
+                "obs_dim": EXPECTED_OBS_DIM_GPU0_REAL_RMP,
+                "critic_obs_dim": 368,
+                "act_dim": 7,
+                "stage_name": "rmp97_rmp_internal_commit_12p5",
+                "stage_index": 32,
+                "stage_update": 164,
+                "global_update": 5_329,
+                "step": 5_836_242_944,
+            },
+            "args": {
+                "curriculum_profile": (
+                    "goal_d455_measured_qvel_rmp_vertical_v97"),
+                "seed": 20261018,
+            },
+            "zero_observation_actor_mean": V97_ZERO_OBSERVATION_ACTOR_MEAN,
         },
     }
     MAXIMUM_JOINT_FEEDBACK_AGE_S = 0.010
@@ -722,7 +1022,7 @@ class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
         if contract is None:
             raise RuntimeError(
                 "GPU0-QVEL/REAL-RMP checkpoint SHA-256 is not an approved "
-                f"V85/V91 model: {actual}")
+                f"V85/V91/V97 model: {actual}")
         self._checkpoint_sha256 = actual
         self._checkpoint_contract = contract
         self.policy_model_id = str(contract["model_id"])
@@ -885,7 +1185,9 @@ class Gpu0QvelRealRmpV85PolicyController(MjxRLPolicyController):
         arm_dq: Optional[np.ndarray] = None,
         arm_sample_stamp_s: Optional[float] = None,
         observation_scales=None,
+        confirmed_hit_count: int = 0,
     ) -> np.ndarray:
+        del confirmed_hit_count
         step_dt = self.dt if dt is None else float(dt)
         if not np.isclose(step_dt, 0.005, rtol=0.0, atol=1e-12):
             raise RuntimeError(

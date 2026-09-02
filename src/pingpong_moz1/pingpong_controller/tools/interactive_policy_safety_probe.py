@@ -100,6 +100,7 @@ from pingpong_controller.done_condition_monitor import (
     _wrap_angle_rad,
 )
 from pingpong_controller.mjx_rl_policy import (
+    Gpu1QaccFtV153PolicyController,
     Gpu0QvelRealRmpV85PolicyController,
     MjxRLPolicyController,
     Simcode2IdealPd67PolicyController,
@@ -149,6 +150,7 @@ from pingpong_controller.racket_juggle_mpc import (
 from pingpong_controller.rl_policy import (
     DEFAULT_ARM_ACC_LIMIT_DEG_S2,
     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
@@ -165,6 +167,7 @@ from pingpong_controller.safety_limiter import (
     RightArmCommandSafetyLimiter,
     ServoTargetTrackingPlanner,
 )
+from pingpong_controller.reset_trajectory import SlowResetTrajectory
 from pingpong_controller.sim_mirror import (
     RealBallMjxJaxSimMirror,
     RealBallSimMirror,
@@ -292,11 +295,52 @@ DEFAULT_SIMCODE7_V91_MODEL_PATH = (
     / "measured_qvel_rmp_vertical_v91_gpu0_seed20261018_20260829_stage24_ceilling_gate_online2"
     / "26_rmp91_complete_nonexecution_factorized_commit.pkl"
 )
+DEFAULT_SIMCODE7_V97_MODEL_PATH = (
+    REPO_ROOT / "simcode8" / "pingpong_moz1-main" / "pingpong_controller"
+    / "outputs" / "rl_sim"
+    / "selected_best_models_and_normal_reset_videos_20260901"
+    / "gpu0_v97" / "gpu0_v97_best_step5836242944.pkl"
+)
+DEFAULT_GPU1_QACC_FT_MODEL_PATH = (
+    REPO_ROOT / "simcode8" / "pingpong_moz1-main" / "pingpong_controller"
+    / "outputs" / "rl_sim"
+    / "selected_best_models_and_normal_reset_videos_20260901"
+    / "gpu1_v153" / "gpu1_v153_best_step14841511936.pkl"
+)
 # Backward-compatible default for direct CLI users.
 DEFAULT_SIMCODE7_MODEL_PATH = DEFAULT_SIMCODE7_V85_MODEL_PATH
 GPU0_RMP_MODEL_V85 = "v85"
 GPU0_RMP_MODEL_V91 = "v91"
-GPU0_RMP_MODEL_IDS = (GPU0_RMP_MODEL_V85, GPU0_RMP_MODEL_V91)
+GPU0_RMP_MODEL_V97 = "v97"
+GPU1_QACC_FT_MODEL_V153 = "v153"
+GPU0_RMP_MODEL_IDS = (
+    GPU0_RMP_MODEL_V85, GPU0_RMP_MODEL_V91, GPU0_RMP_MODEL_V97)
+RUNTIME_SWITCHABLE_POLICY_PROFILES = (
+    OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+    OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
+    OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+    OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+)
+EAGER_POLICY_PROFILES = frozenset({
+    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+})
+PROFILE_IDENTIFIED_MODEL_PROFILES = EAGER_POLICY_PROFILES
+
+# Reset is a supervised recovery mode, not a transient policy state.  The
+# commanded S-curve may finish before the physical joints have settled, so the
+# state machine keeps publishing the final reset target until fresh feedback
+# remains inside these bounds.  It then disarms and requires a new off -> on
+# Send-command gesture before any policy/tracker command can run.
+RESET_FEEDBACK_MAX_AGE_S = 0.05
+RESET_TRACKING_ERROR_LIMIT_RAD = math.radians(5.0)
+RESET_ADVANCE_MAX_SPEED_RAD_S = math.radians(20.0)
+RESET_SETTLE_POSITION_TOLERANCE_RAD = math.radians(1.0)
+RESET_SETTLE_VELOCITY_TOLERANCE_RAD_S = math.radians(2.0)
+RESET_SETTLE_DURATION_S = 0.50
+RESET_REANCHOR_RESUME_ERROR_RAD = math.radians(0.10)
 
 
 def _normalize_gpu0_rmp_model(
@@ -311,15 +355,56 @@ def _normalize_gpu0_rmp_model(
         "91": GPU0_RMP_MODEL_V91,
         "v91": GPU0_RMP_MODEL_V91,
         "gpu0_qvel_real_rmp_v91": GPU0_RMP_MODEL_V91,
+        "97": GPU0_RMP_MODEL_V97,
+        "v97": GPU0_RMP_MODEL_V97,
+        "gpu0_qvel_real_rmp_v97": GPU0_RMP_MODEL_V97,
     }
     try:
         return aliases[text]
     except KeyError as exc:
         raise ValueError(
-            f"unknown GPU0-QVEL/REAL-RMP model {value!r}; expected V85 or V91"
+            f"unknown GPU0-QVEL/REAL-RMP model {value!r}; "
+            "expected V85, V91, or V97"
         ) from exc
+
+
+def _normalize_policy_model_for_profile(
+    profile: object,
+    value: object,
+    default: str = GPU0_RMP_MODEL_V85,
+) -> str:
+    canonical = normalize_observation_profile(profile)
+    if canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+        return _normalize_gpu0_rmp_model(value, default)
+    if canonical == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
+        return GPU1_QACC_FT_MODEL_V153
+    # Other release-locked controllers do not consume this selector, but the
+    # web/runtime payload must still reject an unknown GPU0 value instead of
+    # silently carrying an invalid option through the command path.
+    return _normalize_gpu0_rmp_model(value or default, default)
+
+
+def _controller_policy_model_id(
+    profile: object,
+    controller: object,
+    default: str = GPU0_RMP_MODEL_V85,
+) -> str:
+    """Return the UI/runtime model id that belongs to a policy profile."""
+    canonical = normalize_observation_profile(profile)
+    if canonical == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
+        return GPU1_QACC_FT_MODEL_V153
+    if canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+        return _normalize_gpu0_rmp_model(
+            getattr(controller, "policy_model_id", default) or default,
+            default,
+        )
+    return str(getattr(controller, "policy_model_id", "") or "")
 DEFAULT_SIMCODE7_POLICY_XML = (
     REPO_ROOT / "simcode7" / "pingpong_moz1-main" / "pingpong_controller"
+    / "tools" / "rl_sim" / "moz1_pd.xml"
+)
+DEFAULT_SIMCODE8_POLICY_XML = (
+    REPO_ROOT / "simcode8" / "pingpong_moz1-main" / "pingpong_controller"
     / "tools" / "rl_sim" / "moz1_pd.xml"
 )
 DEFAULT_VISION_MODEL = (
@@ -631,10 +716,16 @@ class ProbeConfig:
     simcode7_model_path: Path
     simcode7_v85_model_path: Path
     simcode7_v91_model_path: Path
+    simcode7_v97_model_path: Path
     simcode7_policy_xml_path: Path
+    simcode8_policy_xml_path: Path
+    gpu1_qacc_ft_model_path: Path
+    gpu1_qacc_ft_policy_xml_path: Path
     robot_xml_path: Path
     policy_obs_dim: int
     reset_initial_pose_id: str
+    reset_velocity_limit_deg_s: float
+    reset_acceleration_limit_deg_s2: float
     default_control_mode: str
     racket_tracking_height_offset_m: float
     racket_tracking_use_mpc: bool
@@ -925,6 +1016,7 @@ class ProbeConfig:
     simcode5_sim_xml_path: Path
     simcode6_sim_xml_path: Path
     simcode7_sim_xml_path: Path
+    simcode8_sim_xml_path: Path
     sim_enable_video_frames: bool
     sim_frame_rate_hz: float
     sim_render_width: int
@@ -5661,8 +5753,10 @@ def _sim_mirror_process_main(
     last_frame_seq = -1
     active_profile = normalize_observation_profile(
         getattr(sim_cfg, "policy_profile", None))
-    active_model = _normalize_gpu0_rmp_model(getattr(
-        sim_cfg, "policy_model", GPU0_RMP_MODEL_V85))
+    active_model = _normalize_policy_model_for_profile(
+        active_profile,
+        getattr(sim_cfg, "policy_model", GPU0_RMP_MODEL_V85),
+    )
     active_generation = 0
     active_cfg = sim_mirror_config_for_policy_profile(
         replace(sim_cfg, policy_model=active_model), active_profile)
@@ -5785,8 +5879,11 @@ def _sim_mirror_process_main(
             if kind == "reset":
                 requested_profile = normalize_observation_profile(
                     cmd.get("policy_profile", active_profile))
-                requested_model = _normalize_gpu0_rmp_model(
-                    cmd.get("policy_model", active_model), active_model)
+                requested_model = _normalize_policy_model_for_profile(
+                    requested_profile,
+                    cmd.get("policy_model", active_model),
+                    active_model,
+                )
                 requested_generation = int(
                     cmd.get("policy_generation", active_generation) or 0)
                 if (requested_profile != active_profile
@@ -5856,8 +5953,11 @@ def _sim_mirror_process_main(
                 continue
             command_profile = normalize_observation_profile(
                 cmd.get("policy_profile", active_profile))
-            command_model = _normalize_gpu0_rmp_model(
-                cmd.get("policy_model", active_model), active_model)
+            command_model = _normalize_policy_model_for_profile(
+                command_profile,
+                cmd.get("policy_model", active_model),
+                active_model,
+            )
             command_generation = int(
                 cmd.get("policy_generation", active_generation) or 0)
             if (command_profile != active_profile
@@ -5960,12 +6060,18 @@ def _sim_mirror_process_main(
             else:
                 snapshot = None
                 for idx, cmd in enumerate(batch_cmds):
+                    step_kwargs = {}
+                    if (active_profile
+                            == OBSERVATION_PROFILE_GPU1_QACC_FT_V153):
+                        step_kwargs["confirmed_hit_count"] = int(cmd.get(
+                            "confirmed_hit_count", 0) or 0)
                     step_snapshot = mirror.step(
                         ball_pos_seq[idx],
                         ball_vel_seq[idx],
                         ball_valid=bool(ball_valid_seq[idx]),
                         ball_obs_age_s=float(ball_age_seq[idx]),
                         options=opts,
+                        **step_kwargs,
                     )
                     raw_batch_samples = step_snapshot.pop("_batchSamples", None)
                     if isinstance(raw_batch_samples, list) and raw_batch_samples:
@@ -6120,8 +6226,10 @@ class SimMirrorSubprocess:
         self.episode = 0
         self.policy_profile = normalize_observation_profile(
             getattr(sim_cfg, "policy_profile", None))
-        self.policy_model = _normalize_gpu0_rmp_model(getattr(
-            sim_cfg, "policy_model", GPU0_RMP_MODEL_V85))
+        self.policy_model = _normalize_policy_model_for_profile(
+            self.policy_profile,
+            getattr(sim_cfg, "policy_model", GPU0_RMP_MODEL_V85),
+        )
         self.policy_generation = 0
         self.submitted_source_seq: int | None = None
         self.command_drops = 0
@@ -6231,9 +6339,10 @@ class SimMirrorSubprocess:
                             if normalize_observation_profile(sync.get(
                                     "policyProfile")) != self.policy_profile:
                                 continue
-                            if _normalize_gpu0_rmp_model(sync.get(
-                                    "policyModel", self.policy_model)
-                                    ) != self.policy_model:
+                            if _normalize_policy_model_for_profile(
+                                    self.policy_profile,
+                                    sync.get("policyModel", self.policy_model),
+                                    self.policy_model) != self.policy_model:
                                 continue
                             self.completed_samples.append(copied)
                             self.last_completed_stream_seq = max(
@@ -6269,8 +6378,10 @@ class SimMirrorSubprocess:
                                 != self.policy_profile):
                             continue
                         if (info_model is not None
-                                and _normalize_gpu0_rmp_model(info_model)
-                                != self.policy_model):
+                                and _normalize_policy_model_for_profile(
+                                    self.policy_profile,
+                                    info_model,
+                                    self.policy_model) != self.policy_model):
                             continue
                     self.latest_frame = bytes(frame)
                     self.latest_frame_info = (
@@ -6355,7 +6466,11 @@ class SimMirrorSubprocess:
                 self.policy_profile = normalize_observation_profile(
                     policy_profile)
             if policy_model is not None:
-                self.policy_model = _normalize_gpu0_rmp_model(policy_model)
+                self.policy_model = _normalize_policy_model_for_profile(
+                    self.policy_profile,
+                    policy_model,
+                    self.policy_model,
+                )
             if policy_generation is not None:
                 self.policy_generation = int(policy_generation)
             self.target_sim_time_s = 0.0
@@ -6450,9 +6565,10 @@ class SimMirrorSubprocess:
         policy_profile: str,
         policy_model: str,
         policy_generation: int,
+        confirmed_hit_count: int = 0,
     ) -> dict[str, Any]:
         profile = normalize_observation_profile(policy_profile)
-        model = _normalize_gpu0_rmp_model(policy_model)
+        model = _normalize_policy_model_for_profile(profile, policy_model)
         if (profile != self.policy_profile
                 or model != self.policy_model
                 or int(policy_generation) != self.policy_generation):
@@ -6477,6 +6593,7 @@ class SimMirrorSubprocess:
             "policy_profile": str(profile),
             "policy_model": str(model),
             "policy_generation": int(policy_generation),
+            "confirmed_hit_count": int(confirmed_hit_count),
             "target_sim_time_s": float(self.target_sim_time_s),
             "control_dt_s": float(getattr(self.sim_cfg, "control_dt", 0.005)),
             "command_wall_s": round(float(time.time()), 6),
@@ -6573,6 +6690,7 @@ WORKSPACE_SOFT_MODES = frozenset({
 WORKSPACE_HARD_MODES = frozenset({"position", "predictive"})
 WORKSPACE_PREDICTIVE_MODES = frozenset({"predictive", "predictive_soft"})
 CONTROL_MODES = ("policy", "racket_tracking", "mpc_juggle")
+SELECTABLE_CONTROL_MODES = ("policy", "racket_tracking")
 
 
 def _control_mode(value: Any, default: str = "policy") -> str:
@@ -6585,6 +6703,20 @@ def _control_mode(value: Any, default: str = "policy") -> str:
     if mode in {"policy", "rl", "rl_policy"}:
         return "policy"
     return default if default in CONTROL_MODES else "policy"
+
+
+def _sanitize_external_control_payload(
+    payload: dict[str, Any] | None,
+) -> tuple[dict[str, Any], bool]:
+    """Make the disabled MPC-juggle mode unreachable from HTTP clients."""
+    sanitized = dict(payload) if isinstance(payload, dict) else {}
+    requested_mode = _control_mode(
+        sanitized.get("controlMode", "policy"), "policy")
+    blocked = requested_mode == "mpc_juggle"
+    if blocked:
+        sanitized["controlMode"] = "policy"
+        sanitized["publishCommands"] = False
+    return sanitized, blocked
 
 
 def _policy_uses_valid_ball_obs_age(
@@ -6672,7 +6804,10 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             and model_action_shape == (action_dim,)),
         "observationProfile": str(getattr(
             controller, "observation_profile", "")),
-        "policyModel": str(getattr(controller, "policy_model_id", "")),
+        "policyModel": _controller_policy_model_id(
+            getattr(controller, "observation_profile", ""),
+            controller,
+        ),
         "checkpointSha256": str(getattr(
             controller, "_checkpoint_sha256", "")),
         "actionCommandMode": action_mode,
@@ -9485,10 +9620,31 @@ class PolicySafetyProbe:
             cfg.reset_initial_pose_id)
         self.reset_initial_pose_id = reset_pose_id
         self.reset_initial_pose_q = reset_pose_q.astype(np.float64).copy()
-        self.safety_limiter = RightArmCommandSafetyLimiter(
-            self.safe_q.astype(np.float64), dt=cfg.control_dt,
-            parking_velocity_scale=cfg.safety_parking_velocity_scale,
-            parking_acceleration_scale=cfg.safety_parking_acceleration_scale)
+        # Compatibility name only: this object intentionally has no
+        # filter/reset/observe entry points.  Policy publication and reset
+        # must never enter RightArmCommandSafetyLimiter; the small amount of
+        # command-history state needed by the workspace controller is kept
+        # here and advanced by `_limiter_free_joint_candidate` below.
+        self.safety_limiter = SimpleNamespace(
+            last_cmd=self.safe_q.astype(np.float64).copy(),
+            last_vel=np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float64),
+            dt=float(cfg.control_dt),
+            vel_limit_rad_s=np.deg2rad(np.asarray(
+                RightArmCommandSafetyLimiter.VEL_LIMIT_DEG_S,
+                dtype=np.float64)),
+            acc_limit_rad_s2=np.deg2rad(np.asarray(
+                RightArmCommandSafetyLimiter.ACC_LIMIT_DEG_S2,
+                dtype=np.float64)),
+            parking_velocity_scale=float(
+                cfg.safety_parking_velocity_scale),
+            parking_acceleration_scale=float(
+                cfg.safety_parking_acceleration_scale),
+        )
+        self.slow_reset_trajectory = SlowResetTrajectory(
+            dt_s=cfg.control_dt,
+            velocity_limit_deg_s=cfg.reset_velocity_limit_deg_s,
+            acceleration_limit_deg_s2=cfg.reset_acceleration_limit_deg_s2,
+        )
         self.servo_target_planner = ServoTargetTrackingPlanner(
             self.safe_q.astype(np.float64),
             dt=cfg.control_dt,
@@ -9496,13 +9652,46 @@ class PolicySafetyProbe:
             acceleration_scale=0.8,
         )
         self.command_stream_active = False
+        self.last_published_command_profile = "none"
         self.command_publish_lease_deadline_wall = 0.0
         self.command_publish_lease_expired = False
+        self.command_owner_session_id = ""
+        self.last_command_ownership: dict[str, Any] = {
+            "accepted": True,
+            "reason": "unowned",
+            "requestSessionId": "",
+        }
         self.recording_policy_step_limit = 0
         self.recording_policy_step_count = 0
         self.recording_policy_step_limit_reached = False
         self.reset_workspace_bypass_until_wall = 0.0
         self.reset_workspace_bypass_target_q: np.ndarray | None = None
+        self.reset_hold_latched = False
+        self.reset_hold_reason = ""
+        self.reset_command_trajectory_complete = False
+        self.reset_settled = False
+        self.reset_settle_ticks = 0
+        self.reset_tracking_paused = False
+        self.reset_publish_blocked = False
+        self.last_publish_arm_token = ""
+        self.reset_start_publish_arm_token = ""
+        self.reset_policy_arm_required = False
+        self.reset_policy_arm_reason = ""
+        self.last_reset_reanchor: dict[str, Any] = {
+            "reanchored": False,
+            "reason": "not_started",
+            "positionErrorAbsMaxRad": None,
+        }
+        self.last_reset_feedback: dict[str, Any] = {
+            "available": False,
+            "fresh": False,
+            "ageS": None,
+            "positionErrorAbsMaxRad": None,
+            "velocityAbsMaxRadS": None,
+        }
+        self.publish_rearm_required = False
+        self.publish_rearm_off_seen = False
+        self.publish_rearm_reason = ""
         self.last_command_arm: dict[str, Any] = {
             "armed": False,
             "reason": "not_requested",
@@ -9534,6 +9723,9 @@ class PolicySafetyProbe:
         self.web_noise_std_m = float(cfg.ball_noise_std_m)
         self.latest_snapshot_payload: dict[str, Any] | None = None
         self.control_reset_request_id = 0
+        # Compatibility telemetry for older clients/tests.  The authoritative
+        # handshake is the generic publish_rearm_* state above.
+        self.policy_switch_publish_rearm_required = False
         self.reset_ball_rng = np.random.default_rng()
         self.recorder = AsyncProbeRecorder(cfg)
         self.active_policy_profile = normalize_observation_profile(
@@ -9541,17 +9733,34 @@ class PolicySafetyProbe:
         self.policy_generation = 0
         self.controller = self._build_release_locked_policy_controller(
             self.active_policy_profile)
-        self.active_policy_model = str(getattr(
-            self.controller, "policy_model_id", ""))
-        # Profiles remain release-locked.  The GPU0 profile additionally
-        # exposes its two explicitly hash-pinned actors and loads the alternate
-        # lazily when the operator selects it.
+        self.active_policy_model = _controller_policy_model_id(
+            self.active_policy_profile,
+            self.controller,
+        )
+        # GPU0 and GPU1 are both authenticated simcode8 deployment choices in
+        # this UI.  Load the inactive peer before the web server becomes
+        # available: loading a Torch actor/MuJoCo FK model from a 200 Hz
+        # control callback previously stalled the UI and, before this preload,
+        # selecting GPU1 raised a release-lock exception that killed the whole
+        # control subprocess.
         self.policy_controllers = {
             self.active_policy_profile: self.controller,
         }
-        self.policy_model_controllers = {
-            self.active_policy_model: self.controller,
-        } if self.active_policy_model else {}
+        if self.active_policy_profile in EAGER_POLICY_PROFILES:
+            for switch_profile in EAGER_POLICY_PROFILES:
+                if switch_profile not in self.policy_controllers:
+                    self.policy_controllers[switch_profile] = (
+                        self._build_release_locked_policy_controller(
+                            switch_profile))
+        self.policy_model_controllers = {}
+        gpu0_controller = self.policy_controllers.get(
+            OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+        if gpu0_controller is not None:
+            gpu0_model_id = _controller_policy_model_id(
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                gpu0_controller,
+            )
+            self.policy_model_controllers[gpu0_model_id] = gpu0_controller
         self.policy_plant_matcher: PolicyPlantModelReference | None = None
         self.last_policy_plant_matcher_info: dict[str, Any] = {
             "mode": str(cfg.policy_plant_matcher_mode),
@@ -9689,6 +9898,7 @@ class PolicySafetyProbe:
         gpu0_model_paths = {
             GPU0_RMP_MODEL_V85: cfg.simcode7_v85_model_path,
             GPU0_RMP_MODEL_V91: cfg.simcode7_v91_model_path,
+            GPU0_RMP_MODEL_V97: cfg.simcode7_v97_model_path,
         }
         gpu0_model_path = (
             cfg.simcode7_model_path
@@ -9700,7 +9910,9 @@ class PolicySafetyProbe:
                 str(cfg.model_path),
                 dt=cfg.control_dt,
                 robot_xml_path=str(cfg.robot_xml_path),
-                enable_delay_conditioning=(cfg.policy_obs_dim == 67),
+                # This checkpoint is 67-D.  Do not inherit a 57-D GPU0
+                # launch manifest here when legacy is selected at runtime.
+                enable_delay_conditioning=(cfg.policy_obs_dim != 50),
                 use_valid_ball_obs_age=cfg.rl_use_valid_ball_obs_age,
                 observation_profile=OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
             ),
@@ -9740,7 +9952,19 @@ class PolicySafetyProbe:
                 Gpu0QvelRealRmpV85PolicyController(
                     str(gpu0_model_path),
                     dt=cfg.control_dt,
-                    robot_xml_path=str(cfg.simcode7_policy_xml_path),
+                    robot_xml_path=str(
+                        cfg.simcode8_policy_xml_path
+                        if (policy_model == GPU0_RMP_MODEL_V97
+                            or (policy_model is None
+                                and Path(gpu0_model_path)
+                                == Path(cfg.simcode7_v97_model_path)))
+                        else cfg.simcode7_policy_xml_path),
+                )),
+            OBSERVATION_PROFILE_GPU1_QACC_FT_V153: lambda: (
+                Gpu1QaccFtV153PolicyController(
+                    str(cfg.gpu1_qacc_ft_model_path),
+                    dt=cfg.control_dt,
+                    robot_xml_path=str(cfg.gpu1_qacc_ft_policy_xml_path),
                 )),
         }
         try:
@@ -9796,8 +10020,71 @@ class PolicySafetyProbe:
             "holdoutMetrics": fit_metadata.get("holdout_metrics"),
         }
 
+    @staticmethod
+    def _control_client_session_id(payload: dict[str, Any]) -> str:
+        session_id = str(payload.get("clientSessionId", "") or "").strip()
+        if session_id:
+            return session_id
+        # Preserve compatibility for non-browser tools whose arm token changes
+        # on every explicit enable gesture.
+        return "legacy-client"
+
+    def _accept_control_client_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        allow_reset_takeover: bool = False,
+    ) -> bool:
+        """Enforce a single writer for command and drag-ball state.
+
+        Multiple browser tabs run independent timers. A background tab is
+        commonly throttled to about 1 Hz and must not overwrite the active
+        tab's Send-command or drag-ball state. An explicit reset is the safe
+        ownership-transfer operation.
+        """
+        request_session_id = self._control_client_session_id(payload)
+        owner_session_id = str(getattr(
+            self, "command_owner_session_id", "") or "")
+        publish_requested = bool(payload.get("publishCommands", False))
+        if allow_reset_takeover:
+            self.command_owner_session_id = request_session_id
+            accepted = True
+            reason = "reset_owner_takeover"
+        elif not owner_session_id:
+            if publish_requested:
+                self.command_owner_session_id = request_session_id
+                reason = "publish_owner_acquired"
+            else:
+                reason = "unowned_read_only_update"
+            accepted = True
+        elif request_session_id == owner_session_id:
+            accepted = True
+            reason = "owner_request"
+        else:
+            accepted = False
+            reason = "non_owner_control_request_ignored"
+        self.last_command_ownership = {
+            "accepted": bool(accepted),
+            "reason": reason,
+            "requestSessionId": request_session_id,
+            "ownerSessionId": str(getattr(
+                self, "command_owner_session_id", "") or ""),
+            "publishRequested": publish_requested,
+        }
+        return bool(accepted)
+
+    def _command_ownership_payload(self) -> dict[str, Any]:
+        payload = dict(getattr(self, "last_command_ownership", {}))
+        payload["ownerSessionId"] = str(getattr(
+            self, "command_owner_session_id", "") or "")
+        return payload
+
     def reset(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload if isinstance(payload, dict) else {}
+        requested_arm_token = str(
+            payload.get("publishArmToken", "") or "").strip()
+        if requested_arm_token:
+            self.last_publish_arm_token = requested_arm_token
         preset_raw = (
             payload.get("resetInitialPose")
             if "resetInitialPose" in payload
@@ -9808,10 +10095,31 @@ class PolicySafetyProbe:
         reset_pose_id, requested_reset_q = _reset_initial_pose_q_rad(
             preset_raw)
         with self.lock:
+            self._accept_control_client_payload(
+                payload, allow_reset_takeover=True)
+            policy_selection_changed = False
             if "policyProfile" in payload:
-                self._select_policy_profile(payload["policyProfile"])
+                policy_selection_changed = bool(
+                    self._select_policy_profile(payload["policyProfile"])
+                    or policy_selection_changed)
             if "policyModel" in payload:
-                self._select_policy_model(payload["policyModel"])
+                policy_selection_changed = bool(
+                    self._select_policy_model(payload["policyModel"])
+                    or policy_selection_changed)
+            if self.runtime_options is not None:
+                runtime_updates = {
+                    "policy_profile": self.active_policy_profile,
+                    "policy_model": (
+                        self.active_policy_model or GPU0_RMP_MODEL_V85),
+                }
+                if policy_selection_changed:
+                    # Do not let the 200 Hz loop reapply the old profile while
+                    # the browser's next step payload is still in flight.
+                    runtime_updates["publish_commands"] = False
+                self.runtime_options = replace(
+                    self.runtime_options,
+                    **runtime_updates,
+                )
             try:
                 reset_request_id = int(payload.get(
                     "_controlResetRequestId", self.control_reset_request_id))
@@ -9819,7 +10127,7 @@ class PolicySafetyProbe:
                 reset_request_id = int(self.control_reset_request_id)
             self.control_reset_request_id = max(
                 int(self.control_reset_request_id), reset_request_id)
-            reset_seed_q = self._safety_limiter_reset_reference()
+            reset_seed_q = self._current_arm_reset_reference()
             reset_target_q = np.clip(
                 np.asarray(requested_reset_q, dtype=np.float64).reshape(
                     len(RIGHT_ARM_JOINTS)),
@@ -9841,7 +10149,11 @@ class PolicySafetyProbe:
             if self.policy_plant_matcher is not None:
                 self.policy_plant_matcher.initialized = False
                 self.policy_plant_matcher.previous_sample = None
-            self._sync_policy_to_safe_pose(reset_target_q)
+            self._sync_policy_to_safe_pose(reset_seed_q)
+            self.safety_limiter.last_cmd = np.asarray(
+                reset_seed_q, dtype=np.float64).copy()
+            self.safety_limiter.last_vel = np.zeros(
+                len(RIGHT_ARM_JOINTS), dtype=np.float64)
             reset_ball_pos, reset_ball_vel, reset_ball_contract = (
                 self._reset_ball_state(reset_target_q))
             self.reset_ball_contract = dict(reset_ball_contract)
@@ -9872,7 +10184,12 @@ class PolicySafetyProbe:
             # Reset is the operator's explicit recovery command.  It must be
             # allowed to move back to the known reset pose even when the current
             # EE pose is outside the workspace box that just latched done.
-            self.reset_workspace_bypass_until_wall = time.monotonic() + 15.0
+            self._start_supervised_reset(
+                reset_seed_q,
+                reset_target_q,
+                reason="operator_reset",
+            )
+            self.reset_workspace_bypass_until_wall = time.monotonic() + 30.0
             self.reset_workspace_bypass_target_q = reset_target_q.copy()
             self.done_monitor.reset_counters()
             self.now_s = 0.0
@@ -9919,11 +10236,11 @@ class PolicySafetyProbe:
             self.workspace_hold_trigger_reason = ""
             self.workspace_hold_constraint = ""
             self.last_policy_nominal_reference = np.asarray(
-                reset_target_q, dtype=np.float64).copy()
+                reset_seed_q, dtype=np.float64).copy()
             self.last_compensated_reference = np.asarray(
-                reset_target_q, dtype=np.float64).copy()
+                reset_seed_q, dtype=np.float64).copy()
             self.last_published_safe_reference = np.asarray(
-                reset_target_q, dtype=np.float64).copy()
+                reset_seed_q, dtype=np.float64).copy()
             self._done_motion_prev_t_s = None
             self._done_motion_prev_pos_m = None
             self._done_motion_prev_vel_m_s = None
@@ -9952,6 +10269,8 @@ class PolicySafetyProbe:
             self.policy_ball_sample_age_s = 0.0
             self.policy_ball_sample_has_valid = False
             self.policy_ball_sample_source_stamp_s = None
+            self.policy_confirmed_hit_count = 0
+            self._previous_inferred_contact_flag = False
             self.last_estimator_info = self._estimator_off_payload()
             self.last_high_ball_occlusion_info = (
                 self._high_ball_occlusion_off_payload())
@@ -9962,13 +10281,12 @@ class PolicySafetyProbe:
                 z_drop_m=0.0,
                 candidate=False,
             )
-            self.safety_limiter.reset(reset_seed_q)
             self._reset_servo_target_planner(reset_seed_q)
             self._reset_compensator_to_current_arm(reset_seed_q)
-            self._sync_policy_to_safe_pose(reset_target_q)
+            self._sync_policy_to_safe_pose(reset_seed_q)
             _tracking_q, self.last_tracking_info = self.racket_tracker.hold(
-                reset_target_q, reason="reset")
-            self.juggle_tracker.hold(reset_target_q, reason="reset")
+                reset_seed_q, reason="reset")
+            self.juggle_tracker.hold(reset_seed_q, reason="reset")
             self.juggle_controller.deactivate("reset")
             self.last_juggle_info = dict(
                 self.juggle_controller.last_diagnostics)
@@ -10172,6 +10490,11 @@ class PolicySafetyProbe:
             self.controller.prev_action = np.zeros(
                 len(RIGHT_ARM_JOINTS), dtype=np.float32)
             self.controller._gpu0_requires_measured_reset = True
+        if (getattr(self, "active_policy_profile", "")
+                == OBSERVATION_PROFILE_GPU1_QACC_FT_V153):
+            self.controller.prev_action = np.zeros(
+                len(RIGHT_ARM_JOINTS), dtype=np.float32)
+            self.controller._gpu1_requires_measured_reset = True
         try:
             rpos_base, ok = self.controller._compute_racket_pose_base(q)
             if ok:
@@ -10271,6 +10594,11 @@ class PolicySafetyProbe:
             command_q, np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float32))
 
     def _reset_recovery_active(self) -> bool:
+        if bool(getattr(self, "reset_hold_latched", False)):
+            return True
+        trajectory = getattr(self, "slow_reset_trajectory", None)
+        if trajectory is not None and bool(trajectory.active):
+            return True
         deadline = float(getattr(
             self, "reset_workspace_bypass_until_wall", 0.0) or 0.0)
         if deadline <= 0.0:
@@ -10280,36 +10608,498 @@ class PolicySafetyProbe:
             self.reset_workspace_bypass_until_wall = 0.0
             self.reset_workspace_bypass_target_q = None
             return False
-        target_q = self._right_arm_joint_vector_or_none(getattr(
-            self, "reset_workspace_bypass_target_q", None))
-        if target_q is not None and self.ros_bridge is not None:
-            try:
-                q_fb, _dq_fb = self.ros_bridge.get_joint_feedback()
-            except Exception:
-                q_fb = None
-            feedback_q = self._right_arm_joint_vector_or_none(q_fb)
-            if feedback_q is not None:
-                err = float(np.max(np.abs(feedback_q - target_q)))
-                if err <= 0.035:
-                    self.reset_workspace_bypass_until_wall = 0.0
-                    self.reset_workspace_bypass_target_q = None
-                    return False
         return True
+
+    def _start_supervised_reset(
+        self,
+        position_rad: object,
+        target_rad: object,
+        *,
+        reason: str,
+        new_reset_cycle: bool = True,
+    ) -> None:
+        """Start/reset the independent trajectory and its terminal hold.
+
+        A ROS-capable process keeps the terminal hold latched until physical
+        feedback settles and the operator performs a fresh Send-command
+        off -> on gesture.  ROS-free tests and dry local probes retain their
+        non-latching behavior.
+        """
+        position = np.asarray(position_rad, dtype=np.float64).reshape(
+            len(RIGHT_ARM_JOINTS))
+        target = np.asarray(target_rad, dtype=np.float64).reshape(
+            len(RIGHT_ARM_JOINTS))
+        self._ensure_slow_reset_trajectory().start(
+            position,
+            target,
+            # The two-second comfort minimum belongs to the operator's reset
+            # cycle. A feedback replan must retain analytic speed/acceleration
+            # limits without restarting that entire minimum duration.
+            minimum_duration_s=None if new_reset_cycle else 0.0,
+        )
+        cfg = getattr(self, "cfg", None)
+        hardware_capable = bool(
+            getattr(self, "ros_bridge", None) is not None
+            and getattr(cfg, "ros_publish_commands", True))
+        self.reset_hold_latched = hardware_capable
+        self.reset_hold_reason = str(reason or "reset")
+        self.reset_command_trajectory_complete = False
+        self.reset_settled = False
+        self.reset_settle_ticks = 0
+        self.reset_tracking_paused = False
+        self.reset_publish_blocked = False
+        if new_reset_cycle:
+            # Capture the authorization that existed before this reset.  A
+            # feedback re-anchor is still the same reset cycle and must never
+            # replace this baseline with a token issued after reset began.
+            self.reset_start_publish_arm_token = str(getattr(
+                self, "last_publish_arm_token", ""))
+            self.reset_policy_arm_required = False
+            self.reset_policy_arm_reason = "reset_in_progress"
+            self.last_reset_reanchor = {
+                "reanchored": False,
+                "reason": "new_reset_cycle",
+                "positionErrorAbsMaxRad": 0.0,
+            }
+        self.last_reset_feedback = {
+            "available": False,
+            "fresh": False,
+            "ageS": None,
+            "positionErrorAbsMaxRad": None,
+            "velocityAbsMaxRadS": None,
+        }
+        self.reset_workspace_bypass_target_q = target.copy()
+        if hardware_capable:
+            self.publish_rearm_required = False
+            self.publish_rearm_off_seen = False
+            self.publish_rearm_reason = ""
+
+    def _resume_or_reanchor_active_reset(
+        self,
+        feedback_q: np.ndarray,
+    ) -> bool:
+        """Resume a tracked reset, replanning only after real divergence."""
+        if (not self._reset_recovery_active()
+                or bool(getattr(self, "reset_settled", False))
+                or bool(getattr(
+                    self, "reset_command_trajectory_complete", False))):
+            return False
+        trajectory = self._ensure_slow_reset_trajectory()
+        status = trajectory.status()
+        feedback = np.asarray(feedback_q, dtype=np.float64).reshape(
+            len(RIGHT_ARM_JOINTS))
+        error = float(np.max(np.abs(status.position_rad - feedback)))
+        if error <= RESET_REANCHOR_RESUME_ERROR_RAD:
+            self.last_reset_reanchor = {
+                "reanchored": False,
+                "reason": "tracked_trajectory_resumed",
+                "positionErrorAbsMaxRad": error,
+                "preservedElapsedS": float(status.elapsed_s),
+            }
+            return False
+        self._start_supervised_reset(
+            feedback,
+            status.target_rad,
+            reason=str(getattr(self, "reset_hold_reason", "reset")),
+            new_reset_cycle=False,
+        )
+        replanned = self._ensure_slow_reset_trajectory().status()
+        self.last_reset_reanchor = {
+            "reanchored": True,
+            "reason": "feedback_diverged_from_reset_reference",
+            "positionErrorAbsMaxRad": error,
+            "segmentDurationS": float(np.max(
+                self._ensure_slow_reset_trajectory()._duration_s)),
+            "segmentElapsedS": float(replanned.elapsed_s),
+        }
+        return True
+
+    def _require_publish_rearm(self, reason: str) -> None:
+        normalized_reason = str(reason or "safety_transition")
+        if (bool(getattr(self, "publish_rearm_required", False))
+                and str(getattr(
+                    self, "publish_rearm_reason", "")) == normalized_reason):
+            return
+        self.publish_rearm_required = True
+        self.publish_rearm_off_seen = False
+        self.publish_rearm_reason = normalized_reason
+        self.policy_switch_publish_rearm_required = bool(
+            self.publish_rearm_reason in {
+                "policy_profile_changed",
+                "policy_model_changed",
+            })
+        if getattr(self, "runtime_options", None) is not None:
+            self.runtime_options = replace(
+                self.runtime_options, publish_commands=False)
+
+    def _release_reset_hold_for_rearm(self) -> None:
+        """Release a completed reset only at an explicit re-arm edge."""
+        if (not bool(getattr(self, "reset_hold_latched", False))
+                or not bool(getattr(self, "reset_settled", False))):
+            return
+        self.reset_hold_latched = False
+        self.reset_workspace_bypass_until_wall = 0.0
+        self.reset_workspace_bypass_target_q = None
+        self.soft_workspace_reset_latched = False
+        self.soft_workspace_reset_reason = ""
+        self.soft_workspace_reset_conditions = {}
+        self.done_failsafe_active = False
+        self.done_failsafe_reason = ""
+        self.done_failsafe_conditions = {}
+        self.reset_policy_arm_required = False
+        self.reset_policy_arm_reason = ""
+        # Force one fresh measured-position arm hold before the next policy
+        # command.
+        self.command_stream_active = False
+        self.last_control_mode = "reset_hold"
+        self._mark_policy_paused()
+
+    def _consume_reset_policy_arm_request(
+        self,
+        payload: dict[str, Any],
+        *,
+        publish_requested: bool,
+        switch_requested: bool,
+    ) -> bool:
+        """Consume a fresh post-reset Send-command arm token.
+
+        A boolean heartbeat cannot distinguish the stale pre-reset checked
+        state from a deliberate new operator arm.  The browser therefore
+        creates a unique token on every real unchecked -> checked gesture.
+        Only a token different from the one captured at reset start may unlock
+        settled reset recovery.
+        """
+        arm_token = str(payload.get("publishArmToken", "") or "").strip()
+        if publish_requested and arm_token:
+            self.last_publish_arm_token = arm_token
+        pending = bool(
+            getattr(self, "reset_policy_arm_required", False)
+            and getattr(self, "reset_hold_latched", False)
+            and getattr(self, "reset_settled", False))
+        if not pending or switch_requested:
+            return False
+        fresh_arm = bool(
+            publish_requested
+            and arm_token
+            and arm_token != str(getattr(
+                self, "reset_start_publish_arm_token", "")))
+        if not fresh_arm:
+            return True
+        self._release_reset_hold_for_rearm()
+        self.reset_policy_arm_reason = "fresh_send_command_token"
+        self.last_command_arm = {
+            "armed": False,
+            "reason": "reset_released_by_fresh_send_command",
+            "feedbackAgeS": None,
+            "jointPosition": None,
+        }
+        return False
+
+    def _publish_rearm_blocks_request(
+        self,
+        *,
+        publish_requested: bool,
+        switch_requested: bool,
+    ) -> bool:
+        """Consume an explicit off -> on edge for a latched command stop."""
+        legacy_switch_rearm = bool(getattr(
+            self, "policy_switch_publish_rearm_required", False))
+        rearm_required = bool(
+            getattr(self, "publish_rearm_required", False)
+            or legacy_switch_rearm)
+        if legacy_switch_rearm and not bool(getattr(
+                self, "publish_rearm_required", False)):
+            self.publish_rearm_required = True
+            self.publish_rearm_off_seen = False
+            self.publish_rearm_reason = "policy_switch"
+        if rearm_required and not publish_requested and not switch_requested:
+            self.publish_rearm_off_seen = True
+        elif (rearm_required and publish_requested and not switch_requested
+                and bool(getattr(
+                    self, "publish_rearm_off_seen", False))):
+            self.publish_rearm_required = False
+            self.publish_rearm_off_seen = False
+            self.publish_rearm_reason = ""
+            self.policy_switch_publish_rearm_required = False
+            self.reset_publish_blocked = False
+            self._release_reset_hold_for_rearm()
+            rearm_required = False
+        return bool(rearm_required)
+
+    def _reset_feedback_sample(
+        self,
+        target_q: np.ndarray,
+    ) -> tuple[np.ndarray | None, np.ndarray | None, bool]:
+        bridge = getattr(self, "ros_bridge", None)
+        if bridge is None:
+            self.last_reset_feedback = {
+                "available": False,
+                "fresh": True,
+                "ageS": None,
+                "positionErrorAbsMaxRad": 0.0,
+                "velocityAbsMaxRadS": 0.0,
+            }
+            return None, None, True
+        q = None
+        dq = None
+        age_s = None
+        try:
+            getter = getattr(bridge, "get_joint_feedback_with_age", None)
+            if callable(getter):
+                q, dq, age_s, _source = getter()
+            else:
+                q, dq = bridge.get_joint_feedback()
+        except Exception:
+            q = None
+            dq = None
+        q_value = self._right_arm_joint_vector_or_none(q)
+        dq_value = self._right_arm_joint_vector_or_none(dq)
+        fresh = bool(q_value is not None and dq_value is not None)
+        if age_s is not None:
+            try:
+                age_value = float(age_s)
+                fresh = bool(
+                    fresh
+                    and math.isfinite(age_value)
+                    and 0.0 <= age_value <= RESET_FEEDBACK_MAX_AGE_S)
+            except (TypeError, ValueError):
+                fresh = False
+                age_value = None
+        else:
+            age_value = None
+        position_error = (
+            None if q_value is None
+            else float(np.max(np.abs(
+                np.asarray(target_q, dtype=np.float64) - q_value))))
+        velocity_abs_max = (
+            None if dq_value is None
+            else float(np.max(np.abs(dq_value))))
+        self.last_reset_feedback = {
+            "available": bool(q_value is not None and dq_value is not None),
+            "fresh": bool(fresh),
+            "ageS": age_value,
+            "positionErrorAbsMaxRad": position_error,
+            "velocityAbsMaxRadS": velocity_abs_max,
+        }
+        return q_value, dq_value, fresh
+
+    def _ensure_slow_reset_trajectory(self) -> SlowResetTrajectory:
+        trajectory = getattr(self, "slow_reset_trajectory", None)
+        if trajectory is not None:
+            return trajectory
+        cfg = getattr(self, "cfg", None)
+        trajectory = SlowResetTrajectory(
+            dt_s=float(getattr(cfg, "control_dt", 0.005)),
+            velocity_limit_deg_s=float(getattr(
+                cfg, "reset_velocity_limit_deg_s", 15.0)),
+            acceleration_limit_deg_s2=float(getattr(
+                cfg, "reset_acceleration_limit_deg_s2", 40.0)),
+        )
+        self.slow_reset_trajectory = trajectory
+        return trajectory
 
     def _reset_recovery_payload(self) -> dict[str, Any]:
         deadline = float(getattr(
             self, "reset_workspace_bypass_until_wall", 0.0) or 0.0)
         active = self._reset_recovery_active()
+        trajectory = getattr(self, "slow_reset_trajectory", None)
+        status = trajectory.status() if trajectory is not None else None
         remaining_s = max(0.0, deadline - time.monotonic()) if active else 0.0
         return {
             "active": bool(active),
+            "holdLatched": bool(getattr(
+                self, "reset_hold_latched", False)),
+            "reason": str(getattr(self, "reset_hold_reason", "")),
+            "commandTrajectoryComplete": bool(getattr(
+                self, "reset_command_trajectory_complete", False)),
+            "settled": bool(getattr(self, "reset_settled", False)),
+            "trackingPaused": bool(getattr(
+                self, "reset_tracking_paused", False)),
+            "publishBlocked": bool(getattr(
+                self, "reset_publish_blocked", False)),
+            "policyArmRequired": bool(getattr(
+                self, "reset_policy_arm_required", False)),
+            "policyArmReason": str(getattr(
+                self, "reset_policy_arm_reason", "")),
+            "reanchor": dict(getattr(
+                self, "last_reset_reanchor", {})),
+            "freshPolicyArmSeen": bool(
+                str(getattr(self, "last_publish_arm_token", ""))
+                and str(getattr(self, "last_publish_arm_token", ""))
+                != str(getattr(
+                    self, "reset_start_publish_arm_token", ""))),
+            "rearmRequired": bool(getattr(
+                self, "publish_rearm_required", False)),
+            "rearmOffSeen": bool(getattr(
+                self, "publish_rearm_off_seen", False)),
+            "rearmReason": str(getattr(
+                self, "publish_rearm_reason", "")),
+            "feedback": dict(getattr(self, "last_reset_feedback", {})),
             "remainingS": round(float(remaining_s), 6),
+            "trajectory": (
+                None if status is None else {
+                    "active": bool(status.active),
+                    "progress": round(float(status.progress), 6),
+                    "elapsedS": round(float(status.elapsed_s), 6),
+                    "velocityLimitDegS": float(
+                        getattr(self.cfg, "reset_velocity_limit_deg_s", 15.0)),
+                    "accelerationLimitDegS2": float(
+                        getattr(
+                            self.cfg,
+                            "reset_acceleration_limit_deg_s2",
+                            40.0,
+                        )),
+                    "commandJointPosition": _rounded_vector(
+                        status.position_rad),
+                    "commandJointVelocity": _rounded_vector(
+                        status.velocity_rad_s),
+                }),
             "target": (
                 None
                 if self._right_arm_joint_vector_or_none(getattr(
                     self, "reset_workspace_bypass_target_q", None)) is None
                 else _rounded_vector(self.reset_workspace_bypass_target_q)),
         }
+
+    def _advance_slow_reset_command(
+        self,
+        *,
+        advance: bool = True,
+    ) -> np.ndarray:
+        trajectory = self._ensure_slow_reset_trajectory()
+        status = trajectory.status()
+        q = np.asarray(status.position_rad, dtype=np.float64)
+        dq = np.asarray(status.velocity_rad_s, dtype=np.float64)
+        if not advance:
+            return q.copy()
+
+        feedback_q, feedback_dq, feedback_fresh = (
+            self._reset_feedback_sample(q))
+        if getattr(self, "ros_bridge", None) is not None and not feedback_fresh:
+            # Continuing an open-loop reset after losing JointState can leave a
+            # large stored position error. Stop publishing and demand a fresh
+            # operator re-arm; the trajectory will be re-anchored from measured
+            # q by `_arm_command_stream_from_feedback`.
+            self.reset_tracking_paused = True
+            self.reset_publish_blocked = True
+            self.command_stream_active = False
+            self._require_publish_rearm("reset_joint_feedback_stale")
+            if getattr(self, "runtime_options", None) is not None:
+                self.runtime_options = replace(
+                    self.runtime_options, publish_commands=False)
+            return q.copy()
+
+        if trajectory.active and feedback_q is not None and feedback_dq is not None:
+            tracking_error = float(np.max(np.abs(q - feedback_q)))
+            feedback_speed = float(np.max(np.abs(feedback_dq)))
+            if (tracking_error > RESET_TRACKING_ERROR_LIMIT_RAD
+                    or feedback_speed > RESET_ADVANCE_MAX_SPEED_RAD_S):
+                # Hold the current reset reference until the physical arm has
+                # caught up and slowed down.  Never accumulate an open-loop
+                # reset target far ahead of the real joints.
+                self.reset_tracking_paused = True
+                self.reset_settle_ticks = 0
+                return q.copy()
+        self.reset_tracking_paused = False
+        q, dq, done = trajectory.step()
+        self.safety_limiter.last_cmd = np.asarray(q, dtype=np.float64).copy()
+        self.safety_limiter.last_vel = np.asarray(dq, dtype=np.float64).copy()
+        if getattr(self, "controller", None) is not None:
+            self._sync_controller_to_tracking_command(
+                q, dq, reset_acceleration=False)
+        if done:
+            self.reset_command_trajectory_complete = True
+            if getattr(self, "controller", None) is not None:
+                self._sync_policy_to_safe_pose(q)
+        if bool(getattr(self, "reset_command_trajectory_complete", False)):
+            target_q = np.asarray(trajectory.target_rad, dtype=np.float64)
+            feedback_q, feedback_dq, feedback_fresh = (
+                self._reset_feedback_sample(target_q))
+            if getattr(self, "ros_bridge", None) is None:
+                settled_now = True
+            else:
+                settled_now = bool(
+                    feedback_fresh
+                    and feedback_q is not None
+                    and feedback_dq is not None
+                    and np.max(np.abs(target_q - feedback_q))
+                    <= RESET_SETTLE_POSITION_TOLERANCE_RAD
+                    and np.max(np.abs(feedback_dq))
+                    <= RESET_SETTLE_VELOCITY_TOLERANCE_RAD_S)
+            self.reset_settle_ticks = (
+                int(getattr(self, "reset_settle_ticks", 0)) + 1
+                if settled_now else 0)
+            required_ticks = max(
+                1,
+                int(math.ceil(
+                    RESET_SETTLE_DURATION_S
+                    / max(float(getattr(
+                        getattr(self, "cfg", None),
+                        "control_dt",
+                        0.005,
+                    )), 1e-6))),
+            )
+            if (self.reset_settle_ticks >= required_ticks
+                    and not bool(getattr(self, "reset_settled", False))):
+                self.reset_settled = True
+                if bool(getattr(self, "reset_hold_latched", False)):
+                    self.reset_policy_arm_required = True
+                    self.reset_policy_arm_reason = (
+                        "fresh_send_command_required_after_reset")
+                    options = getattr(self, "runtime_options", None)
+                    fresh_arm_already_requested = bool(
+                        options is not None
+                        and bool(getattr(options, "publish_commands", False))
+                        and str(getattr(
+                            self, "last_publish_arm_token", ""))
+                        and str(getattr(
+                            self, "last_publish_arm_token", ""))
+                        != str(getattr(
+                            self, "reset_start_publish_arm_token", "")))
+                    if fresh_arm_already_requested:
+                        # The operator explicitly armed after this reset began.
+                        # Finish this reset tick, force a fresh feedback hold on
+                        # the next tick, then allow normal policy execution.
+                        self._release_reset_hold_for_rearm()
+                        self.reset_policy_arm_reason = (
+                            "fresh_send_command_seen_during_reset")
+                        self.last_command_arm = {
+                            "armed": False,
+                            "reason": (
+                                "reset_released_by_fresh_send_command"),
+                            "jointPosition": _rounded_vector(q),
+                        }
+                    else:
+                        # The checked state predates reset and is stale. Disarm
+                        # policy publication, but do not rely on observing an
+                        # asynchronous off payload. A new UI arm token releases
+                        # the terminal hold deterministically.
+                        if options is not None:
+                            self.runtime_options = replace(
+                                options, publish_commands=False)
+                        self.last_command_arm = {
+                            "armed": False,
+                            "reason": (
+                                "reset_complete_fresh_send_required"),
+                            "jointPosition": _rounded_vector(q),
+                        }
+                else:
+                    self.reset_workspace_bypass_until_wall = 0.0
+                    self.reset_workspace_bypass_target_q = None
+        return np.asarray(q, dtype=np.float64)
+
+    def _slow_reset_current_q(self) -> np.ndarray:
+        trajectory = getattr(self, "slow_reset_trajectory", None)
+        if trajectory is not None:
+            return np.asarray(
+                trajectory.status().position_rad,
+                dtype=np.float64,
+            )
+        target = self._right_arm_joint_vector_or_none(getattr(
+            self, "reset_workspace_bypass_target_q", None))
+        if target is not None:
+            return target
+        return np.asarray(self._current_reset_pose_q(), dtype=np.float64)
 
     def _reset_policy_dq_adapter(self, reason: str) -> None:
         adapter = getattr(self, "policy_dq_adapter", None)
@@ -10331,19 +11121,33 @@ class PolicySafetyProbe:
         self._reset_policy_dq_adapter("policy_paused")
 
     def _select_policy_profile(self, requested_profile: object) -> bool:
-        """Reject runtime profile changes outside the validated release."""
+        """Atomically switch between pre-authenticated deployment profiles."""
         profile = normalize_observation_profile(requested_profile)
         if profile == self.active_policy_profile:
             return False
-        if profile not in self.policy_controllers:
+        if profile not in RUNTIME_SWITCHABLE_POLICY_PROFILES:
             raise RuntimeError(
-                f"runtime policy profile {profile!r} does not match validated "
-                f"release profile {self.active_policy_profile!r}; restart with "
-                "a matching POLICY_RELEASE_ID")
+                f"runtime policy profile {profile!r} is disabled in this UI")
+        # Never carry a live hardware command stream across an actor/profile
+        # boundary.  This publishes at most one measured-position hold and
+        # closes the stream without entering safety_limiter.  A later explicit
+        # Send-command off -> on action is required to arm the new actor.
+        if bool(getattr(self, "command_stream_active", False)):
+            self._publish_hold_on_command_disable()
+        self._require_publish_rearm("policy_profile_changed")
+        controller = self.policy_controllers.get(profile)
+        if controller is None:
+            controller = self._build_release_locked_policy_controller(profile)
+            self.policy_controllers[profile] = controller
         reset_q = np.asarray(
             self._safety_limiter_reset_reference(), dtype=np.float32).reshape(-1)
         self.active_policy_profile = profile
-        self.controller = self.policy_controllers[profile]
+        self.controller = controller
+        self.active_policy_model = _controller_policy_model_id(
+            profile,
+            self.controller,
+            self.active_policy_model or GPU0_RMP_MODEL_V85,
+        )
         self.policy_generation += 1
         self.controller.reset()
         self._sync_policy_to_safe_pose(reset_q)
@@ -10363,7 +11167,12 @@ class PolicySafetyProbe:
         return True
 
     def _select_policy_model(self, requested_model: object) -> bool:
-        """Switch between the two hash-pinned simcode7 actors."""
+        """Switch the active profile's approved hash-pinned actor."""
+        if self.active_policy_profile == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
+            # GPU1 has one authenticated actor.  Ignore the disabled GPU0
+            # selector's stale value and keep the runtime identity explicit.
+            self.active_policy_model = GPU1_QACC_FT_MODEL_V153
+            return False
         if self.active_policy_profile != (
                 OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
             return False
@@ -10385,6 +11194,9 @@ class PolicySafetyProbe:
                     f"approved checkpoint: requested={model_id}, "
                     f"loaded={loaded_model_id or 'unknown'}")
             self.policy_model_controllers[model_id] = controller
+        if bool(getattr(self, "command_stream_active", False)):
+            self._publish_hold_on_command_disable()
+        self._require_publish_rearm("policy_model_changed")
         reset_q = np.asarray(
             self._safety_limiter_reset_reference(), dtype=np.float32).reshape(-1)
         self.active_policy_model = model_id
@@ -10439,14 +11251,27 @@ class PolicySafetyProbe:
             return None
         return q
 
-    def _safety_limiter_reset_reference(self) -> np.ndarray:
+    def _current_arm_reset_reference(self) -> np.ndarray:
         if self.ros_bridge is not None:
-            q_fb, _dq_fb = self.ros_bridge.get_joint_feedback()
-            q = self._right_arm_joint_vector_or_none(q_fb)
-            if q is not None:
-                return q
+            timed_getter = getattr(
+                self.ros_bridge, "get_joint_feedback_with_age", None)
+            if callable(timed_getter):
+                try:
+                    q_fb, _dq_fb, age_s, _source = timed_getter()
+                    age = float(age_s)
+                    q = self._right_arm_joint_vector_or_none(q_fb)
+                    if (q is not None and math.isfinite(age)
+                            and 0.0 <= age <= 0.05):
+                        return q
+                except Exception:
+                    pass
+            else:
+                q_fb, _dq_fb = self.ros_bridge.get_joint_feedback()
+                q = self._right_arm_joint_vector_or_none(q_fb)
+                if q is not None:
+                    return q
         q = self._right_arm_joint_vector_or_none(
-            getattr(self.safety_limiter, "last_cmd", None))
+            getattr(self, "last_published_safe_reference", None))
         if q is not None:
             return q
         try:
@@ -10457,6 +11282,89 @@ class PolicySafetyProbe:
         except Exception:
             pass
         return self.safe_q.astype(np.float64)
+
+    def _safety_limiter_reset_reference(self) -> np.ndarray:
+        """Compatibility alias; reset no longer reads limiter state."""
+        return self._current_arm_reset_reference()
+
+    def _limiter_free_joint_candidate(
+        self,
+        desired: object,
+        *,
+        profile: str = "normal",
+    ) -> np.ndarray:
+        """Advance the local rate state without entering ``safety_limiter``.
+
+        This deliberately reproduces only the position/velocity/acceleration
+        envelope required by the workspace controller.  It is implemented in
+        this runtime so neither normal policy execution nor reset can call the
+        separately maintained (and unsafe for this deployment) limiter.
+        """
+        state = self.safety_limiter
+        previous = np.asarray(state.last_cmd, dtype=np.float64).reshape(
+            len(RIGHT_ARM_JOINTS))
+        try:
+            candidate = np.asarray(desired, dtype=np.float64).reshape(
+                len(RIGHT_ARM_JOINTS))
+        except Exception:
+            candidate = previous.copy()
+        if not np.all(np.isfinite(candidate)):
+            candidate = previous.copy()
+        candidate = np.clip(
+            candidate,
+            RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
+            RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
+        )
+        dt = max(float(state.dt), 1e-9)
+        velocity_limit, acceleration_limit = (
+            self._workspace_profile_limits(profile))
+        desired_velocity = np.clip(
+            (candidate - previous) / dt,
+            -velocity_limit,
+            velocity_limit,
+        )
+        previous_velocity = np.asarray(
+            state.last_vel, dtype=np.float64).reshape(
+                len(RIGHT_ARM_JOINTS))
+        reachable_velocity = np.clip(
+            desired_velocity,
+            previous_velocity - acceleration_limit * dt,
+            previous_velocity + acceleration_limit * dt,
+        )
+        candidate = np.clip(
+            previous + reachable_velocity * dt,
+            RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
+            RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
+        )
+        state.last_vel = (candidate - previous) / dt
+        state.last_cmd = candidate.copy()
+        return candidate.copy()
+
+    def _limiter_free_parking_candidate(self, desired: object) -> np.ndarray:
+        """Start every parking transition from fresh measured/issued q."""
+        if str(getattr(
+                self, "last_published_command_profile", "none")) != "parking":
+            anchor_q = self._current_arm_reset_reference()
+            self.safety_limiter.last_cmd = np.asarray(
+                anchor_q, dtype=np.float64).copy()
+            self.safety_limiter.last_vel = np.zeros(
+                len(RIGHT_ARM_JOINTS), dtype=np.float64)
+        return self._limiter_free_joint_candidate(
+            desired, profile="parking")
+
+    def _workspace_profile_limits(
+        self, profile: str,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        velocity = np.deg2rad(np.asarray(
+            RightArmCommandSafetyLimiter.VEL_LIMIT_DEG_S,
+            dtype=np.float64))
+        acceleration = np.deg2rad(np.asarray(
+            RightArmCommandSafetyLimiter.ACC_LIMIT_DEG_S2,
+            dtype=np.float64))
+        if str(profile).strip().lower() == "parking":
+            velocity *= float(self.cfg.safety_parking_velocity_scale)
+            acceleration *= float(self.cfg.safety_parking_acceleration_scale)
+        return velocity, acceleration
 
     def _reset_servo_target_planner(self, q: np.ndarray) -> None:
         """Re-anchor the optional simcode4 drive planner to a hold/reset."""
@@ -10488,7 +11396,8 @@ class PolicySafetyProbe:
             control_dt=self.cfg.control_dt,
             policy_profile=self.cfg.policy_profile,
             policy_model=(
-                self.active_policy_model or GPU0_RMP_MODEL_V85),
+                getattr(self, "active_policy_model", "")
+                or GPU0_RMP_MODEL_V85),
             simcode2_model_path=self.cfg.simcode2_model_path,
             simcode2_policy_xml_path=self.cfg.simcode2_policy_xml_path,
             simcode2_sim_xml_path=self.cfg.simcode2_sim_xml_path,
@@ -10528,11 +11437,29 @@ class PolicySafetyProbe:
             simcode7_v91_model_path=getattr(
                 self.cfg, "simcode7_v91_model_path",
                 DEFAULT_SIMCODE7_V91_MODEL_PATH),
+            simcode7_v97_model_path=getattr(
+                self.cfg, "simcode7_v97_model_path",
+                DEFAULT_SIMCODE7_V97_MODEL_PATH),
             simcode7_policy_xml_path=getattr(
                 self.cfg, "simcode7_policy_xml_path",
                 DEFAULT_SIMCODE7_POLICY_XML),
             simcode7_sim_xml_path=getattr(
                 self.cfg, "simcode7_sim_xml_path", DEFAULT_SIMCODE7_POLICY_XML),
+            simcode8_policy_xml_path=getattr(
+                self.cfg, "simcode8_policy_xml_path",
+                DEFAULT_SIMCODE8_POLICY_XML),
+            simcode8_sim_xml_path=getattr(
+                self.cfg, "simcode8_sim_xml_path",
+                DEFAULT_SIMCODE8_POLICY_XML),
+            gpu1_qacc_ft_model_path=getattr(
+                self.cfg, "gpu1_qacc_ft_model_path",
+                DEFAULT_GPU1_QACC_FT_MODEL_PATH),
+            gpu1_qacc_ft_policy_xml_path=getattr(
+                self.cfg, "gpu1_qacc_ft_policy_xml_path",
+                DEFAULT_SIMCODE8_POLICY_XML),
+            gpu1_qacc_ft_sim_xml_path=getattr(
+                self.cfg, "gpu1_qacc_ft_sim_xml_path",
+                DEFAULT_SIMCODE8_POLICY_XML),
             backend=backend,
             frame_rate_hz=self.cfg.sim_frame_rate_hz,
             render_width=self.cfg.sim_render_width,
@@ -10559,7 +11486,8 @@ class PolicySafetyProbe:
             replace(
                 sim_cfg,
                 policy_model=(
-                    self.active_policy_model or GPU0_RMP_MODEL_V85),
+                    getattr(self, "active_policy_model", "")
+                    or GPU0_RMP_MODEL_V85),
             ),
             self.active_policy_profile,
         )
@@ -10760,17 +11688,25 @@ class PolicySafetyProbe:
                     policy_profile=self.active_policy_profile,
                     policy_model=self.active_policy_model,
                     policy_generation=self.policy_generation,
+                    confirmed_hit_count=int(getattr(
+                        self, "policy_confirmed_hit_count", 0)),
                 )
                 self.recorder.record_sim_control_samples(
                     self.sim_mirror.drain_completed_samples())
             else:
                 submitted_wall_s = time.time()
+                direct_step_kwargs = {}
+                if (self.active_policy_profile
+                        == OBSERVATION_PROFILE_GPU1_QACC_FT_V153):
+                    direct_step_kwargs["confirmed_hit_count"] = int(getattr(
+                        self, "policy_confirmed_hit_count", 0))
                 snap = self.sim_mirror.step(
                     ball_pos,
                     ball_vel,
                     ball_valid=bool(ball_valid),
                     ball_obs_age_s=float(max(0.0, age_s)),
                     options=options,
+                    **direct_step_kwargs,
                 )
                 snap["sync"] = {
                     "ready": True,
@@ -11696,7 +12632,8 @@ class PolicySafetyProbe:
         if (desired.shape[0] != len(RIGHT_ARM_JOINTS)
                 or not np.all(np.isfinite(desired))):
             desired = prev_cmd.copy()
-        candidate = self.safety_limiter.filter(desired, profile=profile)
+        candidate = self._limiter_free_joint_candidate(
+            desired, profile=profile)
         candidate_state = self._workspace_hold_state(candidate)
         prediction_active = bool(
             predictive
@@ -11949,7 +12886,8 @@ class PolicySafetyProbe:
         # First obtain the dynamically reachable policy/compensation command
         # for this tick. The limiter state is restored below before filtering
         # the combined policy + virtual-field velocity.
-        candidate = self.safety_limiter.filter(desired, profile=profile)
+        candidate = self._limiter_free_joint_candidate(
+            desired, profile=profile)
         candidate_vel = (
             (candidate - prev_cmd) / max(self.safety_limiter.dt, 1e-9))
         linearization_q = prev_cmd.copy()
@@ -12168,7 +13106,8 @@ class PolicySafetyProbe:
             controlled_candidate_vel + joint_field_velocity)
         self.safety_limiter.last_cmd = prev_cmd.copy()
         self.safety_limiter.last_vel = prev_vel.copy()
-        safe = self.safety_limiter.filter(combined_target, profile=profile)
+        safe = self._limiter_free_joint_candidate(
+            combined_target, profile=profile)
         self.workspace_soft_filter = {
             "active": True,
             "predictive": bool(predicted_normal is not None),
@@ -12236,7 +13175,8 @@ class PolicySafetyProbe:
                 self._remove_predictive_outward_components(
                     prev_cmd, desired))
         if apply_joint_limits:
-            candidate = self.safety_limiter.filter(desired, profile=profile)
+            candidate = self._limiter_free_joint_candidate(
+                desired, profile=profile)
         else:
             candidate = desired.copy()
         candidate_score = self._parking_workspace_violation_score(candidate)
@@ -12252,7 +13192,9 @@ class PolicySafetyProbe:
             and candidate_score <= score_ceiling + score_eps)
         if candidate_allowed:
             if not apply_joint_limits:
-                self.safety_limiter.observe(candidate)
+                self.safety_limiter.last_cmd = candidate.copy()
+                self.safety_limiter.last_vel = (
+                    (candidate - prev_cmd) / max(float(self.cfg.control_dt), 1e-9))
             self.workspace_soft_filter = {
                 "active": bool(
                     predictive_hold or candidate_score > score_eps),
@@ -12437,7 +13379,7 @@ class PolicySafetyProbe:
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Joint speed/acceleration/position limits for the next control tick."""
         velocity_limit, acceleration_limit = (
-            self.safety_limiter.profile_limits(profile))
+            self._workspace_profile_limits(profile))
         dt = max(float(self.safety_limiter.dt), 1e-9)
         lower = np.maximum.reduce((
             -velocity_limit,
@@ -12543,8 +13485,9 @@ class PolicySafetyProbe:
         # state before committing the QP result so no post-projection overwrite
         # can bypass the acceleration limiter as the old implementation did.
         if apply_joint_limits:
-            candidate = self.safety_limiter.filter(desired, profile=profile)
-            candidate_vel = self.safety_limiter.last_vel.copy()
+            candidate = self._limiter_free_joint_candidate(
+                desired, profile=profile)
+            candidate_vel = (candidate - prev_cmd) / dt
             self.safety_limiter.last_cmd = prev_cmd.copy()
             self.safety_limiter.last_vel = prev_vel.copy()
         else:
@@ -12565,10 +13508,12 @@ class PolicySafetyProbe:
             # Smoothly brake the already-published command stream instead of
             # continuing policy on stale q/dq or jumping to a recovery pose.
             if apply_joint_limits:
-                safe = self.safety_limiter.filter(prev_cmd, profile=profile)
+                safe = self._limiter_free_joint_candidate(
+                    prev_cmd, profile=profile)
             else:
                 safe = prev_cmd.copy()
-                self.safety_limiter.observe(safe)
+                self.safety_limiter.last_cmd = safe.copy()
+                self.safety_limiter.last_vel = np.zeros_like(safe)
             self.workspace_soft_filter = {
                 "active": True,
                 "intervened": True,
@@ -12598,10 +13543,12 @@ class PolicySafetyProbe:
             # FK is part of the safety proof.  A missing model cannot justify
             # passing a new target, so brake toward the last published command.
             if apply_joint_limits:
-                safe = self.safety_limiter.filter(prev_cmd, profile=profile)
+                safe = self._limiter_free_joint_candidate(
+                    prev_cmd, profile=profile)
             else:
                 safe = prev_cmd.copy()
-                self.safety_limiter.observe(safe)
+                self.safety_limiter.last_cmd = safe.copy()
+                self.safety_limiter.last_vel = np.zeros_like(safe)
             self.workspace_soft_filter = {
                 "active": True,
                 "intervened": True,
@@ -12622,10 +13569,12 @@ class PolicySafetyProbe:
         command_linearization = self._workspace_pose_linearization(prev_cmd)
         if command_linearization is None:
             if apply_joint_limits:
-                safe = self.safety_limiter.filter(prev_cmd, profile=profile)
+                safe = self._limiter_free_joint_candidate(
+                    prev_cmd, profile=profile)
             else:
                 safe = prev_cmd.copy()
-                self.safety_limiter.observe(safe)
+                self.safety_limiter.last_cmd = safe.copy()
+                self.safety_limiter.last_vel = np.zeros_like(safe)
             self.workspace_soft_filter = {
                 "active": True,
                 "intervened": True,
@@ -12648,7 +13597,7 @@ class PolicySafetyProbe:
             lower = upper = None
             velocity_scale = self.safety_limiter.vel_limit_rad_s
         _velocity_limit, acceleration_limit = (
-            self.safety_limiter.profile_limits(profile))
+            self._workspace_profile_limits(profile))
 
         measured_vel = (
             prev_vel.copy() if feedback_dq is None else feedback_dq.copy())
@@ -12963,7 +13912,8 @@ class PolicySafetyProbe:
                 self.safety_limiter.last_cmd = candidate.copy()
                 self.safety_limiter.last_vel = candidate_vel.copy()
             else:
-                self.safety_limiter.observe(candidate)
+                self.safety_limiter.last_cmd = candidate.copy()
+                self.safety_limiter.last_vel = candidate_vel.copy()
             self.workspace_soft_filter = {
                 "active": False,
                 "intervened": False,
@@ -13480,11 +14430,12 @@ class PolicySafetyProbe:
             feedback_q = None
         hold_q = self._right_arm_joint_vector_or_none(feedback_q)
         requires_timed_feedback = bool(
-            getattr(self, "active_policy_profile", "")
-            == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+            getattr(self, "active_policy_profile", "") in {
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+            })
         maximum_arm_age_s = (
-            Gpu0QvelRealRmpV85PolicyController.MAXIMUM_JOINT_FEEDBACK_AGE_S
-            if requires_timed_feedback
+            0.010 if requires_timed_feedback
             else 0.05
         )
         fresh = bool(
@@ -13499,16 +14450,22 @@ class PolicySafetyProbe:
                 "reason": "fresh_joint_feedback_required",
                 "feedbackAgeS": feedback_age_s,
             }
+            if self._reset_recovery_active():
+                self.reset_publish_blocked = True
+                self._require_publish_rearm(
+                    "reset_arm_fresh_joint_feedback_required")
             return False
         hold_q = np.clip(
             hold_q,
             RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
             RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
         )
+        self._resume_or_reanchor_active_reset(hold_q)
         # This helper resets recurrent policy command history from current ROS
         # feedback rather than the fixed reset/safe pose.
         self._reset_real_policy_for_sim_reentry()
-        self.safety_limiter.reset(hold_q)
+        self.safety_limiter.last_cmd = hold_q.copy()
+        self.safety_limiter.last_vel = np.zeros_like(hold_q)
         self._reset_servo_target_planner(hold_q)
         self._reset_compensator_to_current_arm(hold_q)
         self._hold_racket_tracker("command_stream_arm_hold", hold_q)
@@ -13521,6 +14478,7 @@ class PolicySafetyProbe:
         self.last_policy_nominal_reference = hold_q.copy()
         self.last_compensated_reference = hold_q.copy()
         self.last_published_safe_reference = hold_q.copy()
+        self.last_published_command_profile = "arm_hold"
         self.command_stream_active = True
         self.last_command_arm = {
             "armed": True,
@@ -13579,7 +14537,8 @@ class PolicySafetyProbe:
             RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
         )
         self.ros_bridge.publish_right_arm_command(hold_q)
-        self.safety_limiter.reset(hold_q)
+        self.safety_limiter.last_cmd = hold_q.copy()
+        self.safety_limiter.last_vel = np.zeros_like(hold_q)
         self._reset_servo_target_planner(hold_q)
         self._reset_compensator_to_current_arm(hold_q)
         self._hold_racket_tracker("command_stream_disabled", hold_q)
@@ -13589,6 +14548,7 @@ class PolicySafetyProbe:
             fault=True,
         )
         self.command_stream_active = False
+        self.last_published_command_profile = "disabled_hold"
         self.last_command_disable_hold = {
             "published": True,
             "feedbackAvailable": True,
@@ -13651,13 +14611,15 @@ class PolicySafetyProbe:
             RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
         )
         self.ros_bridge.publish_right_arm_command(hold_q)
-        self.safety_limiter.reset(hold_q)
+        self.safety_limiter.last_cmd = hold_q.copy()
+        self.safety_limiter.last_vel = np.zeros_like(hold_q)
         self._reset_servo_target_planner(hold_q)
         self._reset_compensator_to_current_arm(hold_q)
         self._hold_racket_tracker("hard_workspace_stop", hold_q)
         self.last_policy_nominal_reference = hold_q.copy()
         self.last_compensated_reference = hold_q.copy()
         self.last_published_safe_reference = hold_q.copy()
+        self.last_published_command_profile = "hard_stop_hold"
         self.command_stream_active = False
         self.last_command_disable_hold = {
             "published": True,
@@ -13755,11 +14717,19 @@ class PolicySafetyProbe:
             for name, active in conditions.items()
             if bool(active)
         }
-        # Re-anchor the reset trajectory at measured/current command state so
-        # a previously outward limiter velocity cannot carry across the done
-        # transition. The reset target itself is published on this same tick.
-        reset_seed_q = self._safety_limiter_reset_reference()
-        self.safety_limiter.reset(reset_seed_q)
+        # Re-anchor the independent bounded reset trajectory at the measured
+        # or last-published state.  The safety limiter is never entered.
+        reset_seed_q = self._current_arm_reset_reference()
+        self._start_supervised_reset(
+            reset_seed_q,
+            self._current_reset_pose_q(),
+            reason=self.soft_workspace_reset_reason,
+        )
+        if hasattr(self.safety_limiter, "last_cmd"):
+            self.safety_limiter.last_cmd = np.asarray(
+                reset_seed_q, dtype=np.float64).copy()
+            self.safety_limiter.last_vel = np.zeros(
+                len(RIGHT_ARM_JOINTS), dtype=np.float64)
         self._reset_servo_target_planner(reset_seed_q)
         self._reset_compensator_to_current_arm(reset_seed_q)
         print(
@@ -13769,21 +14739,30 @@ class PolicySafetyProbe:
             flush=True,
         )
 
-    def _publish_soft_workspace_reset_command(self) -> bool:
-        """Publish a rate-limited selected reset-pose command for soft done."""
+    def _publish_soft_workspace_reset_command(
+        self,
+        reset_command_q: object,
+    ) -> bool:
+        """Publish the reset command already advanced by the control step.
+
+        Advancing here as well as in `_run_one_control_step` used to consume
+        two trajectory samples per 200 Hz tick after a soft workspace reset.
+        The publication layer must never advance motion state.
+        """
         if self.ros_bridge is None or not self.command_stream_active:
             return False
-        reset_q = np.clip(
-            self._current_reset_pose_q(),
-            RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
-            RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
-        )
-        safe = self.safety_limiter.filter(reset_q, profile="reset")
-        self.ros_bridge.publish_right_arm_command(safe)
+        reset_q = np.asarray(
+            reset_command_q, dtype=np.float64).reshape(
+                len(RIGHT_ARM_JOINTS)).copy()
+        if bool(getattr(self, "reset_publish_blocked", False)):
+            self.command_stream_active = False
+            return False
+        self.ros_bridge.publish_right_arm_command(reset_q)
         self.last_policy_nominal_reference = reset_q.copy()
         self.last_compensated_reference = reset_q.copy()
         self.last_published_safe_reference = np.asarray(
-            safe, dtype=np.float64).copy()
+            reset_q, dtype=np.float64).copy()
+        self.last_published_command_profile = "reset"
         self.command_stream_active = True
         self.last_command_arm = {
             "armed": False,
@@ -13839,6 +14818,12 @@ class PolicySafetyProbe:
         if not options.publish_commands:
             self.compensation_was_enabled = False
             return self._publish_hold_on_command_disable()
+        publish_profile_name = str(profile).strip().lower()
+        if (publish_profile_name == "reset"
+                and bool(getattr(self, "reset_publish_blocked", False))):
+            self.compensation_was_enabled = False
+            self.command_stream_active = False
+            return False
         dq_mode = PolicyDqMode.parse(getattr(
             getattr(self, "cfg", None),
             "policy_dq_mode",
@@ -13863,13 +14848,21 @@ class PolicySafetyProbe:
                 self.last_incoherent_dq_ablation_gate["blocked"] = True
                 self.last_incoherent_dq_ablation_gate["reason"] = (
                     "explicit allow and positive remaining impact limit required")
-                return self._publish_hold_on_command_disable()
+                held = self._publish_hold_on_command_disable()
+                self._require_publish_rearm("incoherent_dq_gate_blocked")
+                return held
         if not self.command_stream_active:
             self.compensation_was_enabled = False
             return self._arm_command_stream_from_feedback()
         if self._soft_workspace_reset_active():
             self.compensation_was_enabled = False
-            return self._publish_soft_workspace_reset_command()
+            reset_command_q = (
+                np.asarray(q, dtype=np.float64).copy()
+                if publish_profile_name == "reset"
+                else self._slow_reset_current_q()
+            )
+            return self._publish_soft_workspace_reset_command(
+                reset_command_q)
         options = self._real_compensation_options(options)
         profile_name = normalize_observation_profile(getattr(
             options,
@@ -13905,7 +14898,9 @@ class PolicySafetyProbe:
                     "the optional real servo planner requires a deployable "
                     "V6 checkpoint with planner_before_actuator=true"
                 )
-                return False
+                held = self._publish_hold_on_command_disable()
+                self._require_publish_rearm("simcode4_plant_order_blocked")
+                return held
             self.last_simcode4_publish_block_reason = ""
         raw = np.asarray(q, dtype=np.float64).reshape(-1)
         nominal_q = raw.copy()
@@ -13945,7 +14940,9 @@ class PolicySafetyProbe:
                     "failClosed": True,
                     "reason": str(exc),
                 }
-                return self._publish_hold_on_command_disable()
+                held = self._publish_hold_on_command_disable()
+                self._require_publish_rearm("policy_plant_matcher_fault")
+                return held
         else:
             self.last_matcher_shadow_q = nominal_q.copy()
             self.last_matcher_pre_safety_q = raw.copy()
@@ -13986,13 +14983,18 @@ class PolicySafetyProbe:
                 getattr(self.cfg, "comp_actuator_tau_s", 0.074),
             )),
         )
-        publish_profile_name = str(profile).strip().lower()
         # Policy, hold, parking, and failsafe commands have no route into
         # RightArmCommandSafetyLimiter.  This is intentionally not a runtime
         # option: mode transitions must never create hidden limiter velocity.
-        # Reset is the only exception and is handled earlier by
-        # _publish_soft_workspace_reset_command().
-        safe = raw.copy()
+        # Reset uses its independent supervised S-curve. Other parking gates
+        # use the local limiter-free rate state below so capture/release/ball-
+        # loss transitions cannot turn a reset-pose target into a one-tick
+        # jump.
+        safe = (
+            self._limiter_free_parking_candidate(raw)
+            if publish_profile_name == "parking"
+            else raw.copy()
+        )
         # V85 keeps its own persistent q_ref, so any remaining upstream
         # matcher/compensation rewrite of an *executed actor* target would
         # desynchronise the next observation's q_ref_error and must fail
@@ -14022,6 +15024,8 @@ class PolicySafetyProbe:
                 # matches the V85 q_ref state. Hold measured position and
                 # require an explicit operator re-arm.
                 held = self._publish_hold_on_command_disable()
+                self._require_publish_rearm(
+                    "gpu0_persistent_boundary_intervention")
                 self._mark_policy_paused()
                 return held
         else:
@@ -14029,6 +15033,7 @@ class PolicySafetyProbe:
         self.ros_bridge.publish_right_arm_command(safe)
         self.last_published_safe_reference = np.asarray(
             safe, dtype=np.float64).copy()
+        self.last_published_command_profile = publish_profile_name
         if matcher_proposed and matcher is not None:
             try:
                 matcher.observe_published(safe)
@@ -14254,6 +15259,7 @@ class PolicySafetyProbe:
                 options = replace(options, publish_commands=False)
                 self.runtime_options = options
                 self.command_publish_lease_expired = True
+                self._require_publish_rearm("command_lease_expired")
             drag_pos = self.web_drag_ball_pos.copy()
             drag_vel = self.web_drag_ball_vel.copy()
             drag_valid = bool(self.web_drag_valid)
@@ -15295,6 +16301,23 @@ class PolicySafetyProbe:
             # Never let estimator clipping or frame-hold output make a camera
             # measurement look newer than its original ROS timestamp.
             age_s = max(age_s, float(control_measurement_age_s))
+        if (normalize_observation_profile(getattr(
+                options,
+                "policy_profile",
+                OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+        )) == OBSERVATION_PROFILE_GPU1_QACC_FT_V153):
+            # V153 ages the state represented in the actor input, not the raw
+            # detection behind a predictor. A continuous prediction represents
+            # the current control time; a frame-held prediction represents its
+            # snapshot time; no-prediction mode represents the measurement.
+            output_mode = str(out.get("output_mode", "")).lower()
+            if "continuous" in output_mode:
+                age_s = 0.0
+            elif ("frame_hold" in output_mode
+                    or output_mode == CONTROL_OUTPUT_PREDICT_ON_FRAME_HOLD):
+                age_s = max(0.0, float(out.get("snapshot_hold_s", 0.0)))
+            else:
+                age_s = max(0.0, float(out.get("loss_s", age_s)))
 
         if bool(out.get("valid", False)):
             control_cap = float(options.estimator_control_max_extrapolation_s)
@@ -15346,7 +16369,6 @@ class PolicySafetyProbe:
         age_s: float | None,
         options: RuntimeOptions,
         *,
-        force_invalidate: bool = False,
         source_timestamp_s: float | None = None,
         force_fresh_source: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, bool, float | None]:
@@ -15359,12 +16381,16 @@ class PolicySafetyProbe:
             OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
             OBSERVATION_PROFILE_SIMCODE6_QVEL67,
             OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+            OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
         }
         if (bool(getattr(
                     options, "camera_control_time_compensation", False))
                 and getattr(options, "ball_source", "") == "camera"
                 and not bool(getattr(options, "use_ball_estimator", False))
-                and profile != OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
+                and profile not in {
+                    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                }):
             # This experiment explicitly replaces the profile-specific
             # zero-order hold: the same trusted camera frame is propagated to
             # each 200 Hz policy tick by the bounded camera trajectory model.
@@ -15374,8 +16400,10 @@ class PolicySafetyProbe:
         if (profile not in sampled_profiles
                 or getattr(options, "control_mode", "policy") != "policy"
                 or (bool(getattr(options, "use_ball_estimator", False))
-                    and profile
-                    != OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)):
+                    and profile not in {
+                        OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                        OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                    })):
             self.policy_ball_sample_profile = None
             self.policy_ball_sample_source_stamp_s = None
             return pos, vel, bool(valid), age_s
@@ -15386,23 +16414,6 @@ class PolicySafetyProbe:
             self.policy_ball_sample_has_valid = False
             self.policy_ball_sample_age_s = 0.0
             self.policy_ball_sample_source_stamp_s = None
-
-        if force_invalidate:
-            self.policy_ball_sample_has_valid = False
-            self.policy_ball_sample_pos = np.zeros(3, dtype=np.float32)
-            self.policy_ball_sample_vel = np.zeros(3, dtype=np.float32)
-            forced_age = (
-                self.cfg.ball_lost_timeout_s
-                if age_s is None else max(
-                    self.cfg.ball_lost_timeout_s, float(age_s)))
-            self.policy_ball_sample_age_s = float(forced_age)
-            self.policy_ball_sample_source_stamp_s = None
-            return (
-                self.policy_ball_sample_pos.copy(),
-                self.policy_ball_sample_vel.copy(),
-                False,
-                self.policy_ball_sample_age_s,
-            )
 
         step = int(self.policy_ball_sample_step)
         sample_rate_hz = float(getattr(
@@ -15431,7 +16442,10 @@ class PolicySafetyProbe:
             PolicyBallHandoverMode.LEGACY_FORCE_FRESH.value,
         ))
         forced_refresh = False
-        if (profile != OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+        if (profile not in {
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                }
                 and bool(force_fresh_source) and fresh_source
                 and handover_mode is PolicyBallHandoverMode.LEGACY_FORCE_FRESH):
             # During predictor->camera handover, every *new camera frame* must
@@ -15497,7 +16511,8 @@ class PolicySafetyProbe:
         elif self.policy_ball_sample_has_valid:
             if profile in {
                     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
-                    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85}:
+                    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                    OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
                 self.policy_ball_sample_age_s += float(self.cfg.control_dt)
             else:
                 # simcode4/5/6 have no missing/dropout branch and use
@@ -15507,6 +16522,10 @@ class PolicySafetyProbe:
         if (profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
                 and self.policy_ball_sample_age_s
                 > Gpu0QvelRealRmpV85PolicyController.LOST_BALL_TIMEOUT_S):
+            self.policy_ball_sample_has_valid = False
+        if (profile == OBSERVATION_PROFILE_GPU1_QACC_FT_V153
+                and self.policy_ball_sample_age_s
+                > Gpu1QaccFtV153PolicyController.LOST_BALL_TIMEOUT_S):
             self.policy_ball_sample_has_valid = False
         self.policy_ball_sample_step = step + 1
         self.last_policy_ball_handover_info = {
@@ -15562,13 +16581,16 @@ class PolicySafetyProbe:
         *,
         fail_closed: bool = False,
     ) -> float:
-        strict_gpu0_timestamp = bool(
+        strict_authenticated_timestamp = bool(
             getattr(options, "control_mode", "policy") == "policy"
             and normalize_observation_profile(getattr(
                 options,
                 "policy_profile",
                 OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
-            )) == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+            )) in {
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+            }
             and _is_sensor_ball_source(getattr(options, "ball_source", ""))
         )
         unavailable_age_s = (
@@ -15577,7 +16599,7 @@ class PolicySafetyProbe:
                 float(self.cfg.racket_tracking_max_ball_age_s)
                 + float(self.cfg.control_dt),
             )
-            if fail_closed or strict_gpu0_timestamp else 0.0
+            if fail_closed or strict_authenticated_timestamp else 0.0
         )
         if not valid:
             return self.cfg.ball_lost_timeout_s
@@ -15591,7 +16613,7 @@ class PolicySafetyProbe:
         try:
             now_s = float(self.ros_bridge.now_sec())
             stamp_s = float(measurement_stamp_s)
-            if strict_gpu0_timestamp and stamp_s > now_s + 1e-6:
+            if strict_authenticated_timestamp and stamp_s > now_s + 1e-6:
                 return unavailable_age_s
             return max(0.0, now_s - stamp_s)
         except Exception:
@@ -15854,12 +16876,13 @@ class PolicySafetyProbe:
             except (TypeError, ValueError) as exc:
                 error = error or f"invalid_joint_sample:{exc}"
             if sample is not None and error is None:
-                gpu0_real_rmp_profile = bool(
-                    getattr(self, "active_policy_profile", "")
-                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+                strict_feedback_profile = bool(
+                    getattr(self, "active_policy_profile", "") in {
+                        OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                        OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                    })
                 maximum_age_s = (
-                    Gpu0QvelRealRmpV85PolicyController.MAXIMUM_JOINT_FEEDBACK_AGE_S
-                    if gpu0_real_rmp_profile else 0.05)
+                    0.010 if strict_feedback_profile else 0.05)
                 error = sample.transition_error(
                     previous,
                     max_receipt_age_s=maximum_age_s,
@@ -15868,7 +16891,7 @@ class PolicySafetyProbe:
                     # If the 200 Hz timer runs after two fresh messages, the
                     # skipped older message is not corrupt feedback and must
                     # not reset the persistent GPU0 q_ref history.
-                    allow_source_sequence_gap=gpu0_real_rmp_profile,
+                    allow_source_sequence_gap=strict_feedback_profile,
                 )
             if sample is not None:
                 skipped_source_samples = (
@@ -16419,6 +17442,8 @@ class PolicySafetyProbe:
             arm_dq=arm_dq,
             arm_sample_stamp_s=arm_sample_stamp_s,
             observation_scales=observation_scales,
+            confirmed_hit_count=int(getattr(
+                self, "policy_confirmed_hit_count", 0)),
         )
 
     def _policy_compensation_feedback_q(
@@ -16574,15 +17599,16 @@ class PolicySafetyProbe:
                 self.has_captured = True
             self.failsafe_active = False
 
-        if (self._reset_recovery_active()
-                and options.control_mode != "mpc_juggle"):
+        if self._reset_recovery_active():
             self.done_failsafe_active = False
             self.done_failsafe_reason = ""
             self.done_failsafe_conditions = {}
             self.failsafe_active = False
-            reset_q = self._current_reset_pose_q()
-            self._sync_policy_to_safe_pose(reset_q)
-            self._hold_racket_tracker("reset_recovery", reset_q)
+            reset_q = self._advance_slow_reset_command(advance=bool(
+                self.ros_bridge is None
+                or (options.publish_commands and self.command_stream_active)))
+            _tracking_q, self.last_tracking_info = self.racket_tracker.hold(
+                reset_q, reason="reset_recovery")
             self._mark_policy_paused()
             reset_age_s = (
                 max(0.0, float(age_override_s))
@@ -16622,8 +17648,7 @@ class PolicySafetyProbe:
                 if not self._soft_workspace_reset_active():
                     self._latch_soft_workspace_reset(
                         self.done_failsafe_reason, merged_conditions)
-                reset_q = self._current_reset_pose_q()
-                self._sync_policy_to_safe_pose(reset_q)
+                reset_q = self._slow_reset_current_q()
                 self._hold_racket_tracker(
                     "soft_workspace_reset", reset_q)
                 self._hold_juggle_controller(
@@ -16648,8 +17673,7 @@ class PolicySafetyProbe:
 
         if self.done_failsafe_active:
             if self._soft_workspace_reset_active():
-                reset_q = self._current_reset_pose_q()
-                self._sync_policy_to_safe_pose(reset_q)
+                reset_q = self._slow_reset_current_q()
                 self._hold_racket_tracker(
                     "soft_workspace_reset", reset_q)
                 self._hold_juggle_controller(
@@ -16788,6 +17812,9 @@ class PolicySafetyProbe:
                         "ball_lost_failsafe_hold", hold_q)
                 if options.control_mode == "racket_tracking":
                     self._mark_policy_paused()
+                    if options.publish_commands:
+                        self._require_publish_rearm(
+                            "racket_tracking_ball_lost")
                 if options.control_mode == "racket_tracking":
                     self.last_control_mode = "racket_tracking"
                     return (
@@ -16802,6 +17829,8 @@ class PolicySafetyProbe:
                 self._sync_policy_to_safe_pose(reset_q)
                 self._hold_racket_tracker("ball_lost_failsafe", reset_q)
                 self._mark_policy_paused()
+                if options.publish_commands:
+                    self._require_publish_rearm("policy_ball_lost")
                 return "ball_lost_failsafe", "", {}, failsafe_age_s, False
 
         arm_q = None
@@ -16838,6 +17867,9 @@ class PolicySafetyProbe:
                         "camera calibration required: detector frame is "
                         f"{camera_frame!r}, expected base_link or sim_frame")
                     self._hold_racket_tracker(reason, hold_q)
+                    if options.publish_commands:
+                        self._require_publish_rearm(
+                            "racket_tracking_camera_frame_fault")
                     self.last_control_mode = active_mode
                     return "racket_tracking_hold", reason, {}, age_s, False
             if (not valid
@@ -16850,6 +17882,9 @@ class PolicySafetyProbe:
                     f"ball state stale ({age_s:.3f}s > "
                     f"{self.cfg.racket_tracking_max_ball_age_s:.3f}s)")
                 self._hold_racket_tracker(reason, hold_q)
+                if options.publish_commands:
+                    self._require_publish_rearm(
+                        "racket_tracking_ball_state_fault")
                 self.last_control_mode = active_mode
                 return "racket_tracking_hold", reason, {}, age_s, False
             if (options.publish_commands
@@ -16865,6 +17900,8 @@ class PolicySafetyProbe:
                     "fresh joint feedback required for tracking "
                     f"(age={age_text}, dq={arm_dq_source})")
                 self._hold_racket_tracker(reason, hold_q)
+                self._require_publish_rearm(
+                    "racket_tracking_joint_feedback_fault")
                 self.last_control_mode = active_mode
                 return "racket_tracking_hold", reason, {}, age_s, False
 
@@ -16909,6 +17946,9 @@ class PolicySafetyProbe:
             except Exception as exc:  # noqa: BLE001 - fail closed to hold.
                 reason = f"tracking solver unavailable: {exc}"
                 self._hold_racket_tracker(reason, feedback_q)
+                if options.publish_commands:
+                    self._require_publish_rearm(
+                        "racket_tracking_solver_fault")
                 self.last_control_mode = active_mode
                 return "racket_tracking_hold", reason, {}, age_s, False
             self.last_tracking_info = tracking_info
@@ -17111,15 +18151,19 @@ class PolicySafetyProbe:
                 or self.active_policy_profile
                 == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
             maximum_feedback_age_s = (
-                Gpu0QvelRealRmpV85PolicyController.MAXIMUM_JOINT_FEEDBACK_AGE_S
-                if self.active_policy_profile
-                == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                0.010
+                if self.active_policy_profile in {
+                    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                }
                 else 0.05
             )
             feedback_is_mandatory = bool(
                 options.publish_commands
-                or (self.active_policy_profile
-                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                or (self.active_policy_profile in {
+                        OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                        OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                    }
                     and options.use_ros_state))
             if (measured_feedback_profile
                     and feedback_is_mandatory
@@ -17140,21 +18184,30 @@ class PolicySafetyProbe:
                     f"fresh q/dq feedback required for {self.active_policy_profile} "
                     f"(age={age_text}, dq={arm_dq_source}, "
                     f"sample={joint_sample_error or 'ok'})")
+                if options.publish_commands:
+                    self._require_publish_rearm(
+                        "policy_joint_feedback_fault")
                 self.last_control_mode = "policy"
                 return "policy_feedback_hold", reason, {}, age_s, False
             if (self.active_policy_profile
-                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                    in {
+                        OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                        OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                    }
                     and (not valid or age_s
-                         > Gpu0QvelRealRmpV85PolicyController.LOST_BALL_TIMEOUT_S)):
+                         > 0.350)):
                 hold_q = (
                     arm_q if arm_q is not None
                     else self.controller.current_arm_cmd_q())
                 self._sync_policy_to_safe_pose(hold_q)
                 self._mark_policy_paused()
                 reason = (
-                    "GPU0-QVEL/REAL-RMP ball state invalid"
+                    f"{self.active_policy_profile} ball state invalid"
                     if not valid else
-                    f"GPU0-QVEL/REAL-RMP ball state stale ({age_s:.3f}s)")
+                    f"{self.active_policy_profile} ball state stale ({age_s:.3f}s)")
+                if options.publish_commands:
+                    self._require_publish_rearm(
+                        "policy_ball_state_fault")
                 self.last_control_mode = "policy"
                 return "policy_ball_state_hold", reason, {}, age_s, False
             if self.last_control_mode != "policy":
@@ -17178,9 +18231,16 @@ class PolicySafetyProbe:
                     arm_sample_stamp_s,
                     options.enable_policy_dq_adapter,
                 ))
-            if (self.active_policy_profile
-                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
-                    and not options.publish_commands):
+            if (self.active_policy_profile in {
+                    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                    }
+                    and not options.publish_commands
+                    and not options.use_ros_state):
+                # Explicitly local, non-publishing probe mode has no encoder
+                # stream.  Use its own coherent command state so smoke/sim
+                # inspection remains possible.  Hardware publication still
+                # takes the mandatory <=10 ms JointState path above.
                 if arm_q is None:
                     arm_q = self.controller.current_arm_cmd_q()
                 if policy_arm_dq is None:
@@ -17343,8 +18403,7 @@ class PolicySafetyProbe:
                         self.done_failsafe_reason,
                         hard_conditions,
                     )
-                    reset_q = self._current_reset_pose_q()
-                    self._sync_policy_to_safe_pose(reset_q)
+                    reset_q = self._slow_reset_current_q()
                     self._hold_racket_tracker(
                         "soft_workspace_reset", reset_q)
                     self._hold_juggle_controller(
@@ -17684,6 +18743,25 @@ class PolicySafetyProbe:
         vel_noise = np.random.normal(0.0, noise_std_m * 10.0, 3).astype(np.float32)
         return (ball_pos + pos_noise).astype(np.float32), (ball_vel + vel_noise).astype(np.float32)
 
+    def _policy_observation_dim_for_profile(self, profile: object) -> int:
+        canonical = normalize_observation_profile(profile)
+        controller = getattr(self, "policy_controllers", {}).get(canonical)
+        controller_dim = int(getattr(controller, "_expected_obs_dim", 0) or 0)
+        if controller_dim > 0:
+            return controller_dim
+        if canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+            return 57
+        if canonical in {
+                OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+                OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
+                OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
+                OBSERVATION_PROFILE_SIMCODE4_SERVO67,
+                OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+                OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
+            return 67
+        return int(self.cfg.policy_obs_dim)
+
     def _runtime_options_from_payload(self, payload: dict[str, Any]) -> RuntimeOptions:
         control_mode = _control_mode(
             payload.get("controlMode", self.cfg.default_control_mode),
@@ -17691,25 +18769,56 @@ class PolicySafetyProbe:
         )
         policy_profile = normalize_observation_profile(
             payload.get("policyProfile", self.cfg.policy_profile))
-        policy_model = _normalize_gpu0_rmp_model(
+        # Non-GPU0 controllers intentionally have no policy_model_id.  Keep a
+        # valid inactive selector in RuntimeOptions without weakening strict
+        # validation of an explicitly supplied GPU0 model.
+        default_policy_model = (
+            getattr(self, "active_policy_model", "")
+            or GPU0_RMP_MODEL_V85
+        )
+        policy_model = _normalize_policy_model_for_profile(
+            policy_profile,
             payload.get(
                 "policyModel",
-                getattr(self, "active_policy_model", GPU0_RMP_MODEL_V85),
-            )
+                default_policy_model,
+            ),
+            default_policy_model,
         )
+        profile_obs_dim = self._policy_observation_dim_for_profile(
+            policy_profile)
         default_observation_scales = _default_policy_observation_scales(
-            self.cfg.policy_obs_dim,
+            profile_obs_dim,
             self.cfg.policy_dq_observation_scale,
         )
-        policy_observation_scales = _policy_observation_scales(
-            payload.get(
-                "policyObservationScales", default_observation_scales),
-            self.cfg.policy_obs_dim,
-        )
-        if policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
-            # V85 was trained without any actor-input rescaling.
+        if policy_profile in {
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
+            # These authenticated actors forbid input rescaling.
             policy_observation_scales = tuple(
-                1.0 for _ in range(self.cfg.policy_obs_dim))
+                1.0 for _ in range(profile_obs_dim))
+        else:
+            raw_observation_scales = payload.get(
+                "policyObservationScales", default_observation_scales)
+            try:
+                policy_observation_scales = _policy_observation_scales(
+                    raw_observation_scales,
+                    profile_obs_dim,
+                )
+            except ValueError:
+                # The browser can carry the previous profile's 57/67 scale
+                # vector in the first payload after a profile change.  Preserve
+                # all shared indices and initialize only the new tail to 1.
+                if (not isinstance(raw_observation_scales, (list, tuple))
+                        or len(raw_observation_scales) not in {57, 67}):
+                    raise
+                source_scales = _policy_observation_scales(
+                    raw_observation_scales,
+                    len(raw_observation_scales),
+                )
+                resized_scales = [1.0] * profile_obs_dim
+                shared_dim = min(profile_obs_dim, len(source_scales))
+                resized_scales[:shared_dim] = source_scales[:shared_dim]
+                policy_observation_scales = tuple(resized_scales)
         rl_use_valid_ball_obs_age = _policy_uses_valid_ball_obs_age(
             policy_profile,
             bool(payload.get(
@@ -17893,15 +19002,40 @@ class PolicySafetyProbe:
         # bridge flag only grants permission; it must not start the 200 Hz
         # publisher while the backend is still booting and before the browser
         # (or an experiment client) has deliberately sent publishCommands=true.
-        publish_commands = bool(payload.get("publishCommands", False))
+        publish_requested = bool(payload.get("publishCommands", False))
+        profile_switch_requested = bool(
+            policy_profile != getattr(
+                self, "active_policy_profile", policy_profile))
+        model_switch_requested = bool(
+            not profile_switch_requested
+            and policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+            and policy_model != getattr(
+                self, "active_policy_model", policy_model))
+        switch_requested = bool(
+            profile_switch_requested or model_switch_requested)
+        reset_arm_blocked = self._consume_reset_policy_arm_request(
+            payload,
+            publish_requested=publish_requested,
+            switch_requested=switch_requested,
+        )
+        rearm_required = self._publish_rearm_blocks_request(
+            publish_requested=publish_requested,
+            switch_requested=switch_requested,
+        )
         publish_commands = bool(
-            publish_commands
+            publish_requested
+            and not switch_requested
+            and not reset_arm_blocked
+            and not rearm_required
             and self.ros_bridge is not None
             and self.cfg.ros_publish_commands
         )
         if publish_commands:
             use_ros_state = True
-        elif (policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+        elif (policy_profile in {
+                    OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                }
                 and self.ros_bridge is not None):
             # Real shadow mode must exercise the same measured q/dq contract
             # as command publication; only the ROS-free browser smoke path may
@@ -17933,6 +19067,8 @@ class PolicySafetyProbe:
             obs_rate = 60.0
         elif policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
             obs_rate = 90.0
+        elif policy_profile == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
+            obs_rate = 60.0
         comp_mode = str(payload.get(
             "compensationMode", self.cfg.compensation_mode)).strip().lower()
         comp_mode = comp_mode.replace("-", "_")
@@ -18389,7 +19525,9 @@ class PolicySafetyProbe:
                 self.cfg.vertical_contact_max_racket_upward_speed_m_s,
                 min_value=0.0, max_value=3.0),
         )
-        if policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+        if policy_profile in {
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
             # Any post-actor rewrite changes persistent q_ref and therefore
             # corrupts the next observation's q_ref-q term.
             contact_action_shield = replace(
@@ -18402,7 +19540,8 @@ class PolicySafetyProbe:
         if policy_profile in {
                 OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
                 OBSERVATION_PROFILE_SIMCODE6_QVEL67,
-                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85}:
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
             # Hardware is the checkpoint's actuator plant.  Applying any
             # software compensation here would duplicate the modeled joint
             # dynamics and invalidate both commands and observation history.
@@ -19362,6 +20501,8 @@ class PolicySafetyProbe:
         if inferred_impact and not previous_inferred_impact:
             self.incoherent_dq_ablation_inferred_impacts = int(getattr(
                 self, "incoherent_dq_ablation_inferred_impacts", 0)) + 1
+            self.policy_confirmed_hit_count = int(getattr(
+                self, "policy_confirmed_hit_count", 0)) + 1
         self._previous_inferred_contact_flag = inferred_impact
         measured_p, measured_v = self._apply_ball_noise(
             ball_pos, ball_vel, valid, noise_std_m)
@@ -19393,14 +20534,17 @@ class PolicySafetyProbe:
                     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
                     OBSERVATION_PROFILE_SIMCODE6_QVEL67,
                     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
                 }):
             self._reset_policy_ball_sampling_contract()
         obs_p, obs_v, control_valid, age_override_s = (
             self._apply_policy_ball_sampling_contract(
                 obs_p, obs_v, control_valid, age_override_s, options,
-                force_invalidate=bool(
-                    high_ball_occlusion_info.get("enabled", False)
-                    and not policy_measured_valid),
+                # Match simcode5's deployment contract: an individual
+                # detector miss is a short observation dropout, not an
+                # instruction-stream fault.  The sampler keeps the last
+                # accepted ball state and advances its age; GPU0/GPU1 only
+                # invalidate it after their explicit 350 ms timeout.
                 source_timestamp_s=ball_stamp_s,
                 force_fresh_source=bool(
                     getattr(options, "ball_source", "") == "camera"
@@ -19545,6 +20689,18 @@ class PolicySafetyProbe:
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("reset"):
             return self.reset(payload)
+        payload = payload if isinstance(payload, dict) else {}
+        with self.lock:
+            if not self._accept_control_client_payload(payload):
+                snapshot = dict(self.latest_snapshot_payload or {
+                    "mode": "waiting",
+                    "reason": "control owner snapshot unavailable",
+                })
+                snapshot["commandOwnership"] = (
+                    self._command_ownership_payload())
+                snapshot["commandRequestIgnored"] = True
+                snapshot["recording"] = self.recording_status()
+                return snapshot
         drag_ball_pos = vec3_from_payload(payload, "ball", self.initial_ball_pos())
         drag_ball_vel = vec3_from_payload(payload, "velocity", (0.0, 0.0, 0.0))
         drag_valid = bool(payload.get("valid", True))
@@ -19854,6 +21010,8 @@ class PolicySafetyProbe:
                     _default_juggle_physics(self.cfg)),
                 "useRosState": bool(use_ros_state),
                 "publishCommands": bool(publish_commands),
+                "publishArmToken": str(getattr(
+                    self, "last_publish_arm_token", "")),
                 "captureGate": bool(self.cfg.enable_ball_capture_gate),
                 "releaseGate": bool(self.cfg.enable_ball_release_gate),
                 "lostFailsafe": bool(self.cfg.enable_ball_lost_failsafe),
@@ -19956,6 +21114,8 @@ class PolicySafetyProbe:
                     runtime_options.juggle_physics),
                 "useRosState": bool(runtime_options.use_ros_state),
                 "publishCommands": bool(runtime_options.publish_commands),
+                "publishArmToken": str(getattr(
+                    self, "last_publish_arm_token", "")),
                 "captureGate": bool(runtime_options.enable_ball_capture_gate),
                 "releaseGate": bool(runtime_options.enable_ball_release_gate),
                 "lostFailsafe": bool(runtime_options.enable_ball_lost_failsafe),
@@ -20263,6 +21423,15 @@ class PolicySafetyProbe:
             },
             "commandDisableHold": dict(self.last_command_disable_hold),
             "commandArm": dict(self.last_command_arm),
+            "commandOwnership": self._command_ownership_payload(),
+            "commandRearm": {
+                "required": bool(getattr(
+                    self, "publish_rearm_required", False)),
+                "offSeen": bool(getattr(
+                    self, "publish_rearm_off_seen", False)),
+                "reason": str(getattr(
+                    self, "publish_rearm_reason", "")),
+            },
             "hardWorkspaceStop": self._hard_workspace_stop_payload(),
             "softWorkspaceReset": self._soft_workspace_reset_payload(),
             "workspaceSafety": self._workspace_safety_pose_payload(),
@@ -20362,13 +21531,25 @@ class PolicySafetyProbe:
                 self.cfg.simcode6_sim_xml_path,
             ),
             OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: (
-                (
-                    self.cfg.simcode7_v91_model_path
-                    if self.active_policy_model == GPU0_RMP_MODEL_V91
-                    else self.cfg.simcode7_v85_model_path
+                {
+                    GPU0_RMP_MODEL_V85: self.cfg.simcode7_v85_model_path,
+                    GPU0_RMP_MODEL_V91: self.cfg.simcode7_v91_model_path,
+                    GPU0_RMP_MODEL_V97: self.cfg.simcode7_v97_model_path,
+                }.get(
+                    self.active_policy_model,
+                    self.cfg.simcode7_v85_model_path,
                 ),
-                self.cfg.simcode7_policy_xml_path,
-                self.cfg.simcode7_sim_xml_path,
+                (self.cfg.simcode8_policy_xml_path
+                 if self.active_policy_model == GPU0_RMP_MODEL_V97
+                 else self.cfg.simcode7_policy_xml_path),
+                (self.cfg.simcode8_sim_xml_path
+                 if self.active_policy_model == GPU0_RMP_MODEL_V97
+                 else self.cfg.simcode7_sim_xml_path),
+            ),
+            OBSERVATION_PROFILE_GPU1_QACC_FT_V153: (
+                self.cfg.gpu1_qacc_ft_model_path,
+                self.cfg.gpu1_qacc_ft_policy_xml_path,
+                self.cfg.simcode8_sim_xml_path,
             ),
         }
         (
@@ -20523,6 +21704,20 @@ class PolicySafetyProbe:
                 "mpcDeltaWeight": 0.0,
                 "mpcMaxDeltaRad": 0.0,
             },
+            OBSERVATION_PROFILE_GPU1_QACC_FT_V153: {
+                "mode": "none",
+                "delayMs": 45.0,
+                "tauS": 0.0,
+                "gain": 1.0,
+                "mpcBeta": 0.0,
+                "mpcDelayScale": 1.0,
+                "mpcTauScale": 1.0,
+                "mpcHorizonSteps": 1,
+                "mpcTrackingWeight": 0.0,
+                "mpcNominalWeight": 0.0,
+                "mpcDeltaWeight": 0.0,
+                "mpcMaxDeltaRad": 0.0,
+            },
         }
         # Preserve explicit launch overrides for the profile used at startup;
         # the inactive profile retains its own known-good defaults.
@@ -20559,8 +21754,11 @@ class PolicySafetyProbe:
                 "selected": str(self.reset_initial_pose_id),
             },
             "control": {
-                "modes": list(CONTROL_MODES),
-                "defaultMode": str(self.cfg.default_control_mode),
+                "modes": list(SELECTABLE_CONTROL_MODES),
+                "defaultMode": (
+                    str(self.cfg.default_control_mode)
+                    if self.cfg.default_control_mode in SELECTABLE_CONTROL_MODES
+                    else "policy"),
             },
             "racketTracking": {
                 "available": bool(
@@ -20586,9 +21784,8 @@ class PolicySafetyProbe:
             },
             "racketMpc": self.racket_tracker.config.mpc_tuning().diagnostics(),
             "mpcJuggle": {
-                "available": bool(
-                    self.controller.mj_model is not None
-                    and self.controller.mj_data is not None),
+                "available": False,
+                "disabledReason": "disabled_by_operator_request",
                 "runRequested": False,
                 "startNonce": 0,
                 "initialJointPositionDeg": np.rad2deg(
@@ -20597,7 +21794,7 @@ class PolicySafetyProbe:
                     _default_juggle_physics(self.cfg)),
             },
             "policy": {
-                "profiles": list(OBSERVATION_PROFILES),
+                "profiles": list(RUNTIME_SWITCHABLE_POLICY_PROFILES),
                 "defaultProfile": str(self.cfg.policy_profile),
                 "activeProfile": str(self.active_policy_profile),
                 "modelOptions": [
@@ -20608,8 +21805,13 @@ class PolicySafetyProbe:
                     },
                     {
                         "id": GPU0_RMP_MODEL_V91,
-                        "label": "V91 (new)",
+                        "label": "V91",
                         "path": str(self.cfg.simcode7_v91_model_path),
+                    },
+                    {
+                        "id": GPU0_RMP_MODEL_V97,
+                        "label": "V97 (2026-09-01)",
+                        "path": str(self.cfg.simcode7_v97_model_path),
                     },
                 ],
                 "defaultModel": str(
@@ -21601,7 +22803,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         <select id="controlMode">
           <option value="policy">RL policy</option>
           <option value="racket_tracking">Racket tracking</option>
-          <option value="mpc_juggle">MPC juggling</option>
+          <option value="mpc_juggle" disabled>MPC juggling (disabled)</option>
         </select>
       </div>
       <div class="row">
@@ -21614,6 +22816,7 @@ HTML_TEMPLATE = r"""<!doctype html>
           <option value="simcode5_pure_actuator67">simcode5 pure actuator (direct real command)</option>
           <option value="simcode6_qvel67">simcode6 qvel (direct real command)</option>
           <option value="gpu0_qvel_real_rmp_v85">GPU0-QVEL/REAL-RMP</option>
+          <option value="gpu1_qacc_ft_v153">GPU1-QACC-FT (V153)</option>
         </select>
       </div>
       <div class="row" id="policyModelRow">
@@ -21828,6 +23031,8 @@ let plotHistory = [];
 let latest = null;
 let dragging = null;
 let inFlight = false;
+const clientSessionId = newPublishArmToken();
+let publishArmToken = '';
 let viewYaw = -0.72;
 let viewPitch = 0.46;
 let viewZoom = 1.0;
@@ -22155,7 +23360,7 @@ function applyCompensationProfileDefaults(profile) {
   setNumberValue(inputs.compMpcDeltaWeight, defaults.mpcDeltaWeight, 2);
   setNumberValue(inputs.compMpcMaxDeltaRad, defaults.mpcMaxDeltaRad, 3);
   if (['simcode5_pure_actuator67', 'simcode6_qvel67',
-       'gpu0_qvel_real_rmp_v85'].includes(profile)) {
+       'gpu0_qvel_real_rmp_v85', 'gpu1_qacc_ft_v153'].includes(profile)) {
     flowEls.enableCompensation.checked = false;
   }
 }
@@ -22243,14 +23448,14 @@ function syncEstimatorModeControl() {
   }
   const ageLockedTrueProfile = [
     'simcode2_idealpd67', 'simcode3_actuator67',
-    'gpu0_qvel_real_rmp_v85'
+    'gpu0_qvel_real_rmp_v85', 'gpu1_qacc_ft_v153'
   ].includes(policyProfileEl.value);
   const ageLockedFalseProfile = [
     'simcode4_servo67', 'simcode5_pure_actuator67', 'simcode6_qvel67'
   ].includes(policyProfileEl.value);
   const directPhysicalActuatorProfile = (
     ['simcode5_pure_actuator67', 'simcode6_qvel67',
-     'gpu0_qvel_real_rmp_v85'].includes(
+     'gpu0_qvel_real_rmp_v85', 'gpu1_qacc_ft_v153'].includes(
       policyProfileEl.value));
   const simcode5DqAdapterProfile = (
     policyProfileEl.value === 'simcode5_pure_actuator67');
@@ -22330,7 +23535,8 @@ function syncEstimatorModeControl() {
     flowEls.enableCompensation.disabled || !flowEls.enableCompensation.checked);
   const contactShieldUnavailable = (
     controlModeEl.value !== 'policy'
-    || policyProfileEl.value === 'gpu0_qvel_real_rmp_v85');
+    || ['gpu0_qvel_real_rmp_v85', 'gpu1_qacc_ft_v153'].includes(
+      policyProfileEl.value));
   setControlDisabled(
     flowEls.enableContactActionShield, contactShieldUnavailable);
   setControlDisabled(
@@ -22483,6 +23689,7 @@ function setRuntimeDefaults() {
   useRosStateEl.checked = !!CONFIG.rosDefaultUseState && !!CONFIG.rosBridge;
   useRosStateEl.disabled = !CONFIG.rosBridge;
   publishCommandsEl.checked = !!CONFIG.rosDefaultPublishCommands && !!CONFIG.rosBridge && !!CONFIG.rosPublishAllowed;
+  if (publishCommandsEl.checked) publishArmToken = newPublishArmToken();
   publishCommandsEl.disabled = !CONFIG.rosBridge || !CONFIG.rosPublishAllowed;
   setResetInitialPoseOptions();
   const controlDefaults = CONFIG.control || {};
@@ -22496,15 +23703,14 @@ function setRuntimeDefaults() {
     if (opt.value === 'racket_tracking') {
       opt.disabled = trackingDefaults.available === false;
     } else if (opt.value === 'mpc_juggle') {
-      opt.disabled = juggleDefaults.available === false;
+      opt.disabled = true;
     }
   }
   if (controlModeEl.value === 'racket_tracking'
       && trackingDefaults.available === false) {
     controlModeEl.value = 'policy';
   }
-  if (controlModeEl.value === 'mpc_juggle'
-      && juggleDefaults.available === false) {
+  if (controlModeEl.value === 'mpc_juggle') {
     controlModeEl.value = 'policy';
   }
   setNumberDefault(
@@ -22680,6 +23886,11 @@ function setRuntimeDefaults() {
   publishCommandsEl.parentElement.classList.toggle('disabled', publishCommandsEl.disabled);
   const policyDefaults = CONFIG.policy || {};
   const dqAdapterDefaults = policyDefaults.dqAdapter || {};
+  const switchableProfiles = Array.isArray(policyDefaults.profiles)
+    ? policyDefaults.profiles : [];
+  for (const option of policyProfileEl.options) {
+    option.disabled = !switchableProfiles.includes(option.value);
+  }
   policyProfileEl.value = policyDefaults.defaultProfile || 'legacy_bug_compatible';
   policyModelEl.replaceChildren();
   const policyModels = Array.isArray(policyDefaults.modelOptions)
@@ -22793,6 +24004,12 @@ function setRuntimeDefaults() {
   setNumberDefault(inputs.releaseTicks, releaseDefaults.requiredTicks, 0);
   setNumberDefault(inputs.releaseMaxAgeS, releaseDefaults.maxObsAgeS, 3);
   syncEstimatorModeControl();
+}
+function newPublishArmToken() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  return `${Date.now()}-${performance.now()}-${Math.random()}`;
 }
 
 function setInputsFromBall() {
@@ -22924,7 +24141,8 @@ controlModeEl.addEventListener('change', () => {
 policyProfileEl.addEventListener('change', () => {
   juggleRunRequested = false;
   geometrySyncPending = true;
-  renderJuggleStartControl('disarmed after RL profile change');
+  if (publishCommandsEl.checked) publishCommandsEl.checked = false;
+  renderJuggleStartControl('disarmed after RL profile change; re-enable Send command explicitly');
   applyCompensationProfileDefaults(policyProfileEl.value);
   syncPolicyModelControl();
   syncEstimatorModeControl();
@@ -22933,7 +24151,8 @@ policyProfileEl.addEventListener('change', () => {
 policyModelEl.addEventListener('change', () => {
   juggleRunRequested = false;
   geometrySyncPending = true;
-  renderJuggleStartControl('disarmed after RL model change');
+  if (publishCommandsEl.checked) publishCommandsEl.checked = false;
+  renderJuggleStartControl('disarmed after RL model change; re-enable Send command explicitly');
   drawAll();
 });
 function selectedObservationScaleIndex() {
@@ -24632,6 +25851,8 @@ async function step() {
       juggleMpcTerminalVelocityToleranceMps: readNumber(inputs.juggleMpcTerminalVelocityToleranceMps, juggleDefaults.mpcTerminalVelocityToleranceMps ?? 0.05, 0.001, 3),
       useRosState: (useRosStateEl.checked || (publishCommandsEl.checked && !publishCommandsEl.disabled)) && !useRosStateEl.disabled,
       publishCommands: publishCommandsEl.checked && !publishCommandsEl.disabled,
+      clientSessionId,
+      publishArmToken,
       workspaceSafetyMode: inputs.workspaceSafetyMode.value || 'position_soft',
       donePredictionHorizonS: readNumber(
         inputs.donePredictionHorizonS, donePredictionDefaults.horizonS ?? 0.12, 0, 0.5),
@@ -24930,6 +26151,20 @@ async function step() {
     const workspaceSafety = latest.workspaceSafety || {};
     const workspaceSafetyEe = workspaceSafety.eePosition || [NaN, NaN, NaN];
     const resetRecovery = latest.resetRecovery || {};
+    const commandRearm = latest.commandRearm || {};
+    const appliedPublishArmToken = String(
+      runtime.publishArmToken ?? latest.commandPublishArmTokenApplied ?? '');
+    const currentPublishArmAcknowledged = !!publishArmToken
+      && appliedPublishArmToken === publishArmToken;
+    if (((commandRearm.required && !commandRearm.offSeen)
+        || resetRecovery.policyArmRequired)
+        && publishCommandsEl.checked
+        && currentPublishArmAcknowledged) {
+      // A subprocess snapshot can lag behind the Send request that produced
+      // the current token. Never let an old reset snapshot cancel a newer
+      // operator arm before the control process has acknowledged that token.
+      publishCommandsEl.checked = false;
+    }
     const doneBallPos = doneBall.position || [NaN, NaN, NaN];
     const wouldDoneActive = Object.entries(wouldDone.conditions || {})
       .filter(([, v]) => v).map(([k]) => k).join(', ') || 'none';
@@ -24977,9 +26212,10 @@ async function step() {
 	      `compensation: ${comp.enabled ? `${comp.active ? 'active' : 'inactive'} mode=${comp.mode || 'unknown'} delay=${Number.isFinite(comp.delayMs) ? fmt(comp.delayMs, 1) : 'none'}ms tau=${Number.isFinite(comp.tauS) ? fmt(comp.tauS, 3) : 'none'}s beta=${Number.isFinite(comp.mpcBeta) ? fmt(comp.mpcBeta, 2) : 'none'} maxd=${Number.isFinite(comp.mpcMaxDeltaRad) ? fmt(comp.mpcMaxDeltaRad, 3) : 'none'}${comp.error ? ` error=${comp.error}` : ''}` : 'off'}`,
 	      `backend loop: ${backendLoop.enabled ? `on ${backendLoop.source || 'thread'} target=${fmt(backendLoop.targetHz, 0)}Hz measured=${fmt(backendLoop.measuredHz, 1)}Hz snap=${fmt(backendLoop.snapshotHz, 0)}Hz work=${fmt(backendLoop.workMs, 2)}ms over=${backendLoop.overruns || 0} tick=${backendLoop.tick || 0}` : 'off'}`,
       `send command: selected=${publishCommandsEl.checked && !publishCommandsEl.disabled ? 'on' : 'off'} applied=${runtime.publishCommands === true ? 'on' : 'off'}${latest.commandPublishPending ? ' (PENDING)' : ''}`,
+      `command rearm: ${commandRearm.required ? `REQUIRED reason=${commandRearm.reason || 'safety_transition'} off_seen=${commandRearm.offSeen ? 'yes; enable manually when safe' : 'pending'}` : 'not-required'}`,
       `hard stop: ${hardStop.active ? `ACTIVE reason=${hardStop.reason || latest.reason || 'done'} hold=${hardStop.holdSent ? 'sent' : 'pending'} reset-required` : 'off'}`,
       `soft reset: ${softReset.active ? `ACTIVE reason=${softReset.reason || latest.reason || 'done'} target=${(softReset.targetJointPositionDeg || []).join(',')}deg operator-reset-required` : 'off'}`,
-      `reset recovery: ${resetRecovery.active ? `ACTIVE done-bypass remaining=${fmt(resetRecovery.remainingS || 0, 1)}s` : 'off'}`,
+      `reset recovery: ${resetRecovery.active ? `ACTIVE reason=${resetRecovery.reason || 'reset'} trajectory=${resetRecovery.commandTrajectoryComplete ? 'complete' : (resetRecovery.trackingPaused ? 'paused-for-feedback' : 'moving')} settled=${resetRecovery.settled ? 'yes' : 'no'} policy_arm=${resetRecovery.policyArmRequired ? 'fresh-send-required' : (resetRecovery.rearmRequired ? 'fault-rearm-required' : 'not-required')}` : 'off'}`,
       backendLoop.error ? `backend error: ${backendLoop.error}` : null,
       `recording: ${recording.active ? `on ctrl=${recordingCounts.control || 0} snap=${recordingCounts.snapshots || 0} view=${recordingCounts.views || 0} img=${recordingCounts.frames || 0} simimg=${recordingCounts.simFrames || 0} drop=${recording.dropped || 0}` : 'off'}${recording.runDir ? ` dir=${recording.runDir}` : ''}`,
       recording.error ? `recording error: ${recording.error}` : null,
@@ -25030,7 +26266,9 @@ document.getElementById('reset').addEventListener('click', async () => {
   const data = await postJson('/reset', {
     resetInitialPose: resetInitialPoseEl.value || 'default_1',
     policyProfile: policyProfileEl.value || 'legacy_bug_compatible',
-    policyModel: policyModelEl.value || 'v85'
+    policyModel: policyModelEl.value || 'v85',
+    clientSessionId,
+    publishArmToken
   });
   latest = data;
   applyResetInitialPoseFromSnapshot(data);
@@ -25159,6 +26397,7 @@ useRosStateEl.addEventListener('change', () => {
 });
 publishCommandsEl.addEventListener('change', () => {
   if (publishCommandsEl.checked && !publishCommandsEl.disabled) {
+    publishArmToken = newPublishArmToken();
     useRosStateEl.checked = true;
   }
   drawAll();
@@ -25430,6 +26669,7 @@ class ControlSubprocessProxy:
         self._last_step_send_wall = 0.0
         self._reset_request_seq = 0
         self._reset_in_progress = False
+        self._reset_request_lock = threading.Lock()
         self._shutdown = False
         self._pump_stop = threading.Event()
         self._pump_thread: threading.Thread | None = None
@@ -25674,6 +26914,25 @@ class ControlSubprocessProxy:
         return None
 
     @staticmethod
+    def _snapshot_publish_arm_token(snapshot: Any) -> str | None:
+        if not isinstance(snapshot, dict):
+            return None
+        runtime = snapshot.get("runtime")
+        if not isinstance(runtime, dict) or "publishArmToken" not in runtime:
+            return None
+        return str(runtime.get("publishArmToken", "") or "")
+
+    @staticmethod
+    def _snapshot_command_owner_session(snapshot: Any) -> str | None:
+        if not isinstance(snapshot, dict):
+            return None
+        ownership = snapshot.get("commandOwnership")
+        if not isinstance(ownership, dict):
+            return None
+        owner = str(ownership.get("ownerSessionId", "") or "")
+        return owner or None
+
+    @staticmethod
     def _snapshot_estimator_prediction(snapshot: Any) -> bool | None:
         if not isinstance(snapshot, dict):
             return None
@@ -25720,6 +26979,20 @@ class ControlSubprocessProxy:
         except ValueError:
             return None
 
+    def _validate_runtime_policy_profile(self, profile: str) -> None:
+        with self.lock:
+            config = dict(getattr(self, "latest_config", None) or {})
+        policy = config.get("policy")
+        allowed_raw = policy.get("profiles", []) if isinstance(policy, dict) else []
+        allowed = {
+            normalize_observation_profile(item)
+            for item in allowed_raw
+        }
+        if allowed and profile not in allowed:
+            raise ValueError(
+                f"runtime policy profile {profile!r} is not available in "
+                f"this probe; available={sorted(allowed)!r}")
+
     @staticmethod
     def _snapshot_policy_model(snapshot: Any) -> str | None:
         if not isinstance(snapshot, dict):
@@ -25730,6 +27003,11 @@ class ControlSubprocessProxy:
         value = runtime.get("activePolicyModel", runtime.get("policyModel"))
         if value is None:
             return None
+        text = str(value).strip().lower()
+        if text in {
+                GPU1_QACC_FT_MODEL_V153,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
+            return GPU1_QACC_FT_MODEL_V153
         try:
             return _normalize_gpu0_rmp_model(value)
         except ValueError:
@@ -25739,6 +27017,7 @@ class ControlSubprocessProxy:
         self,
         requested_mode: str,
         requested_publish_commands: bool,
+        requested_publish_arm_token: str,
         requested_estimator_prediction: bool,
         requested_control_mode: str,
         requested_tracking_height_m: float,
@@ -25756,6 +27035,8 @@ class ControlSubprocessProxy:
                 applied = self._snapshot_workspace_mode(self.latest_snapshot)
                 applied_publish = self._snapshot_publish_commands(
                     self.latest_snapshot)
+                applied_publish_arm_token = (
+                    self._snapshot_publish_arm_token(self.latest_snapshot))
                 applied_prediction = self._snapshot_estimator_prediction(
                     self.latest_snapshot)
                 (
@@ -25770,6 +27051,11 @@ class ControlSubprocessProxy:
                 child_error = self.last_error
             if (applied == requested
                     and applied_publish == requested_publish_commands
+                    and (
+                        not requested_publish_commands
+                        or not requested_publish_arm_token
+                        or applied_publish_arm_token
+                        == requested_publish_arm_token)
                     and applied_prediction
                     == requested_estimator_prediction
                     and applied_control_mode == requested_control_mode
@@ -25781,7 +27067,7 @@ class ControlSubprocessProxy:
                     and applied_policy_profile == requested_policy_profile
                     and (
                         requested_policy_profile
-                        != OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                        not in PROFILE_IDENTIFIED_MODEL_PROFILES
                         or applied_policy_model == requested_policy_model)):
                 return True
             if child_error is not None or not self.process.is_alive():
@@ -25801,6 +27087,10 @@ class ControlSubprocessProxy:
             payload.get("publishCommands", False)
             and self.cfg.ros_publish_commands
             and self.cfg.ros_bridge)
+        requested_publish_arm_token = str(
+            payload.get("publishArmToken", "") or "").strip()
+        requested_client_session_id = (
+            PolicySafetyProbe._control_client_session_id(payload))
         requested_estimator_prediction = bool(payload.get(
             "estimatorPrediction",
             self.cfg.ball_estimator_enable_prediction,
@@ -25811,11 +27101,15 @@ class ControlSubprocessProxy:
         )
         requested_policy_profile = normalize_observation_profile(
             payload.get("policyProfile", self.cfg.policy_profile))
-        requested_policy_model = _normalize_gpu0_rmp_model(payload.get(
-            "policyModel",
+        self._validate_runtime_policy_profile(requested_policy_profile)
+        current_policy_model = (
             self._snapshot_policy_model(self.latest_snapshot)
-            or GPU0_RMP_MODEL_V85,
-        ))
+            or GPU0_RMP_MODEL_V85)
+        requested_policy_model = _normalize_policy_model_for_profile(
+            requested_policy_profile,
+            payload.get("policyModel", current_policy_model),
+            current_policy_model,
+        )
         requested_tracking_height_m = _payload_float(
             payload,
             "racketTrackingHeightOffsetM",
@@ -25827,13 +27121,25 @@ class ControlSubprocessProxy:
             "racketTrackingUseMpc",
             self.cfg.racket_tracking_use_mpc,
         ))
-        sent = self._maybe_send_step_payload(payload)
+        with self.lock:
+            applied_owner_session_id = self._snapshot_command_owner_session(
+                self.latest_snapshot)
+        non_owner_request = bool(
+            applied_owner_session_id
+            and requested_client_session_id != applied_owner_session_id)
+        # Enforce ownership in the parent as well as the control child so a
+        # throttled background tab cannot even displace the owner's newest
+        # payload in the maxsize-one subprocess queue.
+        sent = bool(
+            not non_owner_request and self._maybe_send_step_payload(payload))
         if sent:
             with self.lock:
                 applied_mode = self._snapshot_workspace_mode(
                     self.latest_snapshot)
                 applied_publish = self._snapshot_publish_commands(
                     self.latest_snapshot)
+                applied_publish_arm_token = (
+                    self._snapshot_publish_arm_token(self.latest_snapshot))
                 applied_prediction = self._snapshot_estimator_prediction(
                     self.latest_snapshot)
                 (
@@ -25847,6 +27153,11 @@ class ControlSubprocessProxy:
                     self.latest_snapshot)
             if (applied_mode != requested_mode
                     or applied_publish != requested_publish_commands
+                    or (
+                        requested_publish_commands
+                        and requested_publish_arm_token
+                        and applied_publish_arm_token
+                        != requested_publish_arm_token)
                     or applied_prediction
                     != requested_estimator_prediction
                     or applied_control_mode != requested_control_mode
@@ -25858,11 +27169,12 @@ class ControlSubprocessProxy:
                     or applied_policy_profile != requested_policy_profile
                     or (
                         requested_policy_profile
-                        == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                        in PROFILE_IDENTIFIED_MODEL_PROFILES
                         and applied_policy_model != requested_policy_model)):
                 self._wait_for_runtime_options(
                     requested_mode,
                     requested_publish_commands,
+                    requested_publish_arm_token,
                     requested_estimator_prediction,
                     requested_control_mode,
                     requested_tracking_height_m,
@@ -25875,15 +27187,39 @@ class ControlSubprocessProxy:
             if self.latest_snapshot is not None:
                 snapshot = dict(self.latest_snapshot)
                 snapshot["recording"] = dict(self.latest_recording_status)
+                snapshot["commandClientSessionRequested"] = str(
+                    requested_client_session_id)
+                if non_owner_request:
+                    ownership = dict(snapshot.get("commandOwnership") or {})
+                    ownership.update({
+                        "accepted": False,
+                        "reason": "non_owner_control_request_ignored",
+                        "requestSessionId": requested_client_session_id,
+                        "ownerSessionId": applied_owner_session_id,
+                        "publishRequested": requested_publish_commands,
+                    })
+                    snapshot["commandOwnership"] = ownership
+                    snapshot["commandRequestIgnored"] = True
                 applied_mode = self._snapshot_workspace_mode(snapshot)
                 snapshot["workspaceModeRequested"] = requested_mode
                 snapshot["workspaceModePending"] = bool(
                     applied_mode != requested_mode)
                 applied_publish = self._snapshot_publish_commands(snapshot)
+                applied_publish_arm_token = (
+                    self._snapshot_publish_arm_token(snapshot))
                 snapshot["commandPublishRequested"] = bool(
                     requested_publish_commands)
+                snapshot["commandPublishArmTokenRequested"] = str(
+                    requested_publish_arm_token)
+                snapshot["commandPublishArmTokenApplied"] = (
+                    applied_publish_arm_token)
                 snapshot["commandPublishPending"] = bool(
-                    applied_publish != requested_publish_commands)
+                    applied_publish != requested_publish_commands
+                    or (
+                        requested_publish_commands
+                        and requested_publish_arm_token
+                        and applied_publish_arm_token
+                        != requested_publish_arm_token))
                 applied_prediction = self._snapshot_estimator_prediction(
                     snapshot)
                 snapshot["estimatorPredictionRequested"] = bool(
@@ -25916,7 +27252,7 @@ class ControlSubprocessProxy:
                 snapshot["policyModelRequested"] = requested_policy_model
                 snapshot["policyModelPending"] = bool(
                     requested_policy_profile
-                    == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+                    in PROFILE_IDENTIFIED_MODEL_PROFILES
                     and applied_policy_model != requested_policy_model)
                 return snapshot
             if self.last_error is not None:
@@ -25924,11 +27260,41 @@ class ControlSubprocessProxy:
         return {"mode": "waiting", "reason": "control subprocess starting"}
 
     def reset(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        reset_request_lock = getattr(self, "_reset_request_lock", None)
+        if reset_request_lock is None:
+            # Compatibility for focused tests/proxies constructed via
+            # ``__new__``; production initializes this before spawning.
+            reset_request_lock = threading.Lock()
+            self._reset_request_lock = reset_request_lock
+        if not reset_request_lock.acquire(blocking=False):
+            with self.lock:
+                snapshot = dict(self.latest_snapshot or {
+                    "mode": "waiting",
+                    "reason": "reset already pending",
+                })
+                snapshot["resetPending"] = True
+                snapshot["resetRequestId"] = int(self._reset_request_seq)
+                snapshot["recording"] = dict(self.latest_recording_status)
+                return snapshot
+        try:
+            return self._reset_once(payload)
+        finally:
+            reset_request_lock.release()
+
+    def _reset_once(
+        self,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        reset_payload = dict(payload) if isinstance(payload, dict) else {}
+        requested_profile_raw = reset_payload.get("policyProfile")
+        if requested_profile_raw is not None:
+            requested_profile = normalize_observation_profile(
+                requested_profile_raw)
+            self._validate_runtime_policy_profile(requested_profile)
         with self.lock:
             self._reset_request_seq += 1
             reset_request_id = int(self._reset_request_seq)
             self._reset_in_progress = True
-        reset_payload = dict(payload) if isinstance(payload, dict) else {}
         reset_payload["_controlResetRequestId"] = reset_request_id
         _queue_replace_latest(self.command_q, {
             "kind": "reset",
@@ -25942,6 +27308,7 @@ class ControlSubprocessProxy:
             while time.time() < deadline:
                 self._drain_status(block_timeout_s=0.05)
                 with self.lock:
+                    child_error = getattr(self, "last_error", None)
                     snapshot_id = int((self.latest_snapshot or {}).get(
                         "controlResetRequestId", 0) or 0)
                     if (self.latest_snapshot is not None
@@ -25950,6 +27317,13 @@ class ControlSubprocessProxy:
                         snapshot["recording"] = dict(
                             self.latest_recording_status)
                         return snapshot
+                if child_error is not None:
+                    raise RuntimeError(
+                        f"control subprocess failed during reset: {child_error}")
+                if not self.process.is_alive():
+                    raise RuntimeError(
+                        "control subprocess exited during reset "
+                        f"(exitcode={self.process.exitcode})")
             with self.lock:
                 snapshot = dict(self.latest_snapshot or {
                     "mode": "waiting",
@@ -26076,14 +27450,21 @@ class ProbeRequestHandler(BaseHTTPRequestHandler):
             return
         sys.stderr.write("[probe] " + message + "\n")
 
-    def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+    def _send_json(self, payload: dict[str, Any], status: int = 200) -> bool:
         body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+            # The browser may close a superseded reset/step request.  The
+            # response can no longer be delivered, and attempting a second
+            # JSON error response only raises another BrokenPipeError.
+            return False
+        return True
 
     def _read_json(self) -> dict[str, Any]:
         n = int(self.headers.get("Content-Length", "0") or "0")
@@ -26285,7 +27666,9 @@ class ProbeRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             if self.path == "/step":
-                self._send_json(self.probe.step(self._read_json()))
+                payload, _mpc_juggle_blocked = (
+                    _sanitize_external_control_payload(self._read_json()))
+                self._send_json(self.probe.step(payload))
                 return
             if self.path == "/reset":
                 self._send_json(self.probe.reset(self._read_json()))
@@ -26363,8 +27746,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--simcode7-v91-model-path", type=Path,
         default=DEFAULT_SIMCODE7_V91_MODEL_PATH)
     p.add_argument(
+        "--simcode7-v97-model-path", type=Path,
+        default=DEFAULT_SIMCODE7_V97_MODEL_PATH)
+    p.add_argument(
         "--simcode7-policy-xml-path", type=Path,
         default=DEFAULT_SIMCODE7_POLICY_XML)
+    p.add_argument(
+        "--simcode8-policy-xml-path", type=Path,
+        default=DEFAULT_SIMCODE8_POLICY_XML)
+    p.add_argument(
+        "--gpu1-qacc-ft-model-path", type=Path,
+        default=DEFAULT_GPU1_QACC_FT_MODEL_PATH)
+    p.add_argument(
+        "--gpu1-qacc-ft-policy-xml-path", type=Path,
+        default=DEFAULT_SIMCODE8_POLICY_XML)
     p.add_argument("--robot-xml-path", type=Path, default=DEFAULT_ROBOT_XML)
     p.add_argument(
         "--policy-obs-dim", type=int, choices=(50, 57, 67), default=67)
@@ -26377,7 +27772,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
-        "--default-control-mode", choices=CONTROL_MODES, default="policy")
+        "--reset-velocity-limit-deg-s", type=finite_float, default=15.0,
+        help="Synchronized slow-reset per-joint velocity limit.")
+    p.add_argument(
+        "--reset-acceleration-limit-deg-s2", type=finite_float, default=40.0,
+        help="Synchronized slow-reset per-joint acceleration limit.")
+    p.add_argument(
+        "--default-control-mode", choices=SELECTABLE_CONTROL_MODES,
+        default="policy")
     p.add_argument(
         "--racket-tracking-height-offset-m", type=finite_float, default=0.25)
     p.add_argument("--racket-tracking-use-mpc", action="store_true")
@@ -27437,6 +28839,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--simcode7-sim-xml-path", type=Path,
         default=DEFAULT_SIMCODE7_POLICY_XML)
     p.add_argument(
+        "--simcode8-sim-xml-path", type=Path,
+        default=DEFAULT_SIMCODE8_POLICY_XML)
+    p.add_argument(
         "--enable-sim-video",
         action="store_true",
         help=(
@@ -27470,7 +28875,14 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         args.simcode7_v85_model_path.expanduser().resolve())
     simcode7_v91_model_path = (
         args.simcode7_v91_model_path.expanduser().resolve())
+    simcode7_v97_model_path = (
+        args.simcode7_v97_model_path.expanduser().resolve())
     simcode7_policy_xml = args.simcode7_policy_xml_path.expanduser().resolve()
+    simcode8_policy_xml = args.simcode8_policy_xml_path.expanduser().resolve()
+    gpu1_qacc_ft_model_path = (
+        args.gpu1_qacc_ft_model_path.expanduser().resolve())
+    gpu1_qacc_ft_policy_xml = (
+        args.gpu1_qacc_ft_policy_xml_path.expanduser().resolve())
     robot_xml = args.robot_xml_path.expanduser().resolve()
     yolo_model_path = args.yolo_model_path.expanduser().resolve()
     # Only the release-locked profile is a launch dependency.  Historical UI
@@ -27506,7 +28918,13 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
             ("GPU0-QVEL/REAL-RMP selected checkpoint", simcode7_model_path),
             ("GPU0-QVEL/REAL-RMP V85 checkpoint", simcode7_v85_model_path),
             ("GPU0-QVEL/REAL-RMP V91 checkpoint", simcode7_v91_model_path),
+            ("GPU0-QVEL/REAL-RMP V97 checkpoint", simcode7_v97_model_path),
             ("simcode7 policy XML", simcode7_policy_xml),
+            ("simcode8 policy XML", simcode8_policy_xml),
+        ),
+        OBSERVATION_PROFILE_GPU1_QACC_FT_V153: (
+            ("GPU1-QACC-FT V153 checkpoint", gpu1_qacc_ft_model_path),
+            ("GPU1-QACC-FT policy XML", gpu1_qacc_ft_policy_xml),
         ),
     }[profile]
     for label, selected_path in selected_assets:
@@ -27524,6 +28942,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
     simcode5_sim_xml = args.simcode5_sim_xml_path.expanduser().resolve()
     simcode6_sim_xml = args.simcode6_sim_xml_path.expanduser().resolve()
     simcode7_sim_xml = args.simcode7_sim_xml_path.expanduser().resolve()
+    simcode8_sim_xml = args.simcode8_sim_xml_path.expanduser().resolve()
     selected_sim_xml = {
         OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: sim_xml,
         OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: simcode2_sim_xml,
@@ -27532,6 +28951,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67: simcode5_sim_xml,
         OBSERVATION_PROFILE_SIMCODE6_QVEL67: simcode6_sim_xml,
         OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85: simcode7_sim_xml,
+        OBSERVATION_PROFILE_GPU1_QACC_FT_V153: simcode8_sim_xml,
     }[profile]
     if bool(args.enable_sim_mirror) and not selected_sim_xml.is_file():
         raise FileNotFoundError(
@@ -27587,13 +29007,24 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         simcode7_model_path=simcode7_model_path,
         simcode7_v85_model_path=simcode7_v85_model_path,
         simcode7_v91_model_path=simcode7_v91_model_path,
+        simcode7_v97_model_path=simcode7_v97_model_path,
         simcode7_policy_xml_path=simcode7_policy_xml,
+        simcode8_policy_xml_path=simcode8_policy_xml,
+        gpu1_qacc_ft_model_path=gpu1_qacc_ft_model_path,
+        gpu1_qacc_ft_policy_xml_path=gpu1_qacc_ft_policy_xml,
         robot_xml_path=robot_xml,
         policy_obs_dim=int(args.policy_obs_dim),
         reset_initial_pose_id=(
             RESET_INITIAL_POSE_HORIZONTAL
-            if profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85
+            if profile in {
+                OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+            }
             else _reset_initial_pose_id(args.reset_initial_pose)),
+        reset_velocity_limit_deg_s=max(
+            1.0, float(args.reset_velocity_limit_deg_s)),
+        reset_acceleration_limit_deg_s2=max(
+            1.0, float(args.reset_acceleration_limit_deg_s2)),
         default_control_mode=_control_mode(args.default_control_mode),
         racket_tracking_height_offset_m=min(
             1.0, max(0.0, float(args.racket_tracking_height_offset_m))),
@@ -28108,6 +29539,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         simcode5_sim_xml_path=simcode5_sim_xml,
         simcode6_sim_xml_path=simcode6_sim_xml,
         simcode7_sim_xml_path=simcode7_sim_xml,
+        simcode8_sim_xml_path=simcode8_sim_xml,
         sim_enable_video_frames=bool(args.enable_sim_video),
         sim_frame_rate_hz=min(120.0, max(1.0, float(args.sim_frame_rate_hz))),
         sim_render_width=max(320, int(args.sim_render_width)),
@@ -28172,6 +29604,9 @@ def _validate_release_before_runtime(args: argparse.Namespace) -> dict[str, Any]
     elif profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
         checkpoint_path = args.simcode7_model_path
         xml_path = args.simcode7_policy_xml_path
+    elif profile == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
+        checkpoint_path = args.gpu1_qacc_ft_model_path
+        xml_path = args.gpu1_qacc_ft_policy_xml_path
     else:
         raise ReleaseContractError(
             f"policy profile {profile!r} has no versioned live release")
@@ -28186,6 +29621,10 @@ def _validate_release_before_runtime(args: argparse.Namespace) -> dict[str, Any]
             "SIMCODE6_POLICY_XML_PATH",
             "SIMCODE7_MODEL_PATH",
             "SIMCODE7_POLICY_XML_PATH",
+            "SIMCODE7_V97_MODEL_PATH",
+            "SIMCODE8_POLICY_XML_PATH",
+            "GPU1_QACC_FT_MODEL_PATH",
+            "GPU1_QACC_FT_POLICY_XML_PATH",
             "POLICY_OBS_DIM",
             "CONTROL_RATE_HZ",
             "BALL_OBSERVATION_RATE_HZ",
@@ -28337,6 +29776,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"GPU0-QVEL/REAL-RMP selected model: {cfg.simcode7_model_path}")
         print(f"GPU0-QVEL/REAL-RMP V85 model: {cfg.simcode7_v85_model_path}")
         print(f"GPU0-QVEL/REAL-RMP V91 model: {cfg.simcode7_v91_model_path}")
+        print(f"GPU0-QVEL/REAL-RMP V97 model: {cfg.simcode7_v97_model_path}")
+        print(f"GPU1-QACC-FT V153 model: {cfg.gpu1_qacc_ft_model_path}")
         print(f"Robot XML: {cfg.robot_xml_path}")
         if cfg.enable_sim_mirror:
             print(

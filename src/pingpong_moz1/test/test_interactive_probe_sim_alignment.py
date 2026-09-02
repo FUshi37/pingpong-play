@@ -1537,41 +1537,197 @@ class Simcode3BallSamplingContractTest(unittest.TestCase):
         self.assertEqual(age, 0.0)
         PROBE.np.testing.assert_array_equal(pos, PROBE.np.full(3, 7.0))
 
-    def test_forced_invalidation_clears_held_policy_ball_sample(self):
+    def test_gpu1_transient_dropout_holds_last_sample_like_simcode5(self):
         probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
         probe.cfg = SimpleNamespace(
             control_dt=0.005,
             ball_lost_timeout_s=0.6,
         )
-        probe.policy_ball_sample_profile = (
-            PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
-        probe.policy_ball_sample_step = 2
-        probe.policy_ball_sample_pos = PROBE.np.array(
-            [0.1, -0.2, 1.4], dtype=PROBE.np.float32)
-        probe.policy_ball_sample_vel = PROBE.np.array(
-            [0.2, 0.1, -0.3], dtype=PROBE.np.float32)
-        probe.policy_ball_sample_age_s = 0.015
-        probe.policy_ball_sample_has_valid = True
+        probe.policy_ball_sample_profile = None
         options = SimpleNamespace(
-            policy_profile=PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+            policy_profile=PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
             control_mode="policy",
             use_ball_estimator=False,
+            ball_observation_rate_hz=60.0,
         )
+        expected_pos = PROBE.np.array(
+            [0.1, -0.2, 1.4], dtype=PROBE.np.float32)
+        expected_vel = PROBE.np.array(
+            [0.2, 0.1, -0.3], dtype=PROBE.np.float32)
 
         pos, vel, valid, age = probe._apply_policy_ball_sampling_contract(
-            PROBE.np.full(3, 9.0, dtype=PROBE.np.float32),
-            PROBE.np.full(3, 8.0, dtype=PROBE.np.float32),
-            False,
-            0.45,
+            expected_pos,
+            expected_vel,
+            True,
+            0.0,
             options,
-            force_invalidate=True,
+            source_timestamp_s=10.0,
+        )
+        self.assertTrue(valid)
+        self.assertEqual(age, 0.0)
+        PROBE.np.testing.assert_array_equal(pos, expected_pos)
+        PROBE.np.testing.assert_array_equal(vel, expected_vel)
+
+        # Recording 20260901_211102 contained one missed 90 Hz IR frame,
+        # observed by three 200 Hz control ticks.  The frame immediately
+        # before and after it was valid.  Those three ticks must keep running
+        # from the last accepted sample instead of entering
+        # policy_ball_state_hold and disarming Send Command.
+        for expected_age in (0.005, 0.010, 0.015):
+            pos, vel, valid, age = (
+                probe._apply_policy_ball_sampling_contract(
+                    PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                    PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                    False,
+                    0.6,
+                    options,
+                    source_timestamp_s=10.011,
+                ))
+            self.assertTrue(valid)
+            self.assertAlmostEqual(age, expected_age)
+            PROBE.np.testing.assert_array_equal(pos, expected_pos)
+            PROBE.np.testing.assert_array_equal(vel, expected_vel)
+
+    def test_gpu1_continuous_dropout_still_invalidates_after_timeout(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            control_dt=0.005,
+            ball_lost_timeout_s=0.6,
+        )
+        probe.policy_ball_sample_profile = None
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+            control_mode="policy",
+            use_ball_estimator=False,
+            ball_observation_rate_hz=60.0,
+        )
+        probe._apply_policy_ball_sampling_contract(
+            PROBE.np.array([0.1, -0.2, 1.4], dtype=PROBE.np.float32),
+            PROBE.np.array([0.2, 0.1, -0.3], dtype=PROBE.np.float32),
+            True,
+            0.0,
+            options,
+            source_timestamp_s=10.0,
         )
 
+        for _ in range(71):
+            pos, vel, valid, age = (
+                probe._apply_policy_ball_sampling_contract(
+                    PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                    PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                    False,
+                    0.6,
+                    options,
+                    source_timestamp_s=10.011,
+                ))
         self.assertFalse(valid)
-        self.assertEqual(age, 0.6)
+        self.assertGreater(age, 0.350)
         self.assertFalse(probe.policy_ball_sample_has_valid)
-        PROBE.np.testing.assert_array_equal(pos, PROBE.np.zeros(3))
-        PROBE.np.testing.assert_array_equal(vel, PROBE.np.zeros(3))
+        PROBE.np.testing.assert_array_equal(
+            pos, PROBE.np.array([0.1, -0.2, 1.4], dtype=PROBE.np.float32))
+        PROBE.np.testing.assert_array_equal(
+            vel, PROBE.np.array([0.2, 0.1, -0.3], dtype=PROBE.np.float32))
+
+    def test_gpu1_high_occlusion_miss_reaches_control_as_held_valid_sample(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            control_dt=0.005,
+            ball_lost_timeout_s=0.6,
+            enable_camera_ball=False,
+        )
+        probe.ros_bridge = None
+        probe.controller = SimpleNamespace(
+            arm_cmd_q=PROBE.np.zeros(7, dtype=PROBE.np.float32))
+        probe.control_loop_tick = 100
+        probe.now_s = 1.0
+        probe.last_ball_pos = PROBE.np.zeros(3, dtype=PROBE.np.float32)
+        probe.last_ball_vel = PROBE.np.zeros(3, dtype=PROBE.np.float32)
+        probe.last_observed_ball_pos = PROBE.np.zeros(
+            3, dtype=PROBE.np.float32)
+        probe.last_observed_ball_vel = PROBE.np.zeros(
+            3, dtype=PROBE.np.float32)
+        probe.last_measured_ball_pos = PROBE.np.zeros(
+            3, dtype=PROBE.np.float32)
+        probe.last_measured_ball_vel = PROBE.np.zeros(
+            3, dtype=PROBE.np.float32)
+        probe.last_estimator_info = {}
+        probe.policy_needs_reentry_reset = False
+        probe.policy_ball_sample_profile = None
+        probe.recorder = SimpleNamespace(active=False)
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+            control_mode="policy",
+            use_ball_estimator=False,
+            ball_observation_rate_hz=60.0,
+            ball_release_use_estimator_state=True,
+            publish_commands=True,
+        )
+        held_pos = PROBE.np.array(
+            [0.1, -0.2, 1.4], dtype=PROBE.np.float32)
+        held_vel = PROBE.np.array(
+            [0.2, 0.1, -0.3], dtype=PROBE.np.float32)
+        probe._apply_policy_ball_sampling_contract(
+            held_pos,
+            held_vel,
+            True,
+            0.0,
+            options,
+            source_timestamp_s=10.0,
+        )
+        probe._select_ball_source = lambda *_args, **_kwargs: (
+            PROBE.np.zeros(3, dtype=PROBE.np.float32),
+            PROBE.np.zeros(3, dtype=PROBE.np.float32),
+            False,
+            "camera",
+            None,
+            10.011,
+            {"observation_reason": "ir_detection_lost"},
+        )
+        probe._apply_ball_noise = lambda p, v, *_args: (p.copy(), v.copy())
+        probe._resolve_high_ball_occlusion_state = (
+            lambda p, v, *_args, **_kwargs: (
+                p.copy(),
+                v.copy(),
+                False,
+                10.011,
+                {
+                    "enabled": True,
+                    "active": False,
+                    "predicted": False,
+                    "state": "idle",
+                    "reason": "last_measurement_below_activation_z",
+                },
+            ))
+        probe._resolve_control_ball_state = (
+            lambda p, v, *_args, **_kwargs: (
+                p.copy(), v.copy(), False, 0.6, {}))
+        control_inputs = []
+
+        def control_step(pos, vel, valid, age, *_args, **_kwargs):
+            control_inputs.append((pos.copy(), vel.copy(), valid, age))
+            return "policy", "", {}, float(age), True
+
+        probe._run_one_control_step = control_step
+        probe._policy_compensation_feedback_q = lambda *_args: None
+        probe._publish_control_command = lambda *_args, **_kwargs: True
+        probe._step_sim_mirror = lambda *_args, **_kwargs: None
+        probe._record_control_sample = lambda **_kwargs: None
+
+        probe._run_control_tick_locked(
+            PROBE.np.zeros(3),
+            PROBE.np.zeros(3),
+            True,
+            0.0,
+            options,
+            make_snapshot=False,
+        )
+
+        self.assertEqual(len(control_inputs), 1)
+        pos, vel, valid, age = control_inputs[0]
+        self.assertTrue(valid)
+        self.assertAlmostEqual(age, 0.005)
+        PROBE.np.testing.assert_array_equal(pos, held_pos)
+        PROBE.np.testing.assert_array_equal(vel, held_vel)
 
     def test_simcode4_fractional_hold_keeps_observation_age_zero(self):
         probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
@@ -1673,6 +1829,61 @@ class Simcode3BallSamplingContractTest(unittest.TestCase):
         # is not the disabled 90->200 trajectory propagation feature.
         PROBE.np.testing.assert_array_equal(repeated, PROBE.np.ones(3))
         self.assertEqual(probe.policy_ball_sample_sequence, 2)
+
+    def test_gpu1_reacquisition_cannot_bypass_60hz_schedule(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(control_dt=0.005)
+        probe.policy_ball_sample_profile = None
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+            control_mode="policy",
+            use_ball_estimator=False,
+            ball_observation_rate_hz=60.0,
+            camera_control_time_compensation=False,
+            ball_source="camera",
+        )
+
+        first, _vel, valid, _age = (
+            probe._apply_policy_ball_sampling_contract(
+                PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                True, 0.0, options,
+                source_timestamp_s=1.000,
+                force_fresh_source=True))
+        held, _vel, held_valid, held_age = (
+            probe._apply_policy_ball_sampling_contract(
+                PROBE.np.ones(3, dtype=PROBE.np.float32),
+                PROBE.np.zeros(3, dtype=PROBE.np.float32),
+                True, 0.0, options,
+                source_timestamp_s=1.017,
+                force_fresh_source=True))
+
+        self.assertTrue(valid and held_valid)
+        PROBE.np.testing.assert_array_equal(first, PROBE.np.zeros(3))
+        PROBE.np.testing.assert_array_equal(held, PROBE.np.zeros(3))
+        self.assertAlmostEqual(float(held_age), 0.005)
+        self.assertEqual(probe.policy_ball_sample_sequence, 1)
+
+    def test_gpu1_sensor_state_requires_finite_nonfuture_timestamp(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            control_dt=0.005,
+            ball_lost_timeout_s=0.6,
+            racket_tracking_max_ball_age_s=0.12,
+        )
+        probe.ros_bridge = SimpleNamespace(now_sec=lambda: 10.0)
+        options = SimpleNamespace(
+            policy_profile=PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+            control_mode="policy",
+            ball_source="camera",
+        )
+
+        self.assertEqual(
+            probe._raw_measurement_age_s(True, None, options), 0.6)
+        self.assertEqual(
+            probe._raw_measurement_age_s(True, 10.001, options), 0.6)
+        self.assertAlmostEqual(
+            probe._raw_measurement_age_s(True, 9.98, options), 0.02)
 
 
 class SourceSeqAlignmentTest(unittest.TestCase):
@@ -1998,6 +2209,195 @@ class IdealPd67ResetAndGapAnalysisTest(unittest.TestCase):
         self.assertEqual(snapshot["mode"], "reset")
         self.assertEqual(snapshot["controlResetRequestId"], 1)
         self.assertFalse(proxy._reset_in_progress)
+
+
+class Gpu1HotSwitchRegressionTest(unittest.TestCase):
+
+    @staticmethod
+    def _controller(profile, model_id=""):
+        return SimpleNamespace(
+            observation_profile=profile,
+            policy_model_id=model_id,
+            reset=mock.Mock(),
+        )
+
+    def test_gpu1_snapshot_and_payload_model_are_profile_aware(self):
+        snapshot = {
+            "runtime": {
+                "activePolicyProfile": (
+                    PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153),
+                "activePolicyModel": "v153",
+            },
+        }
+        self.assertEqual(
+            PROBE.ControlSubprocessProxy._snapshot_policy_model(snapshot),
+            PROBE.GPU1_QACC_FT_MODEL_V153,
+        )
+
+    def test_original_profile_choices_remain_enabled(self):
+        self.assertEqual(set(PROBE.RUNTIME_SWITCHABLE_POLICY_PROFILES), {
+            PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+            PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
+            PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+            PROBE.OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+            PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+            PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+        })
+        self.assertNotIn(
+            PROBE.OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
+            PROBE.RUNTIME_SWITCHABLE_POLICY_PROFILES,
+        )
+        self.assertNotIn(
+            PROBE.OBSERVATION_PROFILE_SIMCODE4_SERVO67,
+            PROBE.RUNTIME_SWITCHABLE_POLICY_PROFILES,
+        )
+        self.assertEqual(
+            PROBE._normalize_policy_model_for_profile(
+                PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                "v91",  # disabled GPU0 selector can retain this stale value
+            ),
+            PROBE.GPU1_QACC_FT_MODEL_V153,
+        )
+
+    def test_gpu1_uses_67_scales_even_when_probe_started_with_gpu0_57d(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            policy_obs_dim=57,
+            policy_dq_observation_scale=1.0,
+        )
+        probe.policy_controllers = {
+            PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153: SimpleNamespace(
+                _expected_obs_dim=67),
+        }
+        self.assertEqual(
+            probe._policy_observation_dim_for_profile(
+                PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153),
+            67,
+        )
+        self.assertEqual(
+            probe._policy_observation_dim_for_profile(
+                PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67),
+            67,
+        )
+
+    def test_preloaded_gpu0_gpu1_switch_does_not_rebuild_or_kill_runtime(self):
+        gpu0 = self._controller(
+            PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85, "v91")
+        gpu1 = self._controller(
+            PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153)
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.active_policy_profile = (
+            PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+        probe.active_policy_model = "v91"
+        probe.controller = gpu0
+        probe.policy_controllers = {
+            probe.active_policy_profile: gpu0,
+            PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153: gpu1,
+        }
+        probe.policy_generation = 7
+        probe.command_stream_active = True
+        probe.policy_switch_publish_rearm_required = False
+        probe._publish_hold_on_command_disable = mock.Mock(
+            side_effect=lambda: setattr(
+                probe, "command_stream_active", False) or True)
+        probe._safety_limiter_reset_reference = mock.Mock(
+            return_value=PROBE.np.zeros(7, dtype=PROBE.np.float32))
+        probe._sync_policy_to_safe_pose = mock.Mock()
+        probe._reset_compensator_to_current_arm = mock.Mock()
+        probe._reset_servo_target_planner = mock.Mock()
+        probe._reset_policy_ball_sampling_contract = mock.Mock()
+        probe._reset_policy_dq_adapter = mock.Mock()
+
+        changed = probe._select_policy_profile(
+            PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153)
+
+        self.assertTrue(changed)
+        self.assertIs(probe.controller, gpu1)
+        self.assertEqual(probe.active_policy_model, "v153")
+        self.assertEqual(probe.policy_generation, 8)
+        self.assertTrue(probe.policy_switch_publish_rearm_required)
+        probe._publish_hold_on_command_disable.assert_called_once_with()
+        gpu1.reset.assert_called_once_with()
+
+    def test_restored_profile_is_loaded_on_demand_without_release_lock_exit(self):
+        gpu0 = self._controller(
+            PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85, "v91")
+        simcode5 = self._controller(
+            PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.active_policy_profile = (
+            PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+        probe.active_policy_model = "v91"
+        probe.controller = gpu0
+        probe.policy_controllers = {probe.active_policy_profile: gpu0}
+        probe.policy_generation = 2
+        probe.command_stream_active = False
+        probe.policy_switch_publish_rearm_required = False
+        probe._build_release_locked_policy_controller = mock.Mock(
+            return_value=simcode5)
+        probe._safety_limiter_reset_reference = mock.Mock(
+            return_value=PROBE.np.zeros(7, dtype=PROBE.np.float32))
+        probe._sync_policy_to_safe_pose = mock.Mock()
+        probe._reset_compensator_to_current_arm = mock.Mock()
+        probe._reset_servo_target_planner = mock.Mock()
+        probe._reset_policy_ball_sampling_contract = mock.Mock()
+        probe._reset_policy_dq_adapter = mock.Mock()
+
+        changed = probe._select_policy_profile(
+            PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+
+        self.assertTrue(changed)
+        self.assertIs(probe.controller, simcode5)
+        self.assertIs(
+            probe.policy_controllers[
+                PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67],
+            simcode5,
+        )
+        probe._build_release_locked_policy_controller.assert_called_once_with(
+            PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
+
+    def test_dead_control_process_reset_fails_immediately(self):
+        proxy = PROBE.ControlSubprocessProxy.__new__(
+            PROBE.ControlSubprocessProxy)
+        proxy.lock = threading.Lock()
+        proxy._reset_request_lock = threading.Lock()
+        proxy.command_q = queue.Queue(maxsize=1)
+        proxy.latest_config = {
+            "policy": {
+                "profiles": [
+                    PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+                    PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+                ],
+            },
+        }
+        proxy.latest_snapshot = {"controlResetRequestId": 0}
+        proxy.latest_recording_status = {"active": False}
+        proxy._reset_request_seq = 0
+        proxy._reset_in_progress = False
+        proxy.last_error = "profile switch failed"
+        proxy.process = SimpleNamespace(
+            is_alive=lambda: False,
+            exitcode=1,
+        )
+        proxy._drain_status = lambda **_kwargs: None
+
+        with self.assertRaisesRegex(
+                RuntimeError, "control subprocess failed during reset"):
+            proxy.reset({
+                "policyProfile": (
+                    PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153),
+            })
+        self.assertFalse(proxy._reset_in_progress)
+
+    def test_disconnected_json_client_does_not_raise_twice(self):
+        handler = PROBE.ProbeRequestHandler.__new__(PROBE.ProbeRequestHandler)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        handler.wfile = SimpleNamespace(
+            write=mock.Mock(side_effect=BrokenPipeError(32, "broken pipe")))
+
+        self.assertFalse(handler._send_json({"ok": True}))
 
 
 class SimMirrorLifecycleContractTest(unittest.TestCase):
@@ -2835,7 +3235,7 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
             },
         )
 
-    def test_soft_workspace_done_publishes_selected_reset_joint_pose(self):
+    def test_soft_workspace_done_publishes_slow_reset_without_limiter(self):
         probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
         reset_q = PROBE.np.linspace(-0.3, 0.3, 7)
         reset_seed_q = PROBE.np.linspace(0.1, 0.2, 7)
@@ -2875,11 +3275,23 @@ class WorkspaceSoftSafetyTest(unittest.TestCase):
         )
 
         self.assertTrue(did_publish)
-        PROBE.np.testing.assert_allclose(limiter_resets, [reset_seed_q])
-        self.assertEqual(len(limiter_calls), 1)
-        PROBE.np.testing.assert_allclose(limiter_calls[0][0], reset_q)
-        self.assertEqual(limiter_calls[0][1], "reset")
-        PROBE.np.testing.assert_allclose(published, [reset_q])
+        self.assertEqual(limiter_resets, [])
+        self.assertEqual(limiter_calls, [])
+        self.assertEqual(len(published), 1)
+        first_reset_command = published[0]
+        # The boundary-trigger tick holds the fresh seed.  The next control
+        # tick advances exactly one trajectory sample; publication itself must
+        # not consume a second sample.
+        PROBE.np.testing.assert_allclose(
+            first_reset_command, reset_seed_q, atol=1e-12)
+        self.assertEqual(probe.slow_reset_trajectory.elapsed_s, 0.0)
+        next_reset_command = probe._advance_slow_reset_command(advance=True)
+        self.assertEqual(probe.slow_reset_trajectory.elapsed_s, 0.005)
+        self.assertTrue(probe._publish_soft_workspace_reset_command(
+            next_reset_command))
+        self.assertEqual(probe.slow_reset_trajectory.elapsed_s, 0.005)
+        PROBE.np.testing.assert_allclose(
+            published[-1], next_reset_command, atol=1e-12)
         self.assertEqual(
             probe.last_command_arm["reason"],
             "soft_workspace_reset_latched",
@@ -3985,7 +4397,302 @@ class CommandDisableHoldTest(unittest.TestCase):
             probe.last_command_disable_hold["feedbackAgeS"], 0.20)
 
 
+class ResetTerminalHoldRegressionTest(unittest.TestCase):
+
+    @staticmethod
+    def _probe(feedback_q, feedback_dq):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            control_dt=0.005,
+            ros_publish_commands=True,
+            reset_velocity_limit_deg_s=10.0,
+            reset_acceleration_limit_deg_s2=25.0,
+            safety_parking_velocity_scale=0.08,
+            safety_parking_acceleration_scale=0.06,
+        )
+        probe.ros_bridge = SimpleNamespace(
+            get_joint_feedback_with_age=lambda: (
+                PROBE.np.asarray(feedback_q, dtype=PROBE.np.float64).copy(),
+                PROBE.np.asarray(feedback_dq, dtype=PROBE.np.float64).copy(),
+                0.001,
+                "joint_state",
+            ),
+        )
+        probe.safety_limiter = SimpleNamespace(
+            last_cmd=PROBE.np.zeros(7, dtype=PROBE.np.float64),
+            last_vel=PROBE.np.zeros(7, dtype=PROBE.np.float64),
+            dt=0.005,
+        )
+        probe.slow_reset_trajectory = PROBE.SlowResetTrajectory(
+            dt_s=0.005,
+            velocity_limit_deg_s=10.0,
+            acceleration_limit_deg_s2=25.0,
+        )
+        probe.runtime_options = None
+        probe.command_stream_active = True
+        probe.policy_switch_publish_rearm_required = False
+        probe.publish_rearm_required = False
+        probe.publish_rearm_off_seen = False
+        probe.publish_rearm_reason = ""
+        probe.last_publish_arm_token = ""
+        probe.reset_start_publish_arm_token = ""
+        probe.reset_policy_arm_required = False
+        probe.reset_policy_arm_reason = ""
+        probe.has_captured = False
+        probe.has_released = False
+        probe.release_candidate_ticks = 0
+        probe.release_samples = []
+        probe.web_drag_ball_pos = PROBE.np.asarray(
+            [-0.15, -0.40, 1.20], dtype=PROBE.np.float32)
+        probe.reset_workspace_bypass_until_wall = 0.0
+        probe.reset_workspace_bypass_target_q = None
+        probe.soft_workspace_reset_latched = True
+        probe.soft_workspace_reset_reason = "ee_y_out_of_workspace"
+        probe.soft_workspace_reset_conditions = {
+            "ee_y_out_of_workspace": True,
+        }
+        probe.done_failsafe_active = True
+        probe.done_failsafe_reason = "ee_y_out_of_workspace"
+        probe.done_failsafe_conditions = {
+            "ee_y_out_of_workspace": True,
+        }
+        probe.last_control_mode = "reset"
+        probe._sync_policy_to_safe_pose = mock.Mock()
+        probe._mark_policy_paused = mock.Mock()
+        return probe
+
+    def test_completed_reset_requires_fresh_send_command_token(self):
+        @dataclass(frozen=True)
+        class RuntimeStub:
+            publish_commands: bool
+
+        target = PROBE.np.asarray(
+            [0.10, -0.77, 0.54, 1.70, 0.86, -0.21, 0.25],
+            dtype=PROBE.np.float64,
+        )
+        probe = self._probe(target, PROBE.np.zeros(7))
+        probe.last_publish_arm_token = "arm-before-reset"
+        probe.runtime_options = RuntimeStub(publish_commands=True)
+        probe._start_supervised_reset(
+            target, target, reason="ee_y_out_of_workspace")
+
+        required_ticks = int(PROBE.RESET_SETTLE_DURATION_S / 0.005)
+        for _ in range(required_ticks):
+            command = probe._advance_slow_reset_command(advance=True)
+            PROBE.np.testing.assert_allclose(command, target, atol=1e-12)
+
+        self.assertTrue(probe.reset_command_trajectory_complete)
+        self.assertTrue(probe.reset_settled)
+        self.assertTrue(probe.reset_hold_latched)
+        self.assertTrue(probe._reset_recovery_active())
+        self.assertTrue(probe.reset_policy_arm_required)
+        self.assertFalse(probe.publish_rearm_required)
+        self.assertFalse(probe.runtime_options.publish_commands)
+
+        # Replaying the old checked state cannot leave reset hold.
+        self.assertTrue(probe._consume_reset_policy_arm_request(
+            {
+                "publishArmToken": "arm-before-reset",
+            },
+            publish_requested=True,
+            switch_requested=False,
+        ))
+        self.assertTrue(probe.reset_hold_latched)
+        self.assertTrue(probe.command_stream_active)
+
+        # One real Send-command enable gesture creates a new token, releases
+        # reset, and forces a measured-position arm hold before policy.
+        self.assertFalse(probe._consume_reset_policy_arm_request(
+            {
+                "publishArmToken": "arm-after-reset",
+            },
+            publish_requested=True,
+            switch_requested=False,
+        ))
+        self.assertFalse(probe.reset_hold_latched)
+        self.assertFalse(probe.soft_workspace_reset_latched)
+        self.assertFalse(probe.command_stream_active)
+        self.assertFalse(probe.has_released)
+        probe._mark_policy_paused.assert_called_once_with()
+
+    def test_send_enabled_after_reset_start_runs_policy_after_settle(self):
+        @dataclass(frozen=True)
+        class RuntimeStub:
+            publish_commands: bool
+
+        target = PROBE.np.asarray(
+            [0.10, -0.77, 0.54, 1.70, 0.86, -0.21, 0.25],
+            dtype=PROBE.np.float64,
+        )
+        probe = self._probe(target, PROBE.np.zeros(7))
+        probe.last_publish_arm_token = "arm-before-reset"
+        probe.runtime_options = RuntimeStub(publish_commands=True)
+        probe._start_supervised_reset(
+            target, target, reason="operator_reset")
+        self.assertFalse(probe._consume_reset_policy_arm_request(
+            {"publishArmToken": "arm-after-reset"},
+            publish_requested=True,
+            switch_requested=False,
+        ))
+        required_ticks = int(PROBE.RESET_SETTLE_DURATION_S / 0.005)
+        for _ in range(required_ticks):
+            probe._advance_slow_reset_command(advance=True)
+
+        self.assertFalse(probe.reset_hold_latched)
+        self.assertFalse(probe.reset_policy_arm_required)
+        self.assertTrue(probe.runtime_options.publish_commands)
+        self.assertFalse(probe.command_stream_active)
+        self.assertFalse(probe.has_released)
+
+    def test_feedback_reanchor_preserves_post_reset_arm_token_edge(self):
+        start = PROBE.np.zeros(7, dtype=PROBE.np.float64)
+        target = PROBE.np.full(7, 0.2, dtype=PROBE.np.float64)
+        probe = self._probe(start, PROBE.np.zeros(7))
+        probe.last_publish_arm_token = "arm-before-reset"
+        probe._start_supervised_reset(
+            start, target, reason="operator_reset")
+
+        # Enabling Send after reset starts updates the latest token.  Arming
+        # the command stream re-anchors the in-flight trajectory at measured
+        # feedback, but it is not a new reset and must not consume that edge.
+        probe.last_publish_arm_token = "arm-after-reset"
+        probe._start_supervised_reset(
+            PROBE.np.full(7, 0.05, dtype=PROBE.np.float64),
+            target,
+            reason="operator_reset",
+            new_reset_cycle=False,
+        )
+
+        self.assertEqual(
+            probe.reset_start_publish_arm_token, "arm-before-reset")
+        self.assertEqual(probe.last_publish_arm_token, "arm-after-reset")
+
+    def test_tracked_command_rearm_preserves_reset_trajectory_elapsed(self):
+        start = PROBE.np.zeros(7, dtype=PROBE.np.float64)
+        target = PROBE.np.full(7, 1e-6, dtype=PROBE.np.float64)
+        probe = self._probe(start, PROBE.np.zeros(7))
+        probe._start_supervised_reset(
+            start, target, reason="operator_reset")
+        for _ in range(200):
+            probe.slow_reset_trajectory.step()
+        status_before = probe.slow_reset_trajectory.status()
+
+        reanchored = probe._resume_or_reanchor_active_reset(
+            status_before.position_rad)
+
+        self.assertFalse(reanchored)
+        self.assertAlmostEqual(
+            probe.slow_reset_trajectory.elapsed_s, 1.0, places=9)
+        for _ in range(200):
+            _q, _dq, done = probe.slow_reset_trajectory.step()
+        self.assertTrue(done)
+        self.assertFalse(probe.slow_reset_trajectory.active)
+
+    def test_diverged_command_rearm_replans_without_new_two_second_minimum(self):
+        start = PROBE.np.zeros(7, dtype=PROBE.np.float64)
+        target = PROBE.np.full(7, 0.10, dtype=PROBE.np.float64)
+        probe = self._probe(start, PROBE.np.zeros(7))
+        probe.last_publish_arm_token = "arm-before-reset"
+        probe._start_supervised_reset(
+            start, target, reason="operator_reset")
+        for _ in range(20):
+            probe.slow_reset_trajectory.step()
+        feedback = probe.slow_reset_trajectory.status().position_rad.copy()
+        feedback += 0.02
+
+        reanchored = probe._resume_or_reanchor_active_reset(feedback)
+
+        self.assertTrue(reanchored)
+        self.assertEqual(
+            probe.reset_start_publish_arm_token, "arm-before-reset")
+        self.assertLess(
+            float(PROBE.np.max(probe.slow_reset_trajectory._duration_s)),
+            2.0,
+        )
+
+    def test_reset_does_not_advance_while_arm_is_fast_or_publish_is_off(self):
+        start = PROBE.np.zeros(7, dtype=PROBE.np.float64)
+        target = PROBE.np.full(7, 0.4, dtype=PROBE.np.float64)
+        feedback_dq = PROBE.np.zeros(7, dtype=PROBE.np.float64)
+        feedback_dq[0] = PROBE.np.deg2rad(25.0)
+        probe = self._probe(start, feedback_dq)
+        probe._start_supervised_reset(start, target, reason="safety_reset")
+
+        held = probe._advance_slow_reset_command(advance=True)
+        PROBE.np.testing.assert_allclose(held, start, atol=1e-12)
+        self.assertTrue(probe.reset_tracking_paused)
+        self.assertEqual(probe.slow_reset_trajectory.elapsed_s, 0.0)
+
+        held = probe._advance_slow_reset_command(advance=False)
+        PROBE.np.testing.assert_allclose(held, start, atol=1e-12)
+        self.assertEqual(probe.slow_reset_trajectory.elapsed_s, 0.0)
+
+    def test_parking_transition_reanchors_at_feedback_not_stale_history(self):
+        feedback_q = PROBE.np.linspace(-0.2, 0.2, 7)
+        probe = self._probe(feedback_q, PROBE.np.zeros(7))
+        probe.safety_limiter.last_cmd = PROBE.np.full(7, -1.0)
+        probe.safety_limiter.last_vel = PROBE.np.full(7, 5.0)
+        probe.last_published_command_profile = "normal"
+
+        command = probe._limiter_free_parking_candidate(
+            PROBE.np.full(7, 1.0))
+
+        acceleration_limit = PROBE.np.deg2rad(PROBE.np.asarray(
+            PROBE.RightArmCommandSafetyLimiter.ACC_LIMIT_DEG_S2,
+            dtype=PROBE.np.float64,
+        )) * 0.06
+        self.assertTrue(PROBE.np.all(
+            PROBE.np.abs(command - feedback_q)
+            <= acceleration_limit * 0.005 ** 2 + 1e-12))
+        for method_name in ("filter", "reset", "observe"):
+            self.assertFalse(hasattr(probe.safety_limiter, method_name))
+
+
 class ControlSubprocessWorkspaceAckTest(unittest.TestCase):
+
+    def test_background_client_cannot_overwrite_active_control_owner(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.command_owner_session_id = "active-tab"
+        probe.last_command_ownership = {}
+
+        accepted = probe._accept_control_client_payload({
+            "clientSessionId": "background-tab",
+            "publishCommands": False,
+        })
+
+        self.assertFalse(accepted)
+        self.assertEqual(probe.command_owner_session_id, "active-tab")
+        self.assertEqual(
+            probe.last_command_ownership["reason"],
+            "non_owner_control_request_ignored",
+        )
+
+    def test_explicit_reset_transfers_control_owner(self):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.command_owner_session_id = "old-tab"
+        probe.last_command_ownership = {}
+
+        accepted = probe._accept_control_client_payload(
+            {
+                "clientSessionId": "reset-tab",
+                "publishCommands": False,
+            },
+            allow_reset_takeover=True,
+        )
+
+        self.assertTrue(accepted)
+        self.assertEqual(probe.command_owner_session_id, "reset-tab")
+
+    def test_external_mpc_juggle_request_is_forced_to_nonpublishing_policy(self):
+        payload, blocked = PROBE._sanitize_external_control_payload({
+            "controlMode": "mpc_juggle",
+            "publishCommands": True,
+        })
+
+        self.assertTrue(blocked)
+        self.assertEqual(payload["controlMode"], "policy")
+        self.assertFalse(payload["publishCommands"])
+        self.assertNotIn("mpc_juggle", PROBE.SELECTABLE_CONTROL_MODES)
 
     def test_snapshot_workspace_mode_reads_applied_runtime_value(self):
         snapshot = {
@@ -4007,6 +4714,121 @@ class ControlSubprocessWorkspaceAckTest(unittest.TestCase):
             snapshot)
 
         self.assertFalse(applied)
+
+    def test_snapshot_publish_arm_token_reads_control_ack(self):
+        snapshot = {"runtime": {"publishArmToken": "arm-after-reset"}}
+
+        applied = PROBE.ControlSubprocessProxy._snapshot_publish_arm_token(
+            snapshot)
+
+        self.assertEqual(applied, "arm-after-reset")
+
+    def test_step_marks_new_arm_pending_when_snapshot_has_old_token(self):
+        proxy = PROBE.ControlSubprocessProxy.__new__(
+            PROBE.ControlSubprocessProxy)
+        proxy.cfg = SimpleNamespace(
+            workspace_safety_mode="position_soft",
+            ros_publish_commands=True,
+            ros_bridge=True,
+            ball_estimator_enable_prediction=False,
+            default_control_mode="policy",
+            policy_profile=PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+            racket_tracking_height_offset_m=0.25,
+            racket_tracking_use_mpc=False,
+        )
+        proxy.lock = threading.Lock()
+        proxy.latest_config = {}
+        proxy.latest_recording_status = {"active": False}
+        proxy.last_error = None
+        proxy.latest_snapshot = {
+            "runtime": {
+                "workspaceSafetyMode": "position_soft",
+                "publishCommands": True,
+                "publishArmToken": "arm-before-reset",
+                "estimatorPrediction": False,
+                "controlMode": "policy",
+                "racketTrackingHeightOffsetM": 0.25,
+                "racketTrackingUseMpc": False,
+                "activePolicyProfile": (
+                    PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT),
+                "activePolicyModel": "v85",
+            },
+            "resetRecovery": {"policyArmRequired": True},
+        }
+        proxy._maybe_send_step_payload = mock.Mock(return_value=False)
+        proxy._drain_status = mock.Mock()
+
+        snapshot = proxy.step({
+            "publishCommands": True,
+            "publishArmToken": "arm-after-reset",
+            "workspaceSafetyMode": "position_soft",
+            "controlMode": "policy",
+            "policyProfile": (
+                PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT),
+            "racketTrackingHeightOffsetM": 0.25,
+            "racketTrackingUseMpc": False,
+            "estimatorPrediction": False,
+        })
+
+        self.assertTrue(snapshot["commandPublishPending"])
+        self.assertEqual(
+            snapshot["commandPublishArmTokenRequested"], "arm-after-reset")
+        self.assertEqual(
+            snapshot["commandPublishArmTokenApplied"], "arm-before-reset")
+
+    def test_proxy_does_not_queue_background_client_control_payload(self):
+        proxy = PROBE.ControlSubprocessProxy.__new__(
+            PROBE.ControlSubprocessProxy)
+        proxy.cfg = SimpleNamespace(
+            workspace_safety_mode="position_soft",
+            ros_publish_commands=True,
+            ros_bridge=True,
+            ball_estimator_enable_prediction=False,
+            default_control_mode="policy",
+            policy_profile=PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
+            racket_tracking_height_offset_m=0.25,
+            racket_tracking_use_mpc=False,
+        )
+        proxy.lock = threading.Lock()
+        proxy.latest_config = {}
+        proxy.latest_recording_status = {"active": False}
+        proxy.last_error = None
+        proxy.latest_snapshot = {
+            "runtime": {
+                "workspaceSafetyMode": "position_soft",
+                "publishCommands": True,
+                "publishArmToken": "owner-arm",
+                "estimatorPrediction": False,
+                "controlMode": "policy",
+                "racketTrackingHeightOffsetM": 0.25,
+                "racketTrackingUseMpc": False,
+                "activePolicyProfile": (
+                    PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT),
+                "activePolicyModel": "v85",
+            },
+            "commandOwnership": {"ownerSessionId": "active-tab"},
+        }
+        proxy._maybe_send_step_payload = mock.Mock(return_value=True)
+        proxy._drain_status = mock.Mock()
+
+        snapshot = proxy.step({
+            "clientSessionId": "background-tab",
+            "publishCommands": False,
+            "workspaceSafetyMode": "position_soft",
+            "controlMode": "policy",
+            "policyProfile": (
+                PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT),
+            "racketTrackingHeightOffsetM": 0.25,
+            "racketTrackingUseMpc": False,
+            "estimatorPrediction": False,
+        })
+
+        proxy._maybe_send_step_payload.assert_not_called()
+        self.assertTrue(snapshot["commandRequestIgnored"])
+        self.assertEqual(
+            snapshot["commandOwnership"]["reason"],
+            "non_owner_control_request_ignored",
+        )
 
 
 if __name__ == "__main__":

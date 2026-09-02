@@ -43,6 +43,10 @@ class InteractiveRacketTrackingIntegrationTest(unittest.TestCase):
         self.probe.reset()
         # Reset recovery is a real-robot parking window.  Unit integration
         # starts after that window so it can exercise the selected controller.
+        current_reset_q = self.probe.reset_initial_pose_q.copy()
+        self.probe.slow_reset_trajectory.start(
+            current_reset_q, current_reset_q)
+        self.probe._sync_policy_to_safe_pose(current_reset_q)
         self.probe.reset_workspace_bypass_until_wall = 0.0
         self.probe.reset_workspace_bypass_target_q = None
 
@@ -64,6 +68,25 @@ class InteractiveRacketTrackingIntegrationTest(unittest.TestCase):
             "workspaceSafetyMode": "off",
             "dt": 0.02,
         }
+
+    def test_non_gpu_profile_uses_valid_inactive_gpu0_model_default(self):
+        self.assertEqual(
+            self.probe.active_policy_profile,
+            PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
+        )
+        self.assertEqual(self.probe.active_policy_model, "")
+
+        options = self.probe._runtime_options_from_payload({})
+
+        self.assertEqual(options.policy_model, PROBE.GPU0_RMP_MODEL_V85)
+        with self.assertRaisesRegex(ValueError, "expected V85.*V91.*V97"):
+            self.probe._runtime_options_from_payload({
+                "policyModel": "not-a-release-model",
+            })
+
+    def test_runtime_has_no_safety_limiter_entry_points(self):
+        for method_name in ("filter", "reset", "observe", "profile_limits"):
+            self.assertFalse(hasattr(self.probe.safety_limiter, method_name))
 
     def test_tracking_bypasses_release_gate_and_reports_height_target(self):
         snapshot = self.probe.step(self.tracking_payload(use_mpc=False))

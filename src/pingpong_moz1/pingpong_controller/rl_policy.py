@@ -95,6 +95,7 @@ OBSERVATION_PROFILE_SIMCODE4_SERVO67 = "simcode4_servo67"
 OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67 = "simcode5_pure_actuator67"
 OBSERVATION_PROFILE_SIMCODE6_QVEL67 = "simcode6_qvel67"
 OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85 = "gpu0_qvel_real_rmp_v85"
+OBSERVATION_PROFILE_GPU1_QACC_FT_V153 = "gpu1_qacc_ft_v153"
 OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
@@ -103,6 +104,7 @@ OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE6_QVEL67,
     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
 )
 CORRECTED_67D_OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
@@ -110,6 +112,7 @@ CORRECTED_67D_OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_SIMCODE4_SERVO67,
     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE6_QVEL67,
+    OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
 )
 
 
@@ -147,6 +150,10 @@ def normalize_observation_profile(value: object) -> str:
         "gpu0_qvel_real=rmp": OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
         "gpu0_qvel/real=rmp": OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
         "gpu0_qvel/real_rmp": OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
+        "gpu1": OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+        "gpu1_qacc_ft": OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+        "gpu1_qacc_ft_v153": OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+        "gpu1_qacc/ft": OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
     }
     profile = aliases.get(profile, profile)
     if profile not in OBSERVATION_PROFILES:
@@ -1311,6 +1318,7 @@ class RLPolicyController:
         arm_dq: Optional[np.ndarray] = None,
         arm_sample_stamp_s: Optional[float] = None,
         observation_scales: Optional[Sequence[float]] = None,
+        confirmed_hit_count: int = 0,
     ) -> np.ndarray:
         """Run one policy step and return the 7 right-arm joint targets (rad).
 
@@ -1320,6 +1328,7 @@ class RLPolicyController:
         `arm_q` / `arm_dq` are optional real joint feedback (rad / rad·s⁻¹);
         when absent or malformed, the internal command trajectory is used.
         """
+        del confirmed_hit_count  # Used only by the GPU1-QACC-FT contract.
         step_dt = float(dt) if dt is not None else self.dt
         if not np.isfinite(step_dt) or step_dt <= 0.0:
             step_dt = self.dt

@@ -51,6 +51,10 @@ class InteractiveMpcJuggleIntegrationTest(unittest.TestCase):
         self.probe.reset()
         # The reset parking window is a real-robot recovery feature.  These
         # integration tests begin after it, as the existing tracking tests do.
+        current_reset_q = self.probe.reset_initial_pose_q.copy()
+        self.probe.slow_reset_trajectory.start(
+            current_reset_q, current_reset_q)
+        self.probe._sync_policy_to_safe_pose(current_reset_q)
         self.probe.reset_workspace_bypass_until_wall = 0.0
         self.probe.reset_workspace_bypass_target_q = None
 
@@ -99,7 +103,10 @@ class InteractiveMpcJuggleIntegrationTest(unittest.TestCase):
         zeros = np.zeros(q.size, dtype=np.float32)
         self.probe._sync_controller_to_tracking_command(
             q, zeros, reset_acceleration=True)
-        self.probe.safety_limiter.reset(q)
+        # The deployment runtime intentionally exposes no safety-limiter
+        # methods.  Seed only the independent workspace command-history state.
+        self.probe.safety_limiter.last_cmd = q.astype(np.float64).copy()
+        self.probe.safety_limiter.last_vel = zeros.astype(np.float64).copy()
         position, quaternion, _j_pos, _j_rot, ok = (
             self.probe.controller._compute_racket_pose_jacobians_base(q)
         )
@@ -157,12 +164,17 @@ class InteractiveMpcJuggleIntegrationTest(unittest.TestCase):
         self.assertEqual(launch["juggle"]["controlKind"], "cartesian")
         return ball, common, launch
 
-    def test_browser_config_exposes_mode_initial_pose_and_disarmed_defaults(self):
+    def test_browser_config_disables_mode_but_retains_diagnostic_defaults(self):
         config = self.probe.browser_config()
 
-        self.assertIn("mpc_juggle", config["control"]["modes"])
+        self.assertNotIn("mpc_juggle", config["control"]["modes"])
         self.assertIn("racketMpc", config)
         self.assertIn("mpcJuggle", config)
+        self.assertFalse(config["mpcJuggle"]["available"])
+        self.assertEqual(
+            config["mpcJuggle"]["disabledReason"],
+            "disabled_by_operator_request",
+        )
         self.assertFalse(config["mpcJuggle"]["runRequested"])
         self.assertEqual(config["mpcJuggle"]["startNonce"], 0)
         self.assertEqual(
@@ -232,6 +244,10 @@ class InteractiveMpcJuggleIntegrationTest(unittest.TestCase):
         self.assertEqual(tracking["tracking"]["mpcTuning"], expected)
 
         self.probe.reset()
+        current_reset_q = self.probe.reset_initial_pose_q.copy()
+        self.probe.slow_reset_trajectory.start(
+            current_reset_q, current_reset_q)
+        self.probe._sync_policy_to_safe_pose(current_reset_q)
         self.probe.reset_workspace_bypass_until_wall = 0.0
         self.probe.reset_workspace_bypass_target_q = None
         _ball, _common, launch = self.advance_to_launch(nonce=19)

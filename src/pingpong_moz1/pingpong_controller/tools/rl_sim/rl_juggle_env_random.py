@@ -213,6 +213,28 @@ def _quat_wxyz_to_mat(q) -> np.ndarray:
 
 def _build_temp_xml_with_ball(xml_path: Path) -> Path:
     root = ET.parse(xml_path).getroot()
+    # The source robot XML is the authority for racket contact calibration.
+    # Previously this helper silently reset an existing calibrated racket from
+    # (for example) ``solref=\"0.003 0.152540\"`` to ``0.003 0.80`` and then
+    # created an explicit pair with the same hard-coded value.  Since explicit
+    # pair parameters override geom parameters, edits to the source XML never
+    # reached the runtime model.  Preserve all contact fields here; the values
+    # below are only fallbacks for an XML that does not yet contain a racket.
+    racket_contact = {
+        "friction": "0.35 0.002 0.0001",
+        "solref": "0.003 0.80",
+        "solimp": "0.90 0.995 0.001",
+        "margin": "0.001",
+        "condim": "3",
+    }
+    for source_geom in root.iter("geom"):
+        if source_geom.get("name") != "racket_rubber_fore":
+            continue
+        for attribute in racket_contact:
+            value = source_geom.get(attribute)
+            if value is not None:
+                racket_contact[attribute] = value
+        break
     compiler = root.find("compiler")
     if compiler is None:
         compiler = ET.SubElement(root, "compiler")
@@ -360,11 +382,8 @@ def _build_temp_xml_with_ball(xml_path: Path) -> Path:
                             g.set("pos", "0 0 0.0065")
                             g.set("contype", "1")
                             g.set("conaffinity", "1")
-                            g.set("friction", "0.35 0.002 0.0001")
-                            g.set("solref", "0.003 0.80")
-                            g.set("solimp", "0.90 0.995 0.001")
-                            g.set("margin", "0.001")
-                            g.set("condim", "3")
+                            for attribute, value in racket_contact.items():
+                                g.set(attribute, value)
                     for s in c.findall("site"):
                         if s.get("name") == "right_ee_site":
                             s.set("pos", "0 0 0.0065")
@@ -386,10 +405,7 @@ def _build_temp_xml_with_ball(xml_path: Path) -> Path:
         "pair",
         geom1="ball",
         geom2="racket_rubber_fore",
-        friction="0.35 0.002 0.0001",
-        solref="0.003 0.80",
-        solimp="0.90 0.995 0.001",
-        condim="3",
+        **racket_contact,
     )
 
     tmp = tempfile.NamedTemporaryFile(prefix="moz1_pingpong_", suffix=".xml", delete=False)

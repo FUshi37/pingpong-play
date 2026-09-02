@@ -1,5 +1,7 @@
 # record_new3/4/5 球—球拍碰撞参数辨识
 
+> 注意：本文是早期 `record_new3/4/5` 多碰撞历史分析，不是 2026-09-01 新录制数据的当前结论。新数据分析严格只使用每条录制释放后的第一次撞拍及其第一次反弹，后续颠球全部排除；见 `analysis_results/ball_racket_contact_identification_v91_static_20260901_152749_153517/STATIC_CONTACT_ANALYSIS_ZH.md` 和 `first_bounce_scope_audit.json`。
+
 ## 结论
 
 从 65 段记录中最终保留 **116 次**连续、低残差且满足球拍几何的实物碰撞。

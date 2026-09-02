@@ -44,7 +44,11 @@ def _batch_tree(jax, jnp, tree, n_envs: int):
     return jax.tree_util.tree_map(batch_leaf, tree)
 
 
-def _write_mjx_contact_only_xml(xml_path: Path) -> Path:
+def _write_mjx_contact_only_xml(
+    xml_path: Path,
+    *,
+    fixed_base: bool = False,
+) -> Path:
     """Write an MJX-compatible training collision XML.
 
     Visual mesh/cylinder/box geoms in the robot are kept for rendering but made
@@ -52,6 +56,11 @@ def _write_mjx_contact_only_xml(xml_path: Path) -> Path:
     body contacts and explicit bitmasks for ball/racket/support contacts.  This
     preserves the task-relevant contact surface without asking MJX to compile
     unsupported broadphase pairs from the full MuJoCo scene.
+
+    ``fixed_base`` is intended for static-racket system-identification runs.
+    It locks all six base joints with equality constraints while preserving the
+    model's qpos/dof/actuator layout.  The default remains ``False`` so existing
+    movable-base training and checkpoint replay contracts are unchanged.
     """
 
     root = ET.parse(xml_path).getroot()
@@ -126,6 +135,35 @@ def _write_mjx_contact_only_xml(xml_path: Path) -> Path:
                 proxy.set("conaffinity", "1")
                 proxy.set("friction", "0.2 0.001 0.0001")
                 proxy.set("condim", "3")
+
+    if fixed_base:
+        equality = root.find("equality")
+        if equality is None:
+            equality = ET.SubElement(root, "equality")
+        base_joints = (
+            "base_x",
+            "base_y",
+            "base_z",
+            "base_roll",
+            "base_pitch",
+            "base_yaw",
+        )
+        existing_names = {
+            item.get("name") for item in equality.findall("joint")
+        }
+        for joint_name in base_joints:
+            constraint_name = f"fixed_{joint_name}"
+            if constraint_name in existing_names:
+                continue
+            ET.SubElement(
+                equality,
+                "joint",
+                name=constraint_name,
+                joint1=joint_name,
+                polycoef="0 0 0 0 0",
+                solref="0.001 1",
+                solimp="0.999 0.9999 0.001",
+            )
 
     contact = root.find("contact")
     if contact is None:

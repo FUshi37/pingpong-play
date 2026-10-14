@@ -1,0 +1,57 @@
+# 规定了控制器里外设相关一些配置
+
+peripheral_config:
+  #手臂末端执行器
+  end_effector:
+    # 当前接入的末端执行器
+    enabled_effector: "omni_picker"
+    #智元夹爪
+    omni_picker:
+      enabled: true
+      update_period: 0.01  # 通信刷新周期，单位：s
+      can_interface: "can0"
+      left_can_id: 1
+      right_can_id: 2
+    # 钧舵夹爪
+    jodell_picker:
+      enabled: false
+      baud_rate: 115200
+      com_index: 0     # 串口设备路径
+      update_period: 0.01
+      serial_port: "/dev/ttyUSB0"
+      left_slave_id: 1               # 左夹爪从站ID
+      right_slave_id: 2              # 右夹爪从站ID
+      left_max_width: 0.05          # 左夹爪最大开合度 (m)
+      left_min_width: 0.00          # 左夹爪最小开合度 (m)
+      right_max_width: 0.05         # 右夹爪最大开合度 (m)
+      right_min_width: 0.00         # 右夹爪最小开合度 (m)           
+    # 灵博灵巧手
+    robot_hand:
+      left_hand_idx: 0
+      right_hand_idx: 1
+    # Spirit CANopen夹爪
+    spirit_gripper:
+      enabled: false
+      gripper_count: 2              # 夹爪数量（1或2）
+      update_period: 0.01            # 通信刷新周期，单位：s
+      can_interface: "can0"          # CAN接口名称
+      dcf_file_path: "./eni/canopen_gripper.dcf"  # DCF文件路径
+      use_dcf_file: false            # 是否使用DCF文件路径（false则使用内置DCF）
+      # 左夹爪配置
+      default_opening_left: 0.09     # 左夹爪默认开度 [0, 0.1]
+      default_speed_left: 0.5         # 左夹爪默认速度 [0, 1]
+      default_force_left: 5.0        # 左夹爪默认力
+      # 右夹爪配置
+      default_opening_right: 0.09    # 右夹爪默认开度 [0, 0.1]
+      default_speed_right: 0.5       # 右夹爪默认速度 [0, 1]
+      default_force_right: 5.0       # 右夹爪默认力
+      node_ids:                      # CANopen节点ID列表
+        - 21                         # 左夹爪节点ID
+        - 22                         # 右夹爪节点ID
+  #外接传感器
+  out_sensor:
+    #底盘IMU传感器
+    base_imu:
+      com_interface: "/dev/ttyUSB0" #串口号
+      baud_rate: 115200  #波特率
+

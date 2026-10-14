@@ -1,0 +1,19 @@
+[Unit]
+Description=Monitor Tool Start Service
+After=multi-user.target network.target
+Requires=network.target
+
+[Service]
+Type=oneshot
+User=spirit-ai
+Group=spirit-ai
+ExecStart=bash /home/spirit-ai/movax/env/monitor_tool_startup.sh
+RemainAfterExit=yes
+Restart=no
+StandardOutput=append:/home/spirit-ai/movax/log/monitor_tool.log
+StandardError=append:/home/spirit-ai/movax/log/logmonitor_tool_error.log
+LimitNOFILE=65535
+LimitNPROC=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,485 @@
+system:
+  standardparam_version: moz1_datacollect_rmp_v2.1.0.2 
+  link_variants:
+    MOVEBASE: "standard"            # standard(标准底盘) | v2_1base(v2.1小底盘)
+    TORSO: "standard"               # standard(标准躯干) | v2_1base(v2.1小底盘躯干)
+  driver_system:
+    # 是否检测伺服是否丢零点
+    is_check_servo_zero: true            
+motion:
+  motion_config:
+    # 笛卡尔空间插补的轴角度的一阶滤波系数
+    cart_jnt_filter_scale: 1.0
+    enable_wbrmp_planner: true
+workpoint:
+  workpoint_config:
+    work_points:
+      VRMOV:
+        LeftArm: [-9, -50, -20, -90, -35, 8, -7]
+        LegWaist: [0, 60, -90, 30, 0, 0]
+        RightArm: [9, -50, 20, 90, 35, 8, 7]
+      VR:
+        LeftArm: [-9, -50, -20, -90, -35, 8, -7]
+        LegWaist: [30, 0, 0, 30, 0, 0]
+        RightArm: [9, -50, 20, 90, 35, 8, 7]
+
+tool:
+  tool_config:
+    # 所有工具配置
+    tools:
+      tool0:
+        name: "Empty Tool"
+        mass: 0.0
+        centroid: [0, 0, 0]
+        moment_of_inertia: [0, 0, 0, 0, 0, 0]
+        tcp_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      torque_sensor_calibration_tool_1:
+        name: "FT Sensor Calibration Tool 1"
+        mass: 2.46265766
+        centroid: [0, 0, -22.951]
+        moment_of_inertia: [3224.44, 3224.44, 3149.95, 0, 0, 0]
+        tcp_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      torque_sensor_calibration_tool_2:
+        name: "FT Sensor Calibration Tool 2"
+        mass: 4.94095368
+        centroid: [0, 0, -43.456]
+        moment_of_inertia: [15260.3625, 15260.3625, 6309.34095, 0, 0, 0]
+        tcp_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      robot_hand:
+        name: "Aoyi Robot Hand"
+        mass: 0.56
+        centroid: [0, 0, -67]
+        moment_of_inertia: [0, 0, 0, 0, 0, 0]
+        tcp_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      clamp:
+        name: "two fingers clamp"
+        mass: 0.0
+        centroid: [0, 0, 0]
+        moment_of_inertia: [0, 0, 0, 0, 0, 0]
+        tcp_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      zhiyuan:
+        name: "zhiyuan"
+        mass: 0.4
+        centroid: [0, 0, -60]
+        moment_of_inertia: [0, 0, 0, 0, 0, 0]
+        tcp_xyz_rpy: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    # 工具安装的位置，表示机械单元末端安装的工具
+    install:
+      LeftArm: "zhiyuan"
+      RightArm: "zhiyuan"
+
+model:
+  mech_units:
+    Base:
+      joint_confs:
+        J0:
+          motion_limits:
+            range_max: 36000.0
+            range_min: -36000.0
+            max_vel: 240
+            max_acc: 1000
+            max_jerk: 20000
+        J1:
+          motion_limits:
+            range_max: 36000.0
+            range_min: -36000.0
+            max_vel: 240
+            max_acc: 1000
+            max_jerk: 20000
+        J2:
+          motion_limits:
+            range_max: 36000.0
+            range_min: -36000.0
+            max_vel: 240
+            max_acc: 1000
+            max_jerk: 20000
+        J3:
+          motion_limits:
+            range_max: 36000.0
+            range_min: -36000.0
+            max_vel: 240
+            max_acc: 1000
+            max_jerk: 20000
+      rmp_params:
+        close_estimator: true
+        dynamic_pos_regulation: false
+        use_arm_angle: false
+        max_psi_acc: 30.0
+        psi_kp: 25.0
+        psi_kd: 10.0        
+        jnt_kp: 2500.0
+        jnt_kd: 100.0  
+        kp: 36.0
+        kd: 12.0
+        angle_gap: [8.0, 8.0, 8.0, 8.0]
+        vel_weight: 0.001
+        acc_weight: 0.001
+        pos_limit_weight: 0
+        filter_length: 35
+        target_filter_length: 10
+        jnt_ffd_coeff: [0.1, 0.1]     
+        linear_limits: [0.7, 20.0]
+        angular_limits: [200.0, 1200.0]
+        linear_ffd_coeff: [1.0, 0.0]
+        angular_ffd_coeff: [1.0, 0.0]
+        arm_weight_gain: 2.0
+        estimator_linear_variance: [1.4, 0.002]
+        estimator_angular_variance: [2, 0.01]
+        estimate_joint_variance: [50.0, 1.0e-4]
+        check_limit_eps: 10.0         
+        damp_gain: 50.0
+        stop_all_joints: false
+        enable_continuous_check: false 
+        continuous_check_coeff: 2.0
+    LegWaist:
+      joint_confs:
+        J0:
+          motion_limits:
+            range_max: 30.0
+            range_min: -30.0
+            max_vel: 65
+            max_acc: 450
+            max_jerk: 3000
+        J1:
+          motion_limits:
+            range_max: 90.0
+            range_min: -90.0
+            max_vel: 65
+            max_acc: 450
+            max_jerk: 3000
+        J2:
+          motion_limits:
+            range_max: 1.0
+            range_min: -145.0
+            max_vel: 65
+            max_acc: 450
+            max_jerk: 3000
+        J3:
+          motion_limits:
+            range_max: 80.0
+            range_min: -10.0
+            max_vel: 65
+            max_acc: 450
+            max_jerk: 3000
+        J4:
+          motion_limits:
+            range_max: 30.0
+            range_min: -30.0
+            max_vel: 65
+            max_acc: 450
+            max_jerk: 3000
+        J5:
+          motion_limits:
+            range_max: 180.0
+            range_min: -180.0
+            max_vel: 65
+            max_acc: 450
+            max_jerk: 3000
+      joint_impedance:
+        damping_auto: false
+        load_compensate: true
+        integral_coeff: 1.0
+        filter_error_coeff: 0.2
+        max_integral_scale: 0.1
+        impedance_parameters_scale: 1.0
+        feedforward_scale: 0.5
+        stiffness: [ 7000.0, 8000.0, 7000.0, 7000.0, 6000.0, 5000.0 ]
+        damping: [ 600.0, 400.0, 400.0, 600.0, 400.0, 300.0 ]
+        torque_limit: [350.0, 350.0, 350.0, 350.0, 350.0, 350.0 ]
+      cart_impedance:
+        damping_auto: true
+        stiffness: [500.0, 500.0, 500.0, 50.0, 50.0, 50.0]
+        damping: [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+        redun_stiffness: 20.0
+        redun_damping: 8.0
+      joint_virtual_wall:
+        buffer_degree: [5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        torque_scale: [300.0, 300.0, 300.0, 300.0, 300.0, 300.0]
+      collision_detect:
+        estimate_ext_torque: true
+        collision_detect: false
+        collision_level: 2
+        collision_level_percentage: [0.8, 0.9, 1.0, 1.2, 1.5]
+        joint_collision_threshold: [15.0, 15.0, 15.0, 15.0, 15.0, 15.0]
+        joint_collision_sum_threshold: 50.0
+        cart_collsion_force_threshold: 30.0
+        cart_collsion_torque_threshold: 4.0
+      rmp_params:
+        close_estimator: false
+        dynamic_pos_regulation: false
+        use_arm_angle: false
+        max_psi_acc: 30.0
+        psi_kp: 25.0
+        psi_kd: 10.0
+        jnt_kp: 400.0
+        jnt_kd: 40.0         
+        kp: 225.0
+        kd: 30.0
+        angle_gap: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+        vel_weight: 20.0
+        acc_weight: 0.001
+        pos_limit_weight: 0.002
+        filter_length: 35
+        target_filter_length: 10
+        jnt_ffd_coeff: [0.5, 0.0]        
+        linear_limits: [1.0, 40.0]
+        angular_limits: [120.0, 1200.0]
+        linear_ffd_coeff: [0.5, 0.0]
+        angular_ffd_coeff: [0.4, 0.0]
+        arm_weight_gain: 2.0
+        estimator_linear_variance: [1.4, 0.002]
+        estimator_angular_variance: [2, 0.01]
+        estimate_joint_variance: [50.0, 1.0e-4]
+        check_limit_eps: 10.0    
+        damp_gain: 300.0
+        stop_all_joints: true
+        enable_continuous_check: false 
+        continuous_check_coeff: 2.0
+      free_drag:
+        allowed_max_linear_vel: 500
+        allowed_max_angular_vel: 150         
+    LeftArm:
+      joint_confs:
+        J0:
+          motion_limits:
+            range_max: 120.0
+            range_min: -180.0
+            max_vel: 210
+            max_acc: 1300
+            max_jerk: 35000
+        J1:
+          motion_limits:
+            range_max: 9.0
+            range_min: -170.0
+            max_vel: 210
+            max_acc: 1300
+            max_jerk: 35000
+        J2:
+          motion_limits:
+            range_max: 175.0
+            range_min: -175.0
+            max_vel: 240
+            max_acc: 1800
+            max_jerk: 45000
+        J3:
+          motion_limits:
+            range_max: 10.0
+            range_min: -129.0
+            max_vel: 240
+            max_acc: 3000
+            max_jerk: 60000
+        J4:
+          motion_limits:
+            range_max: 175.0
+            range_min: -175.0
+            max_vel: 300
+            max_acc: 3000
+            max_jerk: 60000
+        J5:
+          motion_limits:
+            range_max: 95.0
+            range_min: -95.0
+            max_vel: 300
+            max_acc: 3000
+            max_jerk: 60000
+        J6:
+          motion_limits:
+            range_max: 90.0
+            range_min: -90.0
+            max_vel: 300
+            max_acc: 3000
+            max_jerk: 60000
+      joint_impedance:
+        damping_auto: false
+        load_compensate: true
+        integral_coeff: 1.0
+        filter_error_coeff: 0.2
+        max_integral_scale: 0.1
+        impedance_parameters_scale: 1.5
+        feedforward_scale: 0.5
+        stiffness: [200.0, 200.0, 150.0, 150.0, 60.0, 60.0, 60.0]
+        damping: [20.0, 20.0, 15.0, 15.0, 6.0, 6.0, 6.0]
+        torque_limit: [45.0, 35.0, 25.0, 25.0, 10.0, 10.0, 10.0]
+      cart_impedance:
+        damping_auto: true
+        stiffness: [500.0, 500.0, 500.0, 50.0, 50.0, 50.0]
+        damping: [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+        redun_stiffness: 20.0
+        redun_damping: 8.0
+      joint_virtual_wall:
+        buffer_degree: [5.0, 2.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        torque_scale: [120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0]
+      collision_detect:     
+        estimate_ext_torque: true
+        collision_detect: false
+        collision_level: 4
+        collision_level_percentage: [0.25, 0.3, 0.4, 0.9, 1.0, 1.1, 1.2, 1.5]
+        joint_collision_threshold: [100.0, 80.0, 80.0, 90.0, 40.0, 40.0, 40.0]
+        joint_collision_sum_threshold: 300.0
+        cart_collsion_force_threshold: 30.0
+        cart_collsion_torque_threshold: 4.0
+      free_drag:
+        allowed_max_linear_vel: 500
+        allowed_max_angular_vel: 150
+      rmp_params:  
+        close_estimator: false
+        dynamic_pos_regulation: false
+        use_arm_angle: false
+        max_psi_acc: 30.0
+        psi_kp: 25.0
+        psi_kd: 10.0        
+        jnt_kp: 400.0
+        jnt_kd: 40.0        
+        kp: 324.0
+        kd: 36.0
+        angle_gap: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+        vel_weight: 30.0
+        acc_weight: 0.001
+        pos_limit_weight: 0.002
+        filter_length: 35
+        target_filter_length: 10
+        jnt_ffd_coeff: [0.5, 0.0]
+        linear_limits: [1.5, 200.0]
+        angular_limits: [400.0, 4500.0]
+        linear_ffd_coeff: [0.6, 0.0]
+        angular_ffd_coeff: [0.5, 0.0]
+        arm_weight_gain: 2.0
+        estimator_linear_variance: [2, 0.0002]
+        estimator_angular_variance: [2, 0.00001]
+        estimate_joint_variance: [50.0, 1.0e-4]
+        check_limit_eps: 10.0
+        damp_gain: 50.0
+        stop_all_joints: false      
+        enable_continuous_check: false 
+        continuous_check_coeff: 2.0
+    RightArm:
+      joint_confs:
+        J0:
+          motion_limits:
+            range_max: 180.0
+            range_min: -120.0
+            max_vel: 210
+            max_acc: 1300
+            max_jerk: 35000
+        J1:
+          motion_limits:
+            range_max: 9.0
+            range_min: -170.0
+            max_vel: 210
+            max_acc: 1300
+            max_jerk: 35000
+        J2:
+          motion_limits:
+            range_max: 175.0
+            range_min: -175.0
+            max_vel: 240
+            max_acc: 1800
+            max_jerk: 45000
+        J3:
+          motion_limits:
+            range_max: 129.0
+            range_min: -10.0
+            max_vel: 240
+            max_acc: 3000
+            max_jerk: 60000
+        J4:
+          motion_limits:
+            range_max: 175.0
+            range_min: -175.0
+            max_vel: 300
+            max_acc: 3000
+            max_jerk: 60000
+        J5:
+          motion_limits:
+            range_max: 95.0
+            range_min: -95.0
+            max_vel: 300
+            max_acc: 3000
+            max_jerk: 60000
+        J6:
+          motion_limits:
+            range_max: 90.0
+            range_min: -90.0
+            max_vel: 300
+            max_acc: 3000
+            max_jerk: 60000
+      joint_impedance:
+        damping_auto: false
+        load_compensate: true
+        integral_coeff: 1.0
+        filter_error_coeff: 0.2
+        max_integral_scale: 0.1
+        impedance_parameters_scale: 1.5
+        feedforward_scale: 0.5
+        stiffness: [200.0, 200.0, 150.0, 150.0, 60.0, 60.0, 60.0]
+        damping: [20.0, 20.0, 15.0, 15.0, 6.0, 6.0, 6.0]
+        torque_limit: [45.0, 35.0, 25.0, 25.0, 10.0, 10.0, 10.0]
+      cart_impedance:
+        damping_auto: true
+        stiffness: [500.0, 500.0, 500.0, 50.0, 50.0, 50.0]
+        damping: [50.0, 50.0, 50.0, 5.0, 5.0, 5.0]
+        redun_stiffness: 20.0
+        redun_damping: 8.0
+      joint_virtual_wall:
+        buffer_degree: [5.0, 2.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        torque_scale: [120.0, 120.0, 120.0, 120.0, 120.0, 120.0, 120.0]
+      collision_detect:
+        estimate_ext_torque: true
+        collision_detect: false
+        collision_level: 4
+        collision_level_percentage: [0.25, 0.3, 0.4, 0.9, 1.0, 1.1, 1.2, 1.5]
+        joint_collision_threshold: [100.0, 80.0, 80.0, 90.0, 40.0, 40.0, 40.0]
+        joint_collision_sum_threshold: 300.0
+        cart_collsion_force_threshold: 30.0
+        cart_collsion_torque_threshold: 4.0
+      free_drag:
+        allowed_max_linear_vel: 500
+        allowed_max_angular_vel: 150
+      rmp_params:  
+        close_estimator: false
+        dynamic_pos_regulation: false
+        use_arm_angle: false
+        max_psi_acc: 30.0
+        psi_kp: 25.0
+        psi_kd: 10.0        
+        jnt_kp: 400.0
+        jnt_kd: 40.0        
+        kp: 324.0
+        kd: 36.0
+        angle_gap: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+        vel_weight: 30.0
+        acc_weight: 0.001
+        pos_limit_weight: 0.002
+        filter_length: 35
+        target_filter_length: 10
+        jnt_ffd_coeff: [0.5, 0.0]
+        linear_limits: [1.5, 200.0]
+        angular_limits: [400.0, 4500.0]
+        linear_ffd_coeff: [0.6, 0.0]
+        angular_ffd_coeff: [0.5, 0.0]
+        arm_weight_gain: 2.0
+        estimator_linear_variance: [2, 0.0002]
+        estimator_angular_variance: [2, 0.00001]
+        estimate_joint_variance: [50.0, 1.0e-4]
+        check_limit_eps: 10.0
+        damp_gain: 50.0
+        stop_all_joints: false 
+        enable_continuous_check: false 
+        continuous_check_coeff: 2.0
+    Neck:
+      joint_confs:
+        J0:
+          motion_limits:
+            range_max: 65.0
+            range_min: -65.0
+            max_vel: 240
+            max_acc: 1000
+            max_jerk: 20000
+        J1:
+          motion_limits:
+            range_max: 50.0
+            range_min: -3.0
+            max_vel: 240
+            max_acc: 1000
+            max_jerk: 20000
+            

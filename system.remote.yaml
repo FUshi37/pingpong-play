@@ -1,0 +1,37 @@
+activate_mu_group: spirit01_base_e_no_neck_hh
+link_variants:
+  LEG_LINK_1: backward
+  WAIST_LINK_2: standard
+  BASE_SERVO_IDX: v2_6base
+  MOVEBASE: standard
+  TORSO: standard
+communication:
+  rpc_srv_port: 50011
+  rpc_cli_port: 50022
+standardparam_version: moz1_datacollect_rmp_v2.1.0.2
+driver_system:
+  simu_driver: false
+  is_check_servo_zero: true
+  CIA402_servo_cnt: -1
+  ethercat_hand_cnt: 0
+  ethercat_relay_cnt: 0
+  ethercat_master_conf:
+    log_file: ecmaster
+    log_level: 3
+    enable_master_perf: false
+    enable_remote_access_srv: false
+    network_card_instance: 3
+    dcm_mode: 1
+    remote_access_port: 6000
+    license_key: EF02AB71-BE29C1DC-1D08F374
+    eni_file: eni/spirit01_zy_base_e_no_neck_hh.xml
+  igh_master_conf:
+    slave_topology_variant: fullbody
+  canopen_master_conf:
+    can_if_name: can0
+    dcf_file_path: ./eni/master.dcf
+  can_master_conf:
+    can_if_name: can1
+  servo_foe_conf:
+    foe_filename: H0_GK_SERV0_HPM.bin
+    foe_password: 3141

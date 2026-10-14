@@ -1,0 +1,52 @@
+motion_config:
+  cart_jnt_filter_scale: 1.0
+  planner_stop_param:
+    joint_stop_acc: 360
+    joint_stop_jerk: 36000
+  tracking_param:
+    track_step: 0.008
+    track_plan_step: 0.001
+    track_minimum_duration: 0.2
+    track_end_sliding_size: 10
+    track_disabled_mu_list: []
+  speed_override_param:
+    vel_override: 0.14999999999999999
+    acc_override: 0.29999999999999999
+    base_vel_override: 0.10000000000000001
+    base_acc_override: 0.10000000000000001
+  enable_optimal_psi: true
+  optimal_psi_param:
+    weight_psi: 1.3
+    delta_psi: 0.02
+    iter_psi: 10
+  enable_rmp_planner: true
+  enable_overturn_check: false
+  enable_wbrmp_planner: true
+peripheral_config:
+  end_effector:
+    enabled_effector: omni_picker
+    omni_picker:
+      enabled: false
+      update_period: 0.01
+      can_interface: can0
+      left_can_id: 1
+      right_can_id: 2
+    jodell_picker:
+      enabled: false
+      baud_rate: 115200
+      com_index: 0
+      update_period: 0.01
+      serial_port: /dev/ttyUSB0
+      left_slave_id: 1
+      right_slave_id: 2
+      left_max_width: 0.05
+      left_min_width: 0.00
+      right_max_width: 0.05
+      right_min_width: 0.00
+    robot_hand:
+      left_hand_idx: 0
+      right_hand_idx: 1
+  out_sensor:
+    base_imu:
+      com_interface: /dev/ttyUSB0
+      baud_rate: 115200

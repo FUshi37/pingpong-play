@@ -1,0 +1,840 @@
+mech_units:
+  LegWaist:
+    joint_confs:
+      J0:
+        calibration_point: 1236590072
+        low_encoder_circle: 334
+        low_encoder_single_circle: 183426
+        joint_torque_sensor:
+          zero_offset_ch1: 2.1184
+          zero_offset_ch2: 2.0753
+          ch1_positive_: 92.32114347478154
+          ch2_positive_: 93.74875304440476
+          ch1_negative_: 181.54023094906697
+          ch2_negative_: 195.7924241123785
+          linear_coefficient_ch1: 136.93068721192424
+          linear_coefficient_ch2: 144.77058857839165
+        motion_limits:
+          range_min: -30.0
+          range_max: 30.0
+      J1:
+        calibration_point: 767155539
+        low_encoder_circle: 65387
+        low_encoder_single_circle: 21853
+        joint_torque_sensor:
+          zero_offset_ch1: 0.0714
+          zero_offset_ch2: 0.0724
+          ch1_positive_: 43.6190131472016
+          ch2_positive_: 44.851515063943715
+          ch1_negative_: 23.42490772930899
+          ch2_negative_: 23.050483629739617
+          linear_coefficient_ch1: 33.52196043825529
+          linear_coefficient_ch2: 33.95099934684167
+        motion_limits:
+          range_max: 90.0
+          range_min: -90.0
+      J2:
+        calibration_point: 6324200
+        low_encoder_circle: 65535
+        low_encoder_single_circle: 27512
+        motion_limits:
+          range_max: 1.0
+          range_min: -145.0
+        joint_torque_sensor:
+          zero_offset_ch1: 0.0747
+          zero_offset_ch2: 0.0737
+          ch1_positive_: 42.49437815956064
+          ch2_positive_: 44.35541146931966
+          ch1_negative_: 47.626818320671305
+          ch2_negative_: 47.56361268791063
+          linear_coefficient_ch1: 45.06059824011597
+          linear_coefficient_ch2: 45.95951207861515
+      J3:
+        calibration_point: 575984160
+        low_encoder_circle: 21
+        low_encoder_single_circle: 191198
+        motion_limits:
+          range_min: -10.0
+          range_max: 80.0
+        joint_torque_sensor:
+          zero_offset_ch1: 0.0751
+          zero_offset_ch2: 0.0744
+          ch1_positive_: 20.882755549998986
+          ch2_positive_: 21.224277348259598
+          ch1_negative_: 87.9770347286868
+          ch2_negative_: 88.21190386734706
+          linear_coefficient_ch1: 54.4298951393429
+          linear_coefficient_ch2: 54.71809060780333
+      J4:
+        calibration_point: 535393265
+        low_encoder_circle: 53
+        low_encoder_single_circle: 225342
+        joint_torque_sensor:
+          zero_offset_ch1: 0.0736
+          zero_offset_ch2: 0.0734
+          ch1_positive_: 11.948741797411975
+          ch2_positive_: 12.182552005551786
+          ch1_negative_: 16.0413079313438
+          ch2_negative_: 15.703893466887253
+          linear_coefficient_ch1: 13.995024864377886
+          linear_coefficient_ch2: 13.94322273621952
+        motion_limits:
+          range_max: 30.0
+      J5:
+        calibration_point: 709826082
+        low_encoder_circle: 27
+        low_encoder_single_circle: 76379
+        joint_torque_sensor:
+          zero_offset_ch1: 0.0717
+          zero_offset_ch2: 0.0749
+          ch1_positive_: 2.1131200847807845e-16
+          ch2_positive_: 2.0226614729251344e-16
+          ch1_negative_: 2.1126688719167638e-16
+          ch2_negative_: 2.0216695670127887e-16
+          linear_coefficient_ch1: 2.112894478348774e-16
+          linear_coefficient_ch2: 2.0221655199689616e-16
+    rmp_params:
+      close_estimator: false
+      dynamic_pos_regulation: false
+      use_arm_angle: false
+      max_psi_acc: 30.0
+      psi_kp: 25.0
+      psi_kd: 10.0
+      jnt_kp: 400.0
+      jnt_kd: 40.0
+      kp: 225.0
+      kd: 30.0
+      angle_gap:
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+      vel_weight: 20.0
+      acc_weight: 0.001
+      pos_limit_weight: 0.002
+      filter_length: 35
+      target_filter_length: 10
+      jnt_ffd_coeff:
+        - 0.5
+        - 0.0
+      linear_limits:
+        - 1.0
+        - 40.0
+      angular_limits:
+        - 120.0
+        - 1200.0
+      linear_ffd_coeff:
+        - 0.5
+        - 0.0
+      angular_ffd_coeff:
+        - 0.4
+        - 0.0
+      arm_weight_gain: 2.0
+      estimator_linear_variance:
+        - 1.4
+        - 0.002
+      estimator_angular_variance:
+        - 2
+        - 0.01
+      estimate_joint_variance:
+        - 50.0
+        - 0.0001
+      check_limit_eps: 10.0
+      damp_gain: 300.0
+      stop_all_joints: true
+      enable_continuous_check: false
+      continuous_check_coeff: 2.0
+    joint_impedance:
+      stiffness:
+        - 7000
+        - 8000
+        - 7000
+        - 7000
+        - 6000
+        - 5000
+      torque_limit: [350.0, 350.0, 350.0, 350.0, 350.0, 350.0]
+    joint_virtual_wall:
+      torque_scale:
+        - 300.0
+        - 300.0
+        - 300.0
+        - 300.0
+        - 300.0
+        - 300.0
+  Base:
+    joint_confs:
+      J0:
+        motion_limits:
+          range_max: 36000.0
+          range_min: -36000.0
+          max_vel: 600
+          max_acc: 1000
+          max_jerk: 20000
+        calibration_point: -740344
+        low_encoder_circle: 0
+        low_encoder_single_circle: 211203
+      J1:
+        motion_limits:
+          range_max: 36000.0
+          range_min: -36000.0
+          max_vel: 600
+          max_acc: 1000
+          max_jerk: 20000
+        calibration_point: -858557
+        low_encoder_circle: 0
+        low_encoder_single_circle: 19786
+      J2:
+        motion_limits:
+          range_max: 36000.0
+          range_min: -36000.0
+          max_vel: 600
+          max_acc: 1000
+          max_jerk: 20000
+        calibration_point: -871291
+        low_encoder_circle: 0
+        low_encoder_single_circle: 180727
+      J3:
+        motion_limits:
+          range_max: 36000.0
+          range_min: -36000.0
+          max_vel: 600
+          max_acc: 1000
+          max_jerk: 20000
+        calibration_point: -1003843
+        low_encoder_circle: 0
+        low_encoder_single_circle: 245621
+    joint_impedance:
+      stiffness:
+        - 100
+        - 100
+        - 100
+        - 100
+      damping:
+        - 20
+        - 20
+        - 20
+        - 20
+    cart_impedance:
+      stiffness:
+        - 500
+        - 500
+        - 500
+        - 50
+        - 50
+        - 50
+      damping:
+        - 50
+        - 50
+        - 50
+        - 5
+        - 5
+        - 5
+    rmp_params:
+      acc_weight: 0.001
+      angular_ffd_coeff:
+        - 1.0
+        - 0.0
+      angular_limits: [200.0, 1200.0]
+      filter_length: 35
+      linear_ffd_coeff:
+        - 1.0
+        - 0.0
+      linear_limits: [0.7, 20.0]
+      pos_limit_weight: 0
+      vel_weight: 0.001
+      max_psi_acc: 30.0
+      continuous_check_coeff: 2.0
+  LeftArm:
+    joint_confs:
+      J0:
+        motion_limits:
+          range_max: 120.0
+          range_min: -180.0
+          max_vel: 210
+          max_acc: 1300
+          max_jerk: 35000
+        calibration_point: 1551606230
+        low_encoder_circle: 348
+        low_encoder_single_circle: 33438
+        joint_torque_sensor:
+          zero_offset_ch1: 2.5104
+          zero_offset_ch2: 2.4922
+          ch1_positive_: 66.17863003827033
+          ch2_positive_: 66.7543745238618
+          ch1_negative_: 65.72976016271551
+          ch2_negative_: 62.77124856639414
+          linear_coefficient_ch1: 65.95419510049291
+          linear_coefficient_ch2: 64.76281154512797
+      J1:
+        motion_limits:
+          range_max: 9.0
+          range_min: -170.0
+          max_vel: 210
+          max_acc: 1300
+          max_jerk: 35000
+        calibration_point: 1645801019
+        low_encoder_circle: 96
+        low_encoder_single_circle: 242679
+        joint_torque_sensor:
+          zero_offset_ch1: 2.4803
+          zero_offset_ch2: 2.4653
+          ch1_positive_: 67.3117778015638
+          ch2_positive_: 65.81988186840235
+          ch1_negative_: 60.32769738084928
+          ch2_negative_: 73.72669477029581
+          linear_coefficient_ch1: 63.81973759120655
+          linear_coefficient_ch2: 69.77328831934908
+      J2:
+        motion_limits:
+          range_max: 175.0
+          range_min: -175.0
+          max_vel: 240
+          max_acc: 1800
+          max_jerk: 45000
+        calibration_point: 1599535164
+        low_encoder_circle: 60
+        low_encoder_single_circle: 149056
+        joint_torque_sensor:
+          zero_offset_ch1: 2.5563
+          zero_offset_ch2: 2.511
+          ch1_positive_: 30.367710307656598
+          ch2_positive_: 32.55964877382407
+          ch1_negative_: 30.510137743477735
+          ch2_negative_: 32.503540572452664
+          linear_coefficient_ch1: 30.438924025567168
+          linear_coefficient_ch2: 32.53159467313837
+      J3:
+        motion_limits:
+          range_max: 10.0
+          range_min: -129.0
+          max_vel: 240
+          max_acc: 3000
+          max_jerk: 60000
+        calibration_point: 1501632580
+        low_encoder_circle: 61842
+        low_encoder_single_circle: 71813
+        joint_torque_sensor:
+          zero_offset_ch1: 2.5614
+          zero_offset_ch2: 2.4336
+          ch1_positive_: 31.895091772774844
+          ch2_positive_: 31.447598377155412
+          ch1_negative_: 32.20441917143321
+          ch2_negative_: 32.43744680653762
+          linear_coefficient_ch1: 32.049755472104025
+          linear_coefficient_ch2: 31.94252259184652
+      J4:
+        motion_limits:
+          range_max: 175.0
+          range_min: -175.0
+          max_vel: 300
+          max_acc: 3000
+          max_jerk: 60000
+        calibration_point: 1809366464
+        low_encoder_circle: 69
+        low_encoder_single_circle: 30935
+        joint_torque_sensor:
+          zero_offset_ch1: 2.4258
+          zero_offset_ch2: 2.536
+          ch1_positive_: 12.466976456782918
+          ch2_positive_: 13.526362387223818
+          ch1_negative_: 12.737004701634852
+          ch2_negative_: 12.721547171657107
+          linear_coefficient_ch1: 12.601990579208884
+          linear_coefficient_ch2: 13.123954779440464
+      J5:
+        motion_limits:
+          range_max: 95.0
+          range_min: -95.0
+          max_vel: 300
+          max_acc: 3000
+          max_jerk: 60000
+        calibration_point: 1852973886
+        low_encoder_circle: 70
+        low_encoder_single_circle: 98459
+        joint_torque_sensor:
+          zero_offset_ch1: 2.5052
+          zero_offset_ch2: 2.5757
+          ch1_positive_: 12.032489421452485
+          ch2_positive_: 11.794484136192953
+          ch1_negative_: 13.466725927146332
+          ch2_negative_: 12.37944701722677
+          linear_coefficient_ch1: 12.749607674299408
+          linear_coefficient_ch2: 12.086965576709861
+      J6:
+        motion_limits:
+          range_max: 90.0
+          range_min: -90.0
+          max_vel: 300
+          max_acc: 3000
+          max_jerk: 60000
+        calibration_point: 1649015155
+        low_encoder_circle: 50
+        low_encoder_single_circle: 110697
+        joint_torque_sensor:
+          zero_offset_ch1: 2.5223
+          zero_offset_ch2: 2.4642
+          ch1_positive_: 0.4137025622072651
+          ch2_positive_: 0.4415479269712215
+          ch1_negative_: 0.40459013974116764
+          ch2_negative_: 0.4174634623692985
+          linear_coefficient_ch1: 0.40914635097421637
+          linear_coefficient_ch2: 0.42950569467026
+    joint_impedance:
+      damping_auto: false
+      load_compensate: true
+      integral_coeff: 1.0
+      filter_error_coeff: 0.2
+      max_integral_scale: 0.1
+      impedance_parameters_scale: 1.5
+      feedforward_scale: 0.5
+      stiffness:
+        - 200
+        - 200
+        - 150
+        - 150
+        - 60
+        - 60
+        - 60
+      damping:
+        - 20
+        - 20
+        - 15
+        - 15
+        - 6
+        - 6
+        - 6
+      torque_limit:
+        - 45.0
+        - 35.0
+        - 25.0
+        - 25.0
+        - 10.0
+        - 10.0
+        - 10.0
+    cart_impedance:
+      damping_auto: true
+      stiffness:
+        - 500.0
+        - 500.0
+        - 500.0
+        - 50.0
+        - 50.0
+        - 50.0
+      damping:
+        - 50.0
+        - 50.0
+        - 50.0
+        - 5.0
+        - 5.0
+        - 5.0
+      redun_stiffness: 20.0
+      redun_damping: 8.0
+    joint_virtual_wall:
+      buffer_degree:
+        - 5.0
+        - 2.0
+        - 5.0
+        - 5.0
+        - 5.0
+        - 5.0
+        - 5.0
+      torque_scale:
+        - 120.0
+        - 120.0
+        - 120.0
+        - 120.0
+        - 120.0
+        - 120.0
+        - 120.0
+    collision_detect:
+      estimate_ext_troque: true
+      collision_detect: false
+      collision_level: 4
+      collision_level_percentage:
+        - 0.25
+        - 0.3
+        - 0.4
+        - 0.9
+        - 1.0
+        - 1.1
+        - 1.2
+        - 1.5
+      joint_collision_threshold:
+        - 100.0
+        - 80.0
+        - 80.0
+        - 90.0
+        - 40.0
+        - 40.0
+        - 40.0
+      joint_collision_sum_threshold: 300.0
+      cart_collsion_force_threshold: 30.0
+      cart_collsion_torque_threshold: 4.0
+      joint_ext_torque_offset:
+        - 0.37982500093749216
+        - 0.31345530457175552
+        - 0.11817318000626467
+        - 0.3148738441061269
+        - 0.075078189579254717
+        - 0.17697926517993751
+        - -0.049706049126185765
+    rmp_params:
+      close_estimator: false
+      dynamic_pos_regulation: false
+      use_arm_angle: false
+      max_psi_acc: 30.0
+      psi_kp: 25.0
+      psi_kd: 10.0
+      jnt_kp: 400.0
+      jnt_kd: 40.0
+      kp: 324.0
+      kd: 36.0
+      angle_gap:
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+      vel_weight: 30.0
+      acc_weight: 0.001
+      pos_limit_weight: 0.002
+      filter_length: 35
+      target_filter_length: 10
+      jnt_ffd_coeff:
+        - 0.5
+        - 0.0
+      linear_limits:
+        - 1.5
+        - 200.0
+      angular_limits:
+        - 400.0
+        - 4500.0
+      linear_ffd_coeff:
+        - 0.6
+        - 0.0
+      angular_ffd_coeff:
+        - 0.5
+        - 0.0
+      arm_weight_gain: 2.0
+      estimator_linear_variance:
+        - 2
+        - 0.0002
+      estimator_angular_variance:
+        - 2
+        - 1.0e-05
+      estimate_joint_variance:
+        - 50.0
+        - 0.0001
+      check_limit_eps: 10.0
+      damp_gain: 50.0
+      stop_all_joints: false
+      enable_continuous_check: false
+      continuous_check_coeff: 2.0
+  RightArm:
+    joint_confs:
+      J0:
+        motion_limits:
+          range_max: 180.0
+          range_min: -120.0
+          max_vel: 210
+          max_acc: 1300
+          max_jerk: 35000
+        calibration_point: 1479296011
+        low_encoder_circle: 65535
+        low_encoder_single_circle: 75147
+        joint_torque_sensor:
+          zero_offset_ch1: 2.5039
+          zero_offset_ch2: 2.5556
+          ch1_positive_: 64.7464706346146
+          ch2_positive_: 66.89527549821501
+          ch1_negative_: 68.92250892107842
+          ch2_negative_: 63.37265789302181
+          linear_coefficient_ch1: 66.8344897778465
+          linear_coefficient_ch2: 65.13396669561841
+      J1:
+        motion_limits:
+          range_max: 9.0
+          range_min: -170.0
+          max_vel: 210
+          max_acc: 1300
+          max_jerk: 35000
+        calibration_point: 1600219246
+        low_encoder_circle: 186
+        low_encoder_single_circle: 135644
+        joint_torque_sensor:
+          zero_offset_ch1: 2.5069
+          zero_offset_ch2: 2.5509
+          ch1_positive_: 63.72683101372832
+          ch2_positive_: 66.60045469339252
+          ch1_negative_: 62.20541888402145
+          ch2_negative_: 69.4473371498756
+          linear_coefficient_ch1: 62.966124948874885
+          linear_coefficient_ch2: 68.02389592163405
+      J2:
+        motion_limits:
+          range_max: 175.0
+          range_min: -175.0
+          max_vel: 240
+          max_acc: 1800
+          max_jerk: 45000
+        calibration_point: 1632033356
+        low_encoder_circle: 63
+        low_encoder_single_circle: 13837
+        joint_torque_sensor:
+          zero_offset_ch1: 2.4746
+          zero_offset_ch2: 2.4838
+          ch1_positive_: 31.79900882021404
+          ch2_positive_: 32.18666256703631
+          ch1_negative_: 31.731566595780933
+          ch2_negative_: 32.11756776367237
+          linear_coefficient_ch1: 31.765287707997487
+          linear_coefficient_ch2: 32.15211516535434
+      J3:
+        motion_limits:
+          range_max: 129.0
+          range_min: -10.0
+          max_vel: 240
+          max_acc: 3000
+          max_jerk: 60000
+        calibration_point: 1308643547
+        joint_torque_sensor:
+          zero_offset_ch1: 2.454
+          zero_offset_ch2: 2.5048
+          ch1_positive_: 31.860607981695388
+          ch2_positive_: 31.87193418431955
+          ch1_negative_: 32.054254866103314
+          ch2_negative_: 31.974233545110838
+          linear_coefficient_ch1: 31.95743142389935
+          linear_coefficient_ch2: 31.923083864715196
+        low_encoder_circle: 65235
+        low_encoder_single_circle: 175156
+      J4:
+        motion_limits:
+          range_max: 175.0
+          range_min: -175.0
+          max_vel: 300
+          max_acc: 3000
+          max_jerk: 60000
+        calibration_point: 2103083655
+        low_encoder_circle: 258
+        low_encoder_single_circle: 222219
+        joint_torque_sensor:
+          zero_offset_ch1: 2.503
+          zero_offset_ch2: 2.4637
+          ch1_positive_: 12.695947518013561
+          ch2_positive_: 13.550008670583662
+          ch1_negative_: 12.89808617226868
+          ch2_negative_: 12.516138290174204
+          linear_coefficient_ch1: 12.79701684514112
+          linear_coefficient_ch2: 13.033073480378933
+      J5:
+        motion_limits:
+          range_max: 95.0
+          range_min: -95.0
+          max_vel: 300
+          max_acc: 3000
+          max_jerk: 60000
+        calibration_point: 1574842400
+        low_encoder_circle: 61
+        low_encoder_single_circle: 45945
+        joint_torque_sensor:
+          zero_offset_ch1: 2.5289
+          zero_offset_ch2: 2.4846
+          ch1_positive_: 13.88313461910361
+          ch2_positive_: 13.865197752670621
+          ch1_negative_: 12.551652702417583
+          ch2_negative_: 12.167418436017055
+          linear_coefficient_ch1: 13.217393660760596
+          linear_coefficient_ch2: 13.016308094343838
+      J6:
+        motion_limits:
+          range_max: 90.0
+          range_min: -90.0
+          max_vel: 300
+          max_acc: 3000
+          max_jerk: 60000
+        calibration_point: 1573053436
+        low_encoder_circle: 60
+        low_encoder_single_circle: 206015
+        joint_torque_sensor:
+          zero_offset_ch1: 2.4745
+          zero_offset_ch2: 2.5115
+          ch1_positive_: 0.43067646998276354
+          ch2_positive_: 0.43489878831592743
+          ch1_negative_: 0.363603932987382
+          ch2_negative_: 0.3563026491924586
+          linear_coefficient_ch1: 0.3971402014850728
+          linear_coefficient_ch2: 0.395600718754193
+    joint_impedance:
+      damping_auto: false
+      load_compensate: true
+      integral_coeff: 1.0
+      filter_error_coeff: 0.2
+      max_integral_scale: 0.1
+      impedance_parameters_scale: 1.5
+      feedforward_scale: 0.5
+      stiffness:
+        - 200
+        - 200
+        - 150
+        - 150
+        - 60
+        - 60
+        - 60
+      damping:
+        - 20
+        - 20
+        - 15
+        - 15
+        - 6
+        - 6
+        - 6
+      torque_limit:
+        - 45.0
+        - 35.0
+        - 25.0
+        - 25.0
+        - 10.0
+        - 10.0
+        - 10.0
+    cart_impedance:
+      damping_auto: true
+      stiffness:
+        - 500.0
+        - 500.0
+        - 500.0
+        - 50.0
+        - 50.0
+        - 50.0
+      damping:
+        - 50.0
+        - 50.0
+        - 50.0
+        - 5.0
+        - 5.0
+        - 5.0
+      redun_stiffness: 20.0
+      redun_damping: 8.0
+    joint_virtual_wall:
+      buffer_degree:
+        - 5.0
+        - 2.0
+        - 5.0
+        - 5.0
+        - 5.0
+        - 5.0
+        - 5.0
+      torque_scale:
+        - 120.0
+        - 120.0
+        - 120.0
+        - 120.0
+        - 120.0
+        - 120.0
+        - 120.0
+    collision_detect:
+      estimate_ext_troque: true
+      collision_detect: false
+      collision_level: 4
+      collision_level_percentage:
+        - 0.25
+        - 0.3
+        - 0.4
+        - 0.9
+        - 1.0
+        - 1.1
+        - 1.2
+        - 1.5
+      joint_collision_threshold:
+        - 100.0
+        - 80.0
+        - 80.0
+        - 90.0
+        - 40.0
+        - 40.0
+        - 40.0
+      joint_collision_sum_threshold: 300.0
+      cart_collsion_force_threshold: 30.0
+      cart_collsion_torque_threshold: 4.0
+      joint_ext_torque_offset:
+        - 12.643924862215368
+        - -0.74283995204230746
+        - -8.7517003707273915
+        - -0.5343047791298966
+        - -0.014972378389139233
+        - 0.18685689265312799
+        - -0.36239292971971682
+    rmp_params:
+      close_estimator: false
+      dynamic_pos_regulation: false
+      use_arm_angle: false
+      max_psi_acc: 30.0
+      psi_kp: 25.0
+      psi_kd: 10.0
+      jnt_kp: 400.0
+      jnt_kd: 40.0
+      kp: 324.0
+      kd: 36.0
+      angle_gap:
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+        - 2.0
+      vel_weight: 30.0
+      acc_weight: 0.001
+      pos_limit_weight: 0.002
+      filter_length: 35
+      target_filter_length: 10
+      jnt_ffd_coeff:
+        - 0.5
+        - 0.0
+      linear_limits:
+        - 1.5
+        - 200.0
+      angular_limits:
+        - 400.0
+        - 4500.0
+      linear_ffd_coeff:
+        - 0.6
+        - 0.0
+      angular_ffd_coeff:
+        - 0.5
+        - 0.0
+      arm_weight_gain: 2.0
+      estimator_linear_variance:
+        - 2
+        - 0.0002
+      estimator_angular_variance:
+        - 2
+        - 1.0e-05
+      estimate_joint_variance:
+        - 50.0
+        - 0.0001
+      check_limit_eps: 10.0
+      damp_gain: 50.0
+      stop_all_joints: false
+      enable_continuous_check: false
+      continuous_check_coeff: 2.0
+  Neck:
+    joint_confs:
+      J0:
+        motion_limits:
+          range_max: 65.0
+          range_min: -65.0
+          max_vel: 240
+          max_acc: 1000
+          max_jerk: 20000
+      J1:
+        motion_limits:
+          range_max: 50.0
+          range_min: -3.0
+          max_vel: 240
+          max_acc: 1000
+          max_jerk: 20000

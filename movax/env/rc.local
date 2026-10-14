@@ -1,0 +1,4 @@
+#!/bin/sh -e
+/home/spirit-ai/movax/env/init_can.sh
+
+exit 0

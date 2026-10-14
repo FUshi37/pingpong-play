@@ -1,0 +1,48 @@
+monitor_server_port: 50066
+robot_server_address: 127.0.0.1:50011
+ros_domain_id: 33
+delay_counter: 10
+log_monitor:
+  enable: true
+  check_interval_seconds: 30
+  directories:
+    mc_core:
+      path: /home/spirit-ai/movax/controller/log
+      mode: directory_cleanup
+      max_size_mb: 3000
+      enable_cleanup: true
+      keep_newest_files: 5
+    datatracer:
+      path: /home/spirit-ai/movax/controller/datatracer
+      mode: directory_cleanup
+      max_size_mb: 3000
+      enable_cleanup: true
+      keep_newest_files: 3
+    moz_teleop:
+      path: /home/spirit-ai/moz_teleop/bin/log
+      mode: directory_cleanup
+      max_size_mb: 3000
+      enable_cleanup: true
+      keep_newest_files: 10
+    monitor_restart:
+      path: /home/spirit-ai/movax/log
+      mode: single_file_rotation
+      max_size_mb: 3000
+      rotation_size_mb: 30
+      keep_rotated_files: 10
+      target_files:
+        - logmonitor_tool_error.log
+        - monitor_tool.log
+    monitor_runtime:
+      path: /home/spirit-ai/movax/tools/log
+      mode: directory_cleanup
+      max_size_mb: 3000
+      enable_cleanup: true
+      keep_newest_files: 10
+  databases:
+    userlog_db:
+      path: /home/spirit-ai/movax/controller/userlogdb/userlog.db
+      max_size_mb: 3000
+      enable_vacuum: true
+      enable_cleanup: true
+      cleanup_days: 30

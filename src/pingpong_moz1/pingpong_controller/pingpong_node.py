@@ -639,7 +639,7 @@ class PingPongControllerNode(Node):
         # via UDP. Requires prior calibration using mocap_calibration.py.
         self.declare_parameter('enable_mocap_input', False)
         self.declare_parameter('mocap_bind_host', '0.0.0.0')
-        self.declare_parameter('mocap_udp_port', 9870)
+        self.declare_parameter('mocap_udp_port', 65501)
         self.declare_parameter('mocap_calibration_path', '')
         self.declare_parameter('mocap_timeout_s', 0.5)
         self.declare_parameter('mocap_marker_id', 1)
@@ -1444,6 +1444,7 @@ class PingPongControllerNode(Node):
         self._mocap_ball_lock = threading.Lock()
         self._last_mocap_estimator_packet_count = 0
         self._last_mocap_recorded_packet_count = 0
+        self._last_mocap_sync_epoch = None
 
         # Ball-lost failsafe parameters.
         self.enable_ball_lost_failsafe = bool(
@@ -5403,6 +5404,7 @@ class PingPongControllerNode(Node):
                 velocity_window_frames=self.mocap_velocity_window_frames,
                 velocity_window_max_span_s=(
                     self.mocap_velocity_window_max_span_s),
+                receiver_clock=lambda: self.get_clock().now().nanoseconds * 1e-9,
             )
             if not self._mocap_detector.start():
                 raise RuntimeError(
@@ -5464,8 +5466,17 @@ class PingPongControllerNode(Node):
             return None
 
         # Get ball state from mocap detector
-        pos_m, vel_m_s, valid = self._mocap_detector.get_ball_state()
-        diagnostics = self._mocap_detector.get_diagnostics()
+        pos_m, vel_m_s, valid, diagnostics = (
+            self._mocap_detector.get_ball_state_with_diagnostics())
+        valid = bool(valid and diagnostics.get('synchronized_valid', False))
+        stamp_sec = diagnostics.get('measurement_timestamp_s')
+        sync_epoch = diagnostics.get('clock_sync', {}).get('epoch')
+        previous_epoch = self._last_mocap_sync_epoch
+        if previous_epoch is not None and sync_epoch != previous_epoch:
+            if self._ball_estimator is not None:
+                with self._ball_estimator_lock:
+                    self._ball_estimator.reset()
+        self._last_mocap_sync_epoch = sync_epoch
 
         # Convert from meters to mm for consistency with vision pipeline
         pos_mm = pos_m * 1000.0
@@ -5473,6 +5484,11 @@ class PingPongControllerNode(Node):
 
         # Create BallState
         now_time = self.get_clock().now()
+        measurement_stamp = now_time.to_msg()
+        if stamp_sec is not None:
+            stamp_ns = int(round(float(stamp_sec) * 1e9))
+            measurement_stamp = Time(sec=stamp_ns // 1000000000,
+                                     nanosec=stamp_ns % 1000000000)
         raw_measurement = {
             'source': 'mocap',
             'detection_method': 'mocap_udp',
@@ -5481,7 +5497,7 @@ class PingPongControllerNode(Node):
         ball_state = BallState(
             position=pos_mm.astype(np.float64),
             velocity=vel_mm_s.astype(np.float64),
-            stamp=now_time.to_msg(),
+            stamp=measurement_stamp,
             valid=valid,
             raw_measurement=raw_measurement
         )
@@ -5489,12 +5505,6 @@ class PingPongControllerNode(Node):
         packet_count = int(diagnostics.get('packet_count', 0) or 0)
         is_new_packet = packet_count > self._last_mocap_estimator_packet_count
         if valid and is_new_packet:
-            stamp_sec = diagnostics.get('arrival_time_s')
-            if stamp_sec is None or not np.isfinite(float(stamp_sec)):
-                stamp_sec = now_time.nanoseconds * 1e-9
-            else:
-                stamp_sec = float(stamp_sec)
-
             if self.enable_ball_state_estimator:
                 observation = {
                     'detected': True,

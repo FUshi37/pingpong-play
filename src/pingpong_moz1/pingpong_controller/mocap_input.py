@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -35,9 +35,28 @@ def transform_waist03_to_sim(
 class MocapBallInput:
     """Receive mocap ball UDP packets and expose probe-compatible coordinates."""
 
+    def resynchronize(self, reason='source_selected'):
+        with self.detector._lock:
+            self._resynchronize_locked(reason)
+
+    def _resynchronize_locked(self, reason):
+        self.detector.clock_sync.reset(reason)
+        self.detector._latest_measurement_timestamp_s = None
+        self.detector._velocity_history.clear()
+        self.detector._prev_vel_mocap_m_s = None
+        self.detector._prev_sample_time_s = None
+        self.detector._prev_sample_time_source = None
+
+    def set_marker_id(self, marker_id):
+        marker_id = int(marker_id)
+        with self.detector._lock:
+            if marker_id != self.marker_id:
+                self.marker_id = self.detector.marker_id = marker_id
+                self._resynchronize_locked('marker_changed')
+
     def __init__(self,
                  udp_host: str = '0.0.0.0',
-                 udp_port: int = 9870,
+                 udp_port: int = 65501,
                  calibration_path: Optional[str] = None,
                  marker_id: int = 1,
                  position_unit: str = 'auto',
@@ -49,7 +68,12 @@ class MocapBallInput:
                  timeout_s: float = 0.5,
                  sim_cartesian_x_offset_m: float = 0.0,
                  sim_cartesian_y_offset_m: float = 0.023583,
-                 sim_base_height_m: float = 1.302396):
+                 sim_base_height_m: float = 1.302396,
+                 receiver_clock: Optional[Callable[[], float]] = None,
+                 clock_sync_min_samples: int = 8,
+                 clock_sync_min_span_s: float = 0.05,
+                 clock_sync_window_s: float = 10.0,
+                 marker_x_limits_m: Optional[Tuple[float, float]] = None):
         self.detector = MocapBallDetector(
             udp_host=udp_host,
             udp_port=udp_port,
@@ -62,6 +86,11 @@ class MocapBallInput:
             max_velocity_m_s=float(max_velocity_m_s),
             velocity_window_frames=int(velocity_window_frames),
             velocity_window_max_span_s=float(velocity_window_max_span_s),
+            receiver_clock=receiver_clock,
+            clock_sync_min_samples=clock_sync_min_samples,
+            clock_sync_min_span_s=clock_sync_min_span_s,
+            clock_sync_window_s=clock_sync_window_s,
+            marker_x_limits_m=marker_x_limits_m,
         )
         self.marker_id = int(marker_id)
         self.position_unit = str(position_unit)
@@ -83,13 +112,12 @@ class MocapBallInput:
 
     def get_waist03_state(
             self) -> Tuple[np.ndarray, np.ndarray, bool, Dict[str, Any]]:
-        pos_m, vel_m_s, valid = self.detector.get_ball_state()
-        diagnostics = self.detector.get_diagnostics()
-        return pos_m, vel_m_s, valid, diagnostics
+        return self.detector.get_ball_state_with_diagnostics()
 
     def get_control_state(
             self) -> Tuple[np.ndarray, np.ndarray, bool, Dict[str, Any]]:
         pos_waist, vel_waist, valid, diagnostics = self.get_waist03_state()
+        valid = bool(valid and diagnostics.get('synchronized_valid', False))
         feedback = self.build_feedback(
             pos_waist, vel_waist, valid, diagnostics)
         if not valid:
@@ -142,6 +170,11 @@ class MocapBallInput:
                 None if vel_sim is None
                 else [round(float(v), 6) for v in vel_sim]),
             'sourceTimestampS': diagnostics.get('source_timestamp_s'),
+            'measurementTimestampS': diagnostics.get('measurement_timestamp_s'),
+            'receiverTimestampS': diagnostics.get('receiver_timestamp_s'),
+            'measurementAgeS': diagnostics.get('measurement_age_s'),
+            'clockSync': diagnostics.get('clock_sync', {}),
+            'tracked': bool(diagnostics.get('valid', False)),
             'frameIdx': diagnostics.get('frame_idx'),
             'sourceFormat': diagnostics.get('source_format'),
             'packetCount': diagnostics.get('packet_count'),
@@ -157,4 +190,5 @@ class MocapBallInput:
             'ageS': diagnostics.get('age_s'),
             'addr': diagnostics.get('addr'),
             'raw': diagnostics.get('raw'),
+            'markerSelection': diagnostics.get('marker_selection', {}),
         }

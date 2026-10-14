@@ -9,6 +9,7 @@ import time
 import rclpy
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from builtin_interfaces.msg import Time
 
 from pingpong_controller.mocap_ball_detector import MocapBallDetector
 
@@ -20,7 +21,7 @@ class MocapBallStateNode(Node):
         super().__init__('mocap_ball_state')
 
         self.declare_parameter('mocap_bind_host', '0.0.0.0')
-        self.declare_parameter('mocap_udp_port', 9870)
+        self.declare_parameter('mocap_udp_port', 65501)
         self.declare_parameter('mocap_calibration_path', '')
         self.declare_parameter('mocap_timeout_s', 0.5)
         self.declare_parameter('mocap_marker_id', 1)
@@ -75,6 +76,7 @@ class MocapBallStateNode(Node):
             max_velocity_m_s=max_velocity_m_s,
             velocity_window_frames=velocity_window_frames,
             velocity_window_max_span_s=velocity_window_max_span_s,
+            receiver_clock=lambda: self.get_clock().now().nanoseconds * 1e-9,
         )
         if not self.detector.start():
             raise RuntimeError(
@@ -95,14 +97,20 @@ class MocapBallStateNode(Node):
             f'alpha={velocity_alpha:.2f}')
 
     def _timer_callback(self) -> None:
-        pos_m, vel_m_s, valid = self.detector.get_ball_state()
-        diagnostics = self.detector.get_diagnostics()
+        pos_m, vel_m_s, valid, diagnostics = (
+            self.detector.get_ball_state_with_diagnostics())
+        valid = bool(valid and diagnostics.get('synchronized_valid', False))
         if not valid and not self.publish_invalid:
             self._maybe_log_diagnostics(diagnostics)
             return
 
         msg = Odometry()
         msg.header.stamp = self.get_clock().now().to_msg()
+        measurement_timestamp = diagnostics.get('measurement_timestamp_s')
+        if measurement_timestamp is not None:
+            stamp_ns = int(round(float(measurement_timestamp) * 1e9))
+            msg.header.stamp = Time(sec=stamp_ns // 1000000000,
+                                   nanosec=stamp_ns % 1000000000)
         msg.header.frame_id = 'base_link'
         msg.child_frame_id = 'pingpong_ball'
         msg.pose.pose.position.x = float(pos_m[0])

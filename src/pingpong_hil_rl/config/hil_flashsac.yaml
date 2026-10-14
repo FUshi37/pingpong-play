@@ -1,0 +1,244 @@
+# Deliberately one real-time environment. The physical simulator supplies all
+# actuator dynamics, tracking error and delay.
+seed: 0
+total_steps: 1000000
+# The arm source is 200 Hz while active, but feedback-confirmed episode resets
+# reduce measured end-to-end collection to ~30 transitions/s.  The RTX3090
+# sustains ~79.5 batch-512 updates/s, so UTD=1 remains below learner capacity
+# and uses FlashSAC's intended one update per collected transition.
+updates_per_step: 1.0
+checkpoint_every: 25000
+log_every: 200
+save_replay_every: 100000
+output_dir: runs/hil_flashsac
+
+ros:
+  joint_topic: /joint_states
+  command_topic: /mx_mix_command
+  # Live /cart_states mapping: 0=head, 1=leg/waist, 2=left arm, 3=right arm.
+  right_arm_mu_idx: 3
+  control_hz: 200.0
+  # RELIABLE source had zero gaps, but host callback scheduling reached 69.86ms.
+  state_timeout_s: 0.100
+  command_watchdog_s: 0.010
+  causal_guard_samples: 1
+  # One isolated 100 ms callback gap was observed after 77k steps. During the
+  # retry window the watchdog holds measured position; a second gap still
+  # stops training fail-closed.
+  causal_timeout_retries: 1
+
+plant:
+  command_history_steps: 40
+  max_command_delta_deg: 1.25
+  max_tracking_error_deg: 15.0
+  max_feedback_velocity_deg_s: 340.0
+  reset_degrees: [5.736, -44.399, 30.683, 97.142, 49.323, -12.269, 14.214]
+  startup_pose_tolerance_deg: 5.0
+  # The physical simulator enters a near-zero idle pose when no command
+  # publisher exists.  This is a measured simulator-only state, not enabled for
+  # a real robot.  A slow recovery is allowed only when every joint is close to
+  # zero; arbitrary out-of-window poses remain fail-closed.
+  allow_simulator_idle_recovery: true
+  simulator_idle_degrees: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  simulator_idle_tolerance_deg: 10.0
+  simulator_idle_recovery_speed_deg_s: 5.0
+  simulator_idle_recovery_timeout_s: 30.0
+  # Includes the known controller default pose [9,-50,20,90,35,8,7]deg.
+  max_pose_deviation_deg: [15.0, 15.0, 15.0, 20.0, 20.0, 25.0, 20.0]
+  # Five joint-space degrees produced 7.4 cm of episode-to-episode racket-z
+  # variation. Keep the feedback-derived ball spawn geometry repeatable.
+  episode_reset_threshold_deg: 1.5
+  # Reset motion dominated wall time (~85% at 10 deg/s). 20 deg/s is still far
+  # below the measured 173 deg/s policy peak and remains feedback/tolerance
+  # checked by the same fail-closed reset ramp.
+  reset_speed_deg_s: 20.0
+  reset_tolerance_deg: 0.25
+  reset_timeout_s: 20.0
+  # These features are intentionally forbidden in HIL mode.
+  actuator_model: false
+  compensation: false
+  servo_target_planner: false
+
+flashsac:
+  device_type: cuda
+  buffer_device_type: cpu
+  buffer_max_length: 1000000
+  # Match the official single-environment FlashSAC warm-up.  In the previous
+  # run learning started at 2k with an all-failure buffer; the first confirmed
+  # hit did not arrive until step 13k.
+  buffer_min_length: 10000
+  min_confirmed_hits_before_learning: 3
+  # Offline replay benchmark on the RTX3090: batch 512=91.6 updates/s with
+  # critic-loss std 0.0291; 1024=72.3/s and 0.0229; 2048=44.9/s and 0.0158.
+  # Batch 1024 retains ample headroom over the measured 40.9 step/s collector
+  # while reducing gradient variance for the single-environment data stream.
+  sample_batch_size: 1024
+  normalize_reward: true
+  normalized_G_max: 5.0
+  learning_rate_init: 0.0003
+  learning_rate_peak: 0.0003
+  learning_rate_end: 0.00015
+  actor_num_blocks: 2
+  actor_hidden_dim: 128
+  actor_noise_zeta_mu: 2.0
+  actor_noise_zeta_max: 16
+  actor_update_period: 2
+  critic_num_blocks: 2
+  critic_hidden_dim: 256
+  critic_num_bins: 101
+  critic_target_update_tau: 0.01
+  temp_initial_value: 0.02
+  temp_target_sigma: 0.30
+  # At 200Hz gamma=0.99 has only a ~0.35s half-life.  The measured plant delay
+  # is 80-100ms and one launch/recovery cycle is near one second.
+  gamma: 0.997
+  n_step: 5
+  # Uncompiled measured 79.5 updates/s, already above the 50 updates/s target.
+  # Compiling a copied actor method conflicts with the dedicated inference copy.
+  use_compile: false
+  compile_mode: auto
+  use_amp: false
+
+structured_exploration:
+  # Empirical result over the valid continuation: 0 hits in 570 structured
+  # episodes, versus ~50% at G5 for both stochastic and deterministic actor
+  # episodes. Do not spend scarce single-environment samples on this primitive.
+  enabled: false
+  # The old 100% schedule generated zero hits above G1 and prevented any
+  # stochastic actor episodes before each stage regressed. Keep the primitive
+  # as a small recovery mixture while FlashSAC owns most exploration.
+  initial_probability: 0.0
+  final_probability: 0.0
+  warmup_steps: 0
+  decay_steps: 20000
+  # Do not let an immature policy cancel the contact-sensitive task primitive.
+  primitive_blend: 1.0
+  deterministic_evaluation_interval_episodes: 4
+  vertical_amplitude_min_m: 0.040
+  vertical_amplitude_max_m: 0.100
+  frequency_min_hz: 0.9
+  frequency_max_hz: 1.5
+  # The ball starts only 5--10 mm above the face. Every primitive must begin
+  # in its upward phase; a random initial phase cannot react before plant lag.
+  upward_phase_probability: 1.0
+  xy_amplitude_max_m: 0.010
+  xy_frequency_ratio_min: 0.7
+  xy_frequency_ratio_max: 1.3
+  normal_tilt_max_deg: 2.0
+  # The D455 reset face is inclined. Bias the task primitive toward world-up
+  # so contact exploration learns lift instead of preserving that inclination.
+  normal_up_blend: 0.85
+  task_action_limit: 0.80
+  position_kp: 80.0
+  position_kd: 16.0
+  orientation_kp: 30.0
+  orientation_kd: 8.0
+
+diagnostics:
+  no_action_baseline_episodes: 3
+  passive_collapse_window_episodes: 50
+  launch_collapse_max_vz_m_s: 0.05
+  launch_collapse_min_contact_rate: 0.50
+
+first_hit_defaults: &first_hit_defaults
+  success_mode: first_hit
+  window_episodes: 20
+  min_episodes: 20
+  promote_success_rate: 0.25
+  # Training gravity spans the mastered-to-target interval, so easier positive
+  # examples remain present without hard regression. Avoid the measured G5/G6
+  # promotion-regression loop (24 promotions, 23 regressions).
+  demote_success_rate: 0.0
+  promotion_requires_evaluation: true
+  spawn_xy_jitter: 0.0
+  init_vz: 0.0
+  horizon_sec: 3.0
+  exploration_vertical_amplitude_scale: 1.20
+  exploration_frequency_scale: 1.25
+  pre_hit_flatness_weight: 0.6
+  pre_hit_lift_weight: 0.6
+  pre_hit_launch_weight: 2.8
+  # G6 produced racket contact in 1865/1917 episodes but almost never positive
+  # ball vz. Reward the bounded vertical impulse on the first racket-contact
+  # edge, including partial impulses that have not yet reversed the ball.
+  pre_hit_impulse_weight: 2.0
+  pre_hit_impulse_target_delta_vz: 1.0
+  valid_hit_bonus: 25.0
+  workspace_termination_penalty: 5.0
+  zero_hit_miss_penalty: 6.0
+  failed_hit_penalty_weight: 0.30
+  action_penalty_weight: 0.0011
+  action_delta_penalty_weight: 0.0004
+  posture_weight: 0.6
+  racket_z_soft_penalty_weight: 1.7
+  # This run is resumed from a checkpoint trained with ball/contact DR. Keep
+  # that transition distribution continuous. In the base CPU environment,
+  # disabling domain_randomization also restores gravity to -9.81 at reset,
+  # silently defeating every low-gravity curriculum stage.
+  ball_dr: true
+  contact_dr: true
+  racket_pos_dr_m: 0.0
+  racket_rot_dr_deg: 0.0
+  racket_radius_dr_m: 0.0
+
+repeat_hit_defaults: &repeat_hit_defaults
+  window_episodes: 30
+  min_episodes: 30
+  promote_success_rate: 0.15
+  demote_success_rate: 0.03
+  promotion_requires_evaluation: true
+  action_acc_scale: 0.55
+  target_height: 0.32
+  spawn_xy_jitter: 0.0
+  init_vz: 0.0
+  gravity_z: -9.81
+  horizon_sec: 5.0
+  exploration_vertical_amplitude_scale: 1.35
+  exploration_frequency_scale: 1.55
+  pre_hit_flatness_weight: 0.5
+  pre_hit_lift_weight: 0.5
+  pre_hit_launch_weight: 2.0
+  pre_hit_impulse_weight: 1.5
+  pre_hit_impulse_target_delta_vz: 1.2
+  valid_hit_bonus: 20.0
+  workspace_termination_penalty: 6.0
+  zero_hit_miss_penalty: 8.0
+  failed_hit_penalty_weight: 0.5
+  action_penalty_weight: 0.0015
+  action_delta_penalty_weight: 0.0008
+  posture_weight: 0.8
+  racket_z_soft_penalty_weight: 2.0
+  ball_dr: true
+  contact_dr: true
+  racket_pos_dr_m: 0.0
+  racket_rot_dr_deg: 0.0
+  racket_radius_dr_m: 0.0
+
+curriculum:
+  # Simcode5's successful curricula introduce one difficulty axis at a time.
+  # Keep target height/action mapping fixed while gravity rises, then hold
+  # normal gravity while target height rises. Ball/contact DR remains enabled
+  # because the resumed checkpoint and replay buffer were collected with it.
+  - {<<: *first_hit_defaults, name: first_hit_g1, window_episodes: 60, min_episodes: 60, action_acc_scale: 0.30, target_height: 0.10, gravity_z: -1.0, gravity_train_from_z: -1.0, horizon_sec: 2.0}
+  - {<<: *first_hit_defaults, name: first_hit_g2, action_acc_scale: 0.35, target_height: 0.12, gravity_z: -2.0, gravity_train_from_z: -1.0, horizon_sec: 2.5}
+  - {<<: *first_hit_defaults, name: first_hit_g25, action_acc_scale: 0.38, target_height: 0.13, gravity_z: -2.5, gravity_train_from_z: -2.0, horizon_sec: 2.7}
+  - {<<: *first_hit_defaults, name: first_hit_g3, action_acc_scale: 0.42, target_height: 0.14, gravity_z: -3.0, gravity_train_from_z: -2.5, horizon_sec: 2.8}
+  - {<<: *first_hit_defaults, name: first_hit_g35, action_acc_scale: 0.46, target_height: 0.16, gravity_z: -3.5, gravity_train_from_z: -3.0}
+  - {<<: *first_hit_defaults, name: first_hit_g4, action_acc_scale: 0.46, target_height: 0.16, gravity_z: -4.0, gravity_train_from_z: -3.5}
+  - {<<: *first_hit_defaults, name: first_hit_g45, action_acc_scale: 0.46, target_height: 0.16, gravity_z: -4.5, gravity_train_from_z: -4.0}
+  - {<<: *first_hit_defaults, name: first_hit_g5, action_acc_scale: 0.46, target_height: 0.16, gravity_z: -5.0, gravity_train_from_z: -4.5}
+  - {<<: *first_hit_defaults, name: first_hit_g6, action_acc_scale: 0.46, target_height: 0.16, gravity_z: -6.0, gravity_train_from_z: -5.0}
+  - {<<: *first_hit_defaults, name: first_hit_g7, action_acc_scale: 0.46, target_height: 0.16, gravity_z: -7.0, gravity_train_from_z: -6.0}
+  - {<<: *first_hit_defaults, name: first_hit_g8, action_acc_scale: 0.46, target_height: 0.16, gravity_z: -8.0, gravity_train_from_z: -7.0}
+  - {<<: *first_hit_defaults, name: first_hit_g9, action_acc_scale: 0.46, target_height: 0.16, gravity_z: -9.0, gravity_train_from_z: -8.0}
+  - {<<: *first_hit_defaults, name: first_hit_normal_low, action_acc_scale: 0.46, target_height: 0.16, gravity_z: -9.81, gravity_train_from_z: -9.0}
+  - {<<: *first_hit_defaults, name: first_hit_normal_control, action_acc_scale: 0.55, target_height: 0.16, gravity_z: -9.81}
+  - {<<: *first_hit_defaults, name: first_hit_normal_h20, action_acc_scale: 0.55, target_height: 0.20, gravity_z: -9.81}
+  - {<<: *first_hit_defaults, name: first_hit_normal_h24, action_acc_scale: 0.55, target_height: 0.24, gravity_z: -9.81}
+  - {<<: *first_hit_defaults, name: first_hit_normal_h28, action_acc_scale: 0.55, target_height: 0.28, gravity_z: -9.81}
+  - {<<: *first_hit_defaults, name: first_hit_normal_h32, window_episodes: 30, min_episodes: 30, action_acc_scale: 0.55, target_height: 0.32, gravity_z: -9.81, horizon_sec: 4.0}
+  - {<<: *repeat_hit_defaults, name: repeat_hit_normal, success_mode: two_hits}
+  - {<<: *repeat_hit_defaults, name: three_hit_normal, success_mode: three_hits, horizon_sec: 6.0, promote_success_rate: 0.10}
+  - {<<: *repeat_hit_defaults, name: three_hit_ball_dr, success_mode: three_hits, horizon_sec: 6.0, promote_success_rate: 0.10, ball_dr: true, spawn_xy_jitter: 0.004}
+  - {<<: *repeat_hit_defaults, name: three_hit_contact_dr, success_mode: three_hits, horizon_sec: 6.0, promote_success_rate: 0.10, ball_dr: true, contact_dr: true, spawn_xy_jitter: 0.004}
+  - {<<: *repeat_hit_defaults, name: continuous_juggle, success_mode: three_hits, window_episodes: 60, min_episodes: 60, promote_success_rate: 1.0, action_acc_scale: 0.60, target_height: 0.36, horizon_sec: 6.0, ball_dr: true, contact_dr: true, spawn_xy_jitter: 0.010, racket_pos_dr_m: 0.002, racket_rot_dr_deg: 0.5, racket_radius_dr_m: 0.001}

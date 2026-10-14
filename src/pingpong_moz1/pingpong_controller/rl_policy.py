@@ -83,6 +83,8 @@ DEPLOYMENT_FK_WORLD_Z_CORRECTION_M = 0.0
 EXPECTED_OBS_DIM = 50  # Base observation dimension (legacy)
 EXPECTED_OBS_DIM_WITH_DELAY = 67  # 50 base + 17 delay conditioning
 EXPECTED_OBS_DIM_GPU0_REAL_RMP = 57
+EXPECTED_OBS_DIM_FPLC_GPU1 = 72
+EXPECTED_OBS_DIM_FPLC_GPU0 = 156
 
 # Observation contracts are explicit because the deployed legacy checkpoint was
 # trained with two observation bugs, while simcode2/ideal-PD67 was trained after
@@ -96,6 +98,10 @@ OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67 = "simcode5_pure_actuator67"
 OBSERVATION_PROFILE_SIMCODE6_QVEL67 = "simcode6_qvel67"
 OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85 = "gpu0_qvel_real_rmp_v85"
 OBSERVATION_PROFILE_GPU1_QACC_FT_V153 = "gpu1_qacc_ft_v153"
+FPLC_OBSERVATION_PROFILES = (
+    "fplc_gpu0_v152", "fplc_gpu1_v151", "fplc_gpu0_v161", "fplc_gpu1_v172",
+    "fplc_v220_s17_u839_20261013_r1",
+)
 OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
@@ -105,6 +111,7 @@ OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_SIMCODE6_QVEL67,
     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
     OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
+    *FPLC_OBSERVATION_PROFILES,
 )
 CORRECTED_67D_OBSERVATION_PROFILES = (
     OBSERVATION_PROFILE_SIMCODE2_IDEALPD67,
@@ -279,7 +286,9 @@ class RLPolicyController:
         if self._expected_obs_dim not in {
                 EXPECTED_OBS_DIM,
                 EXPECTED_OBS_DIM_WITH_DELAY,
-                EXPECTED_OBS_DIM_GPU0_REAL_RMP}:
+                EXPECTED_OBS_DIM_GPU0_REAL_RMP,
+                EXPECTED_OBS_DIM_FPLC_GPU1,
+                EXPECTED_OBS_DIM_FPLC_GPU0}:
             raise ValueError(
                 f"unsupported expected_obs_dim={self._expected_obs_dim}")
 

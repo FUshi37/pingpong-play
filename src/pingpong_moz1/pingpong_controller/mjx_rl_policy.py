@@ -73,6 +73,8 @@ _STUBBED_MODULE_PREFIXES = (
     "flax",
     "optax",
     "chex",
+    "fixed_contact_plane_training",
+    "ball_mass_measurement",
 )
 
 

@@ -40,6 +40,8 @@ except Exception as exc:  # noqa: BLE001 - rendering is optional.
 else:
     _CV2_IMPORT_ERROR = None
 
+from pingpong_controller.fplc_deployment import FPLC_CONTRACTS, FPLC_PROFILES, fplc_assets
+from pingpong_controller.fplc_policy import FPLCPolicyController
 from pingpong_controller.mjx_rl_policy import (
     Gpu1QaccFtV153PolicyController,
     Gpu0QvelRealRmpV85PolicyController,
@@ -184,6 +186,12 @@ def sim_mirror_config_for_policy_profile(
     never be paired with the legacy policy FK XML or simulation plant XML.
     """
     canonical = normalize_policy_profile(profile)
+    if canonical in FPLC_PROFILES:
+        model, xml = fplc_assets(canonical)
+        return replace(base_cfg, policy_profile=canonical, policy_model=canonical,
+                       policy_obs_dim=FPLC_CONTRACTS[canonical]["actor_dim"],
+                       model_path=model, policy_xml_path=xml, sim_xml_path=xml,
+                       backend="mujoco", rl_use_valid_ball_obs_age=True)
     if canonical == OBSERVATION_PROFILE_LEGACY_BUG_COMPAT:
         return replace(base_cfg, policy_profile=canonical)
 
@@ -524,8 +532,9 @@ class RealBallSimMirror:
                 OBSERVATION_PROFILE_SIMCODE6_QVEL67,
                 OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
             })
+        self._fplc_profile = self.policy_profile in FPLC_PROFILES
         self._real_rmp_profile = (
-            self.policy_profile
+            self._fplc_profile or self.policy_profile
             == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
         self._corrected_67d_profile = uses_corrected_67d_observation(
             self.policy_profile)
@@ -550,6 +559,7 @@ class RealBallSimMirror:
             self.patched_xml_path = build_simcode2_training_xml(
                 self.sim_xml_path,
                 right_arm_pd_profile=self.right_arm_pd_profile,
+                simulation_base_mode="aligned_fixed" if self._fplc_profile else "legacy_floating",
             )
         else:
             self.patched_xml_path = _patch_robot_xml_with_ball(
@@ -559,6 +569,7 @@ class RealBallSimMirror:
         self.dt = float(cfg.control_dt)
         self.substeps = max(1, int(round(self.dt / max(self.model.opt.timestep, 1e-6))))
         policy_cls = {
+            **{profile: FPLCPolicyController for profile in FPLC_PROFILES},
             OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: MjxRLPolicyController,
             OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: (
                 Simcode2IdealPd67PolicyController),
@@ -575,6 +586,8 @@ class RealBallSimMirror:
             OBSERVATION_PROFILE_GPU1_QACC_FT_V153: (
                 Gpu1QaccFtV153PolicyController),
         }[self.policy_profile]
+        if self._fplc_profile:
+            policy_cls = FPLCPolicyController
         self.policy = policy_cls(
             str(Path(cfg.model_path).expanduser().resolve()),
             dt=self.dt,
@@ -582,7 +595,28 @@ class RealBallSimMirror:
             enable_delay_conditioning=(int(cfg.policy_obs_dim) == 67),
             use_valid_ball_obs_age=True,
             logger=self._logger,
+            **({"observation_profile": self.policy_profile} if self._fplc_profile else {}),
         )
+
+        if self._fplc_profile:
+            # Contact calibration and 4 g mass belong only to this simulated plant.
+            gid = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, "racket_rubber_fore")
+            self.model.geom_pos[gid, 2] += 0.003
+            ball_gid = mj.mj_name2id(self.model, mj.mjtObj.mjOBJ_GEOM, "ball")
+            bid = int(self.model.geom_bodyid[ball_gid])
+            ratio = 0.004 / self.model.body_mass[bid]
+            self.model.body_mass[bid] = 0.004
+            self.model.body_inertia[bid] *= ratio
+            cfg_contact = self.checkpoint_env_cfg
+            for pid in range(self.model.npair):
+                if {int(self.model.pair_geom1[pid]), int(self.model.pair_geom2[pid])} == {gid, ball_gid}:
+                    self.model.pair_solref[pid] = cfg_contact["ball_racket_pair_solref"]
+                    self.model.pair_solreffriction[pid] = cfg_contact["ball_racket_pair_solreffriction"]
+                    self.model.pair_solimp[pid] = cfg_contact["ball_racket_pair_solimp"]
+                    self.model.pair_friction[pid] = cfg_contact["ball_racket_pair_friction"]
+                    self.model.pair_margin[pid] = cfg_contact["ball_racket_pair_margin_m"]
+                    self.model.pair_gap[pid] = cfg_contact["ball_racket_pair_gap_m"]
+                    self.model.pair_dim[pid] = cfg_contact["ball_racket_pair_condim"]
 
         self.pure_actuator_wn: np.ndarray | None = None
         self.pure_actuator_zeta: np.ndarray | None = None
@@ -729,7 +763,9 @@ class RealBallSimMirror:
             # Corrected checkpoints carry their D455-aligned reset pose.
             # Seed the CPU plant at that pose before policy/history reset.
             for name, q_rad in zip(
-                RIGHT_ARM_JOINTS, self.policy.initial_arm_q_rad,
+                RIGHT_ARM_JOINTS,
+                self.policy.warm_seed_arm_q if self.policy_profile in FPLC_PROFILES
+                else self.policy.initial_arm_q_rad,
             ):
                 aid = mj.mj_name2id(
                     self.model, mj.mjtObj.mjOBJ_ACTUATOR, name)
@@ -991,6 +1027,14 @@ class RealBallSimMirror:
                 self.data.ctrl[aid] = float(q[i])
         for _ in range(700):
             mj.mj_step(self.model, self.data)
+        if self.policy_profile in FPLC_PROFILES:
+            # The source warms at the reference seed, then installs the
+            # native racket-launch IK pose without another PD settling step.
+            if self.warm_arm_q is None:
+                self.warm_arm_q = self.data.qpos[self.arm_qadr].astype(np.float32).copy()
+                self.warm_arm_qvel = self.data.qvel[self.arm_vadr].astype(np.float32).copy()
+            if arm_q is None:
+                arm_q = self.policy.native_reset_arm_q.copy()
         if arm_q is not None and self._training_xml_profile:
             # MJX reset first restores its canonical warm state, then the live
             # mirror's force-arm path overwrites q/dq/ctrl without an extra
@@ -1431,6 +1475,7 @@ class RealBallSimMirror:
         options: Any,
         num_steps: int = 1,
         confirmed_hit_count: int = 0,
+        direct_ball_input: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         q_nominal = np.asarray(self.policy.last_cmd_q, dtype=np.float32)
         q_actuator = self.data.ctrl[self.arm_aids].astype(np.float32)
@@ -1470,6 +1515,7 @@ class RealBallSimMirror:
                 observation_scales=getattr(
                     options, "policy_observation_scales", ()),
                 confirmed_hit_count=int(confirmed_hit_count),
+                **(dict(direct_ball_input or {}) if self._fplc_profile else {}),
             )
             if self._real_rmp_profile:
                 # The actor performs the one and only qvel->q_ref integration.
@@ -1657,7 +1703,8 @@ class RealBallSimMirror:
                 "observation_scales", np.ones_like(obs_action["obs"]))),
             "policyBallObservation": np.asarray(
                 obs_action["obs"], dtype=np.float32,
-            ).reshape(-1)[20:26].tolist(),
+            ).reshape(-1)[slice(28, 52) if self._fplc_profile else slice(20, 26)].tolist(),
+            "fplcProjection": dict(getattr(self.policy, "last_projection", {})),
             "policyAction": _rounded(obs_action["action"]),
             "policyExecutedAction": _rounded(obs_action.get(
                 "executed_action", obs_action["action"])),

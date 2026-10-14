@@ -1,0 +1,55 @@
+{
+  "schema": "fplc_model_archive_v1",
+  "name": "FPLC V220 S17 u839",
+  "artifact_type": "full_training_checkpoint",
+  "status": "experimental_simulation_checkpoint; S17 graduation and hardware deployment not certified",
+  "profile": "fixed_plane_limit_cycle_qvel_rmp_gpu1_v220",
+  "stage_index": 17,
+  "stage_name": "fplc_v220_gpu1_s17_small_dr_consolidation_stability_reward",
+  "stage_update": 839,
+  "true_step": 2771648512,
+  "actor_obs_dim": 72,
+  "critic_obs_dim": 477,
+  "action_dim": 7,
+  "action_mode": "joint_velocity",
+  "policy_file": "policy.pkl",
+  "policy_sha256": "db32adfd5d4180cff82d02735e21d0b5f6c7d00a861b3e6010ac94c75732667c",
+  "source_checkpoint": "pingpong_controller/outputs/rl_sim/fplc_v220_gpu1_retention_calibrated_course_seed20266013_20261013_r1/mjx_curriculum_last.pkl",
+  "source_run": "pingpong_controller/outputs/rl_sim/fplc_v220_gpu1_retention_calibrated_course_seed20266013_20261013_r1",
+  "xml": "pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+  "xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+  "frozen_source_manifest_sha256": "fc09763412e1f7afab492423611409de84866c03834662ccdaffefc89a6d3c4b",
+  "validation": {
+    "gpu_uuid": "GPU-91f9b105-f5c8-b00e-de70-39d3ee1ce7b4",
+    "jax_device": "CudaDevice(id=0)",
+    "seed": 20266013,
+    "policy_mode": "deterministic mean",
+    "saved_environment_fields_preserved": 1107,
+    "environment_sha256": "1cd954a4b2dd8c1b3f7ea2d0676b36fe5964a32e63ae7d28426f882dfaeddfd6",
+    "episode_length_steps": [
+      1200,
+      1200,
+      1200
+    ],
+    "episode_duration_s": [
+      6.0,
+      6.0,
+      6.0
+    ],
+    "episode_hits": [
+      13,
+      12,
+      13
+    ],
+    "done_reasons": [
+      "truncated",
+      "truncated",
+      "truncated"
+    ],
+    "full_episode_rate": 1.0,
+    "recording_directory": "pingpong_controller/outputs/rl_sim/v220_s17_u839_video_gpu0_20261013_200239_exact_cfg",
+    "video_sha256": "15fe9c4279e4a25cfd8c44f5415a9a0dec5f78b911c5a84839ba1bd811df256f",
+    "video_duration_s": 18.02,
+    "scope": "three deterministic mean-policy episodes with saved S17 DR; not a full stochastic graduation population"
+  }
+}

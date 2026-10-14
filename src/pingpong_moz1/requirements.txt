@@ -10,6 +10,8 @@
 # has torch 2.11.0+cu130, but other devices may need a different CUDA wheel.
 
 numpy>=2.0,<3
+# FPLC's ordered 24-sweep projection must compile before command arming.
+numba
 opencv-python>=4.10
 pyrealsense2>=2.55
 ultralytics>=8.3,<9

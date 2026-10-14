@@ -114,6 +114,161 @@
       "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_command_state",
       "policy_dq_mode": "raw_coherent",
       "policy_plant_matcher_default_mode": "off"
+    },
+    {
+      "release_id": "fplc_gpu0_v152",
+      "policy_profile": "fplc_gpu0_v152",
+      "checkpoint_path": "simcode9/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/releases/fplc_juggling_20261008_r1/gpu0_v152/policy.pkl",
+      "checkpoint_sha256": "5b98879f9a6f16e61ce2f32a3c5ac2164e9433afc2050fc4293e5c2e25277ffe",
+      "policy_xml_path": "simcode9/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+      "policy_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+      "observation_dim": 156,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "fixed_plane_v99_contiguous_history_contact_geometry_156d",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_model_contracts.json",
+      "model_contract_sha256": "b36ca14a87111a2eb046d47b5ebebf8d063b7a8c60673e9a75d0ea8be58390c0",
+      "reset_preset": "simcode9_native"
+    },
+    {
+      "release_id": "fplc_gpu1_v151",
+      "policy_profile": "fplc_gpu1_v151",
+      "checkpoint_path": "simcode9/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/releases/fplc_juggling_20261008_r1/gpu1_v151/policy.pkl",
+      "checkpoint_sha256": "b34d33f66efe579bfc4c42d18226c1a05b3a273f0eec5b2722625b1c4d4b8c5f",
+      "policy_xml_path": "simcode9/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+      "policy_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+      "observation_dim": 72,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "fixed_plane_v149_position_only_contiguous_72d",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_model_contracts.json",
+      "model_contract_sha256": "b36ca14a87111a2eb046d47b5ebebf8d063b7a8c60673e9a75d0ea8be58390c0",
+      "reset_preset": "simcode9_native"
+    },
+    {
+      "release_id": "fplc_gpu0_v161",
+      "policy_profile": "fplc_gpu0_v161",
+      "checkpoint_path": "simcode9/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/fplc_v161_gpu0_mean_quality_formal_20261009_r1/07_fplc_v161_gpu0_s7_clean_stability.pkl",
+      "checkpoint_sha256": "27a2ac3c0ecf5cc5b0ff66353e8a1f46d8771164c2128d30820f5b986e37b559",
+      "policy_xml_path": "simcode9/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+      "policy_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+      "observation_dim": 156,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "fixed_plane_v99_contiguous_history_contact_geometry_156d",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_model_contracts.json",
+      "model_contract_sha256": "b36ca14a87111a2eb046d47b5ebebf8d063b7a8c60673e9a75d0ea8be58390c0",
+      "reset_preset": "simcode9_native"
+    },
+    {
+      "release_id": "fplc_gpu1_v172",
+      "policy_profile": "fplc_gpu1_v172",
+      "checkpoint_path": "simcode9/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/fplc_v172_gpu1_quality_gates_formal_20261009_r1/10_fplc_v159_gpu1_s10_clean_commit.pkl",
+      "checkpoint_sha256": "96c9b8349fa700402a62d1c34e5f8ed2b968bab47cf2b9d3957a1db6cfccba4a",
+      "policy_xml_path": "simcode9/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd.xml",
+      "policy_xml_sha256": "7d98f2adfdbad6082be0defcec2dbd0cbbcaf1f0fc06ce45ba424b5b3257cc92",
+      "observation_dim": 72,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "fixed_plane_v149_position_only_contiguous_72d",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_model_contracts.json",
+      "model_contract_sha256": "b36ca14a87111a2eb046d47b5ebebf8d063b7a8c60673e9a75d0ea8be58390c0",
+      "reset_preset": "simcode9_native"
+    },
+    {
+      "release_id": "fplc_v220_s17_u839_20261013_r1",
+      "policy_profile": "fplc_v220_s17_u839_20261013_r1",
+      "checkpoint_path": "simcode9/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/releases/fplc_v220_s17_u839_20261013_r1/policy.pkl",
+      "checkpoint_sha256": "db32adfd5d4180cff82d02735e21d0b5f6c7d00a861b3e6010ac94c75732667c",
+      "policy_xml_path": "simcode9/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+      "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+      "observation_dim": 72,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "fixed_plane_v149_position_only_contiguous_72d",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_model_contracts.json",
+      "model_contract_sha256": "b36ca14a87111a2eb046d47b5ebebf8d063b7a8c60673e9a75d0ea8be58390c0",
+      "reset_preset": "simcode9_native"
     }
   ]
 }

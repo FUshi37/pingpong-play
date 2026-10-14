@@ -29,6 +29,7 @@ outputs/
 
 # Audited real-policy release contracts and pure-offline validation evidence.
 !config/policy_release_manifest.json
+!config/fplc_model_contracts.json
 !config/policy_plant_real_fit_record_new3_v1.json
 !config/policy_validation_reports/
 !config/policy_validation_reports/*.json

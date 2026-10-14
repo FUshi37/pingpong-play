@@ -288,6 +288,27 @@ def validate_policy_release(
             f"release {release_id} policy XML SHA256 mismatch: expected="
             f"{expected_xml_hash}, actual={actual_xml_hash}, path={requested_xml}")
 
+    if str(release_id).startswith("fplc_"):
+        contract_path = _resolved_asset(repo, release.get("model_contract_path"), "model_contract_path")
+        if (not contract_path.is_file()
+                or sha256_file(contract_path) != release.get("model_contract_sha256")):
+            raise ReleaseContractError("FPLC model configuration SHA256 mismatch")
+        try:
+            model_contract = json.loads(contract_path.read_text(encoding="utf-8"))[release_id]
+        except (OSError, ValueError, KeyError) as exc:
+            raise ReleaseContractError("FPLC model configuration missing or invalid") from exc
+        if (release["policy_profile"] != release_id
+                or release["observation_dim"] != model_contract["actor_dim"]
+                or release.get("actor_schema") != model_contract["saved_nominal_domain"]["fixed_contact_actor_observation_schema"]
+                or release["checkpoint_sha256"] != model_contract["sha256"]
+                or release["policy_xml_sha256"] != model_contract["policy_xml_sha256"]
+                or release.get("reset_preset") != model_contract["native_reset_contract"]["preset"]
+                or release.get("reset_preset") != "simcode9_native"
+                or release["action_semantics"] != "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp"
+                or expected_control_hz != 200.0 or expected_deploy_hz != 90.0
+                or expected_dq_mode != "raw_coherent"):
+            raise ReleaseContractError("FPLC release identity/schema/control contract mismatch")
+
     metadata: dict[str, Any] = {
         "manifest_content_sha256": canonical_json_sha256(payload),
         "explicit_overrides": dict(explicit_overrides or {}),

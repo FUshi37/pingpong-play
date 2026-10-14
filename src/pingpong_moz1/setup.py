@@ -19,7 +19,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
     ],
-    install_requires=['setuptools', 'numpy', 'PyYAML'],
+    install_requires=['setuptools', 'numpy', 'PyYAML', 'numba'],
     zip_safe=True,
     maintainer='jacky',
     maintainer_email='yjk2261123518@163.com',

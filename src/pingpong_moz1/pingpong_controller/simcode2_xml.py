@@ -61,6 +61,7 @@ def build_simcode2_training_xml(
     xml_path: str | Path,
     *,
     right_arm_pd_profile: str = "xml",
+    simulation_base_mode: str = "legacy_floating",
 ) -> Path:
     """Return the exact CPU-loadable XML shape used by simcode2 MJX.
 
@@ -71,6 +72,8 @@ def build_simcode2_training_xml(
     checkpoint environment.
     """
     source = Path(xml_path).expanduser().resolve()
+    if simulation_base_mode not in {"legacy_floating", "aligned_fixed"}:
+        raise ValueError(f"unsupported simulation_base_mode={simulation_base_mode!r}")
     root = ET.parse(source).getroot()
     compiler = root.find("compiler")
     if compiler is None:
@@ -207,7 +210,8 @@ def build_simcode2_training_xml(
             support = ET.SubElement(body, "geom", name="mjx_base_support")
         support.attrib.update({
             "type": "box",
-            "pos": "0 0 -0.045",
+            "pos": ("0 0 -0.055" if simulation_base_mode == "aligned_fixed"
+                    else "0 0 -0.045"),
             "size": "0.28 0.28 0.045",
             "rgba": "0 0 0 0",
             "contype": "8",
@@ -216,6 +220,16 @@ def build_simcode2_training_xml(
             "condim": "3",
         })
         break
+    if simulation_base_mode == "aligned_fixed":
+        equality = root.find("equality")
+        if equality is None:
+            equality = ET.SubElement(root, "equality")
+        for joint_name in ("base_x", "base_y", "base_z", "base_roll", "base_pitch", "base_yaw"):
+            ET.SubElement(
+                equality, "joint", name=f"mjx_fixed_base_{joint_name}",
+                joint1=joint_name, polycoef="0 0 0 0 0",
+                solref="0.001 1", solimp="0.9999 0.9999 0.001",
+            )
     proxy_specs = {
         "waist03": (("torso", "0 0 0.02", "0.080"),),
         "right03": (("upper_arm_a", "0 0 0", "0.055"),),

@@ -1,0 +1,158 @@
+common:
+  seed: 1
+  horizon_sec: 6.0
+  frame_skip: 5
+  action_scale_arm_rad: 0.025
+  action_scale_base_xy: 0.020
+  action_scale_base_yaw: 0.030
+  ball_launch_height: 0.32
+  target_height: 0.42
+  posture_weight: 0.60
+  torque_penalty_weight: 0.0005
+  enable_delay_conditioning: false
+  delay_min_ms: 0.0
+  delay_max_ms: 150.0
+  delay_bin_edges_ms: [0.0, 25.0, 50.0, 75.0, 100.0, 125.0, 150.0]
+  delay_jitter_ms: 0.0
+  delay_sampling_mode: balanced_bins
+  include_tau_act_norm: false
+  include_command_state: false
+  include_phase_features: false
+  include_active_command_error: false
+  action_filter_tau_ms: 0.0
+  action_jerk_limit: 0.0
+  action_acc_limit: 1.0
+  enable_anti_windup: false
+  anti_windup_error_threshold: 0.5
+  anti_windup_min_scale: 0.2
+  command_tracking_error_penalty_weight: 0.0
+  delay_action_jerk_penalty_weight: 0.0
+  command_buffer_extra_steps: 4
+  use_delay_embedding: false
+  delay_embedding_dim: 0
+  use_delay_bin_value_heads: false
+  contact_height_offset: 0.0
+  max_contact_time: 0.50
+  lost_ball_timeout_ms: 150.0
+
+mjx_delay_ablation_presets:
+  baseline_current:
+    enable_delay_conditioning: false
+  smooth_no_delay_command_state_phase:
+    enable_delay_conditioning: true
+    delay_min_ms: 0.0
+    delay_max_ms: 0.0
+    delay_bin_edges_ms: [0.0, 0.0]
+    delay_jitter_ms: 0.0
+    delay_sampling_mode: uniform
+    include_tau_act_norm: true
+    include_command_state: true
+    include_active_command_error: true
+    include_phase_features: true
+    action_filter_tau_ms: 15.0
+    action_jerk_limit: 60.0
+    enable_anti_windup: false
+  delay_tau_only:
+    enable_delay_conditioning: true
+    include_tau_act_norm: true
+  delay_command_state:
+    enable_delay_conditioning: true
+    include_tau_act_norm: true
+    include_command_state: true
+    include_active_command_error: true
+  delay_command_state_phase:
+    enable_delay_conditioning: true
+    include_tau_act_norm: true
+    include_command_state: true
+    include_active_command_error: true
+    include_phase_features: true
+  delay_command_state_phase_smoothing:
+    enable_delay_conditioning: true
+    include_tau_act_norm: true
+    include_command_state: true
+    include_active_command_error: true
+    include_phase_features: true
+    action_filter_tau_ms: 15.0
+    action_jerk_limit: 60.0
+  delay_command_state_phase_smoothing_antiwindup:
+    enable_delay_conditioning: true
+    include_tau_act_norm: true
+    include_command_state: true
+    include_active_command_error: true
+    include_phase_features: true
+    action_filter_tau_ms: 15.0
+    action_jerk_limit: 60.0
+    enable_anti_windup: true
+    anti_windup_error_threshold: 0.35
+    anti_windup_min_scale: 0.25
+  real_actuator_replay_fit:
+    enable_delay_conditioning: true
+    delay_min_ms: 72.0
+    delay_max_ms: 72.0
+    delay_bin_edges_ms: [72.0, 72.0]
+    delay_jitter_ms: 0.0
+    delay_sampling_mode: uniform
+    include_tau_act_norm: true
+    include_command_state: true
+    include_active_command_error: true
+    include_phase_features: true
+    action_filter_tau_ms: 0.0
+    action_jerk_limit: 0.0
+    actuator_cmd_filter: true
+    actuator_cmd_tau: 0.074
+    actuator_cmd_gain: 1.0
+    dr_randomize_actuator_cmd_filter: false
+    dr_actuator_cmd_tau_range: [0.074, 0.074]
+    dr_actuator_cmd_gain_range: [1.0, 1.0]
+  real_actuator_replay_dr:
+    enable_delay_conditioning: true
+    delay_min_ms: 60.0
+    delay_max_ms: 85.0
+    delay_bin_edges_ms: [60.0, 65.0, 70.0, 75.0, 80.0, 85.0]
+    delay_jitter_ms: 3.0
+    delay_sampling_mode: balanced_bins
+    include_tau_act_norm: true
+    include_command_state: true
+    include_active_command_error: true
+    include_phase_features: true
+    action_filter_tau_ms: 0.0
+    action_jerk_limit: 0.0
+    actuator_cmd_filter: true
+    actuator_cmd_tau: 0.074
+    actuator_cmd_gain: 1.0
+    dr_randomize_actuator_cmd_filter: true
+    dr_actuator_cmd_tau_range: [0.060, 0.090]
+    dr_actuator_cmd_gain_range: [0.97, 1.03]
+
+train_juggle_rl:
+  xml: /home/jacky/pingpong_ws/src/pingpong_controller/pingpong_controller/tools/rl_sim/moz1_pd.xml
+  total_steps: 10000000
+  n_envs: 16
+  save_dir: /home/jacky/pingpong_ws/src/pingpong_controller/pingpong_controller/outputs/rl_sim
+  eval_freq: 20000
+  checkpoint_freq: 50000
+  device: cuda
+  resume_from: null
+  reset_num_timesteps: false
+
+validate_juggle_rl:
+  xml: /home/jacky/pingpong_ws/src/pingpong_controller/pingpong_controller/tools/rl_sim/moz1_pd.xml
+  checkpoint: /home/jacky/pingpong_ws/src/pingpong_controller/pingpong_controller/outputs/rl_sim/best/best_model.zip
+  episodes: 5
+  deterministic: true
+  realtime: false
+  slowmo: 1.0
+  print_every: 20
+  log_hit_events: true
+  hit_freeze_sec: 0.12
+  plot_trajectory: false
+  plot_height: false
+  save_trajectory_dir: null
+  no_show_plot: false
+  record_video: false
+  video_dir: null
+  video_fps: 30
+  video_width: 640
+  video_height: 480
+  headless: false
+  device: cpu

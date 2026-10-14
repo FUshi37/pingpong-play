@@ -74,6 +74,8 @@ class CameraImpactRacketFrameContractTest(unittest.TestCase):
         node.camera_detector = SimpleNamespace(
             detector=CameraImpactRacketFrameContractTest._Core())
         node.latest_policy_viz_state = {}
+        node.get_clock = lambda: SimpleNamespace(now=lambda: SimpleNamespace(
+            nanoseconds=int(PROBE.time.time()*1e9)))
         return node
 
     def test_base_link_detector_receives_inverse_policy_frame_translation(self):
@@ -95,7 +97,7 @@ class CameraImpactRacketFrameContractTest(unittest.TestCase):
             rtol=0.0,
             atol=2.0e-7,
         )
-        self.assertEqual(timestamp, 123.0)
+        self.assertAlmostEqual(timestamp, 123.0, places=9)
         # Visualization remains in the policy/sim frame.
         PROBE.np.testing.assert_allclose(
             node.latest_policy_viz_state["racket_pos_m"], racket_sim)
@@ -2236,6 +2238,8 @@ class Gpu1HotSwitchRegressionTest(unittest.TestCase):
 
     def test_original_profile_choices_remain_enabled(self):
         self.assertEqual(set(PROBE.RUNTIME_SWITCHABLE_POLICY_PROFILES), {
+            "fplc_gpu0_v152", "fplc_gpu1_v151", "fplc_gpu0_v161", "fplc_gpu1_v172",
+            "fplc_v220_s17_u839_20261013_r1",
             PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
             PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
             PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
@@ -2308,6 +2312,7 @@ class Gpu1HotSwitchRegressionTest(unittest.TestCase):
         probe._reset_policy_ball_sampling_contract = mock.Mock()
         probe._reset_policy_dq_adapter = mock.Mock()
 
+        probe._set_policy_workspace_limits = mock.Mock()
         changed = probe._select_policy_profile(
             PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153)
 
@@ -2343,6 +2348,7 @@ class Gpu1HotSwitchRegressionTest(unittest.TestCase):
         probe._reset_policy_ball_sampling_contract = mock.Mock()
         probe._reset_policy_dq_adapter = mock.Mock()
 
+        probe._set_policy_workspace_limits = mock.Mock()
         changed = probe._select_policy_profile(
             PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67)
 
@@ -2926,6 +2932,79 @@ class DoneLatchTest(unittest.TestCase):
         self.assertEqual(result[-1], False)
         self.assertEqual(result[0], "done_failsafe")
         self.assertEqual(calls, ["safe", "paused"])
+
+
+class PolicyWorkspaceSwitchRegressionTest(unittest.TestCase):
+
+    @staticmethod
+    def _probe(limits, initial_profile):
+        probe = PROBE.PolicySafetyProbe.__new__(PROBE.PolicySafetyProbe)
+        probe.cfg = SimpleNamespace(
+            ee_x_limits_m=limits[0], ee_y_limits_m=limits[1],
+            ee_z_limits_m=limits[2], workspace_safety_mode="position")
+        probe.base_ee_limits_m = limits
+        probe.active_policy_profile = initial_profile
+        probe.active_policy_model = "v85"
+        probe.policy_generation = 0
+        probe.command_stream_active = False
+        probe.done_monitor = SimpleNamespace()
+        probe.policy_controllers = {
+            profile: SimpleNamespace(policy_model_id="v85", reset=mock.Mock())
+            for profile in PROBE.RUNTIME_SWITCHABLE_POLICY_PROFILES}
+        probe.controller = probe.policy_controllers[initial_profile]
+        probe._set_policy_workspace_limits(initial_profile)
+        probe._safety_limiter_reset_reference = mock.Mock(
+            return_value=PROBE.np.zeros(7, dtype=PROBE.np.float32))
+        probe._resolve_reset_initial_pose = mock.Mock(return_value=(
+            PROBE.RESET_INITIAL_POSE_DEFAULT, PROBE.np.zeros(7)))
+        for method in (
+                "_sync_policy_to_safe_pose", "_reset_compensator_to_current_arm",
+                "_reset_servo_target_planner", "_reset_policy_ball_sampling_contract",
+                "_reset_policy_dq_adapter"):
+            setattr(probe, method, mock.Mock())
+        return probe
+
+    def assert_workspace(self, probe, expected):
+        self.assertEqual((probe.cfg.ee_x_limits_m, probe.cfg.ee_y_limits_m,
+                          probe.cfg.ee_z_limits_m), expected)
+        self.assertEqual((probe.done_monitor.ee_x_limits, probe.done_monitor.ee_y_limits,
+                          probe.done_monitor.ee_z_limits), expected)
+
+    def test_round_trip_restores_general_limits_for_every_non_fplc_profile(self):
+        general = ((-.348, .263), (-.702, -.230), (.842, 1.462))
+        small = ((-.1, .1), (-.6, -.4), (.95, 1.2))
+        for initial in (PROBE.FPLC_PROFILES[0], PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
+            probe = self._probe(general, initial)
+            # Two rounds catch cumulative intersection with the previous box.
+            for _ in range(2):
+                for profile in PROBE.RUNTIME_SWITCHABLE_POLICY_PROFILES:
+                    with self.subTest(initial=initial, profile=profile):
+                        probe._select_policy_profile(profile)
+                        fplc = profile in PROBE.FPLC_PROFILES
+                        self.assert_workspace(probe, small if fplc else general)
+                        self.assertEqual(probe.base_ee_limits_m, general)
+                        conditions = probe._workspace_translation_done_conditions(
+                            PROBE.np.array([.2, -.49, 1.1]), True, "position")
+                        self.assertEqual(conditions, {"ee_x_out_of_workspace": True} if fplc else {})
+
+    def test_custom_general_limits_survive_a_fplc_round_trip(self):
+        general = ((-.2, .22), (-.57, -.3), (1.02, 1.4))
+        profile = PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153
+        probe = self._probe(general, profile)
+        probe._select_policy_profile(PROBE.FPLC_PROFILES[0])
+        self.assert_workspace(probe, ((-.1, .1), (-.57, -.4), (1.02, 1.2)))
+        probe._select_policy_profile(profile)
+        self.assert_workspace(probe, general)
+
+    def test_disabled_axis_stays_disabled_for_non_fplc_and_rejects_fplc(self):
+        general = (None, (-.7, -.2), (.8, 1.5))
+        probe = self._probe(general, PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153)
+        probe._select_policy_profile(PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+        self.assert_workspace(probe, general)
+        with self.assertRaises(ValueError):
+            probe._select_policy_profile(PROBE.FPLC_PROFILES[0])
+        self.assertEqual(probe.active_policy_profile, PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+        self.assert_workspace(probe, general)
 
 
 class WorkspaceVelocityProjectionTest(unittest.TestCase):

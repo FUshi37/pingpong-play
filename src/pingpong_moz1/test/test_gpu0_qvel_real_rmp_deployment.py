@@ -282,8 +282,9 @@ def test_probe_uses_strict_90hz_hold_and_growing_age_for_v85() -> None:
     assert stale[3] == pytest.approx(0.355)
 
 
-def test_limiter_cannot_be_reenabled_for_policy_or_parking_commands() -> None:
-    """Even a stale true config cannot restore policy/hold filtering."""
+@pytest.mark.parametrize('profile', ['normal', 'parking'])
+def test_limiter_cannot_be_reenabled_for_policy_or_parking_commands(monkeypatch, profile) -> None:
+    """A stale flag cannot enable the limiter; parking still advances slowly."""
     probe = PolicySafetyProbe.__new__(PolicySafetyProbe)
     published: list[np.ndarray] = []
     probe.cfg = SimpleNamespace(
@@ -291,13 +292,22 @@ def test_limiter_cannot_be_reenabled_for_policy_or_parking_commands() -> None:
         workspace_safety_mode="off",
         policy_dq_mode="raw_coherent",
         policy_plant_matcher_mode="off",
+        safety_parking_velocity_scale=0.25,
+        safety_parking_acceleration_scale=0.35,
     )
     probe.ros_bridge = SimpleNamespace(
+        get_joint_feedback_with_age=lambda: (np.zeros(7),np.zeros(7),0.,'joint_state'),
         publish_right_arm_command=lambda q: published.append(
             np.asarray(q, dtype=np.float64).copy()),
     )
-    probe.safety_limiter = RightArmCommandSafetyLimiter(
-        np.zeros(7, dtype=np.float64), dt=0.005)
+    # Match the production constructor: this is inert local parking state.
+    # A real limiter object here used to assert an unsafe one-tick parking jump.
+    probe.safety_limiter = SimpleNamespace(
+        last_cmd=np.zeros(7),last_vel=np.zeros(7),dt=0.005)
+    def forbidden(*args,**kwargs):
+        pytest.fail('RightArmCommandSafetyLimiter must never be entered')
+    for name in ('filter','reset','observe_published'):
+        monkeypatch.setattr(RightArmCommandSafetyLimiter,name,forbidden,raising=False)
     probe.command_stream_active = True
     probe.done_failsafe_active = False
     probe.hard_workspace_stop_latched = False
@@ -318,13 +328,18 @@ def test_limiter_cannot_be_reenabled_for_policy_or_parking_commands() -> None:
     did_publish = probe._publish_control_command(
         np.full(7, 0.5, dtype=np.float64),
         options,
-        profile="parking",
+        profile=profile,
     )
 
     assert did_publish is True
     assert len(published) == 1
-    np.testing.assert_allclose(published[0], np.full(7, 0.5))
-    np.testing.assert_array_equal(probe.safety_limiter.last_cmd, np.zeros(7))
-    np.testing.assert_array_equal(probe.safety_limiter.last_vel, np.zeros(7))
+    if profile=='normal':
+        np.testing.assert_allclose(published[0], np.full(7, 0.5))
+        np.testing.assert_array_equal(probe.safety_limiter.last_cmd, np.zeros(7))
+        np.testing.assert_array_equal(probe.safety_limiter.last_vel, np.zeros(7))
+    else:
+        delta_limit=np.deg2rad(np.asarray(RightArmCommandSafetyLimiter.ACC_LIMIT_DEG_S2))*.35*.005**2
+        assert np.all(published[0]>0.)
+        assert np.all(published[0]<=delta_limit+1e-12)
     assert probe.command_stream_active is True
     assert probe.gpu0_rmp_safety_intervention_streak == 0

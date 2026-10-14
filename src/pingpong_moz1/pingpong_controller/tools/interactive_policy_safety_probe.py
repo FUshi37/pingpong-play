@@ -99,6 +99,11 @@ from pingpong_controller.done_condition_monitor import (
     _quat_to_euler_xyz_rad,
     _wrap_angle_rad,
 )
+from pingpong_controller.fplc_deployment import (
+    FPLC_CONTRACTS, FPLC_PROFILES, fplc_assets, fplc_workspace_intersection,
+)
+from pingpong_controller.fplc_policy import FPLCPolicyController
+from pingpong_controller.observation_clock import CameraTimestampAligner, sample_clock_valid
 from pingpong_controller.mjx_rl_policy import (
     Gpu1QaccFtV153PolicyController,
     Gpu0QvelRealRmpV85PolicyController,
@@ -322,6 +327,7 @@ GPU0_RMP_MODEL_IDS = (
     GPU0_RMP_MODEL_V97_SOURCE_CLOCK,
 )
 RUNTIME_SWITCHABLE_POLICY_PROFILES = (
+    *FPLC_PROFILES,
     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
     OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
     OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
@@ -333,7 +339,7 @@ EAGER_POLICY_PROFILES = frozenset({
     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
     OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
 })
-PROFILE_IDENTIFIED_MODEL_PROFILES = EAGER_POLICY_PROFILES
+PROFILE_IDENTIFIED_MODEL_PROFILES = EAGER_POLICY_PROFILES | frozenset(FPLC_PROFILES)
 
 # Reset is a supervised recovery mode, not a transient policy state.  The
 # commanded S-curve may finish before the physical joints have settled, so the
@@ -384,6 +390,8 @@ def _normalize_policy_model_for_profile(
     default: str = GPU0_RMP_MODEL_V85,
 ) -> str:
     canonical = normalize_observation_profile(profile)
+    if canonical in FPLC_PROFILES:
+        return canonical
     if canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
         return _normalize_gpu0_rmp_model(value, default)
     if canonical == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
@@ -401,6 +409,8 @@ def _controller_policy_model_id(
 ) -> str:
     """Return the UI/runtime model id that belongs to a policy profile."""
     canonical = normalize_observation_profile(profile)
+    if canonical in FPLC_PROFILES:
+        return canonical
     if canonical == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
         return GPU1_QACC_FT_MODEL_V153
     if canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
@@ -434,6 +444,7 @@ DEFAULT_DEPTH_CORRECTION_MODEL = (
 )
 RESET_INITIAL_POSE_DEFAULT = "default_1"
 RESET_INITIAL_POSE_HORIZONTAL = "default_2_horizontal"
+RESET_INITIAL_POSE_FPLC = "simcode9_native"
 RESET_HORIZONTAL_RIGHT_ARM_Q_DEG = np.array(
     [5.736, -44.399, 30.683, 97.142, 49.323, -12.269, 14.214],
     dtype=np.float64,
@@ -918,10 +929,12 @@ class ProbeConfig:
     right_arm_mu_idx: int
     enable_camera_ball: bool
     enable_mocap_ball: bool
+    mocap_subprocess: bool
     mocap_udp_host: str
     mocap_udp_port: int
     mocap_calibration_path: str
     mocap_marker_id: int
+    mocap_marker_x_limits_m: tuple[float, float] | None
     mocap_rigid_body_slot: int
     mocap_rigid_body_id: int
     mocap_rigid_body_name: str
@@ -933,6 +946,7 @@ class ProbeConfig:
     mocap_velocity_window_frames: int
     mocap_velocity_window_max_span_s: float
     camera_source_mode: str
+    camera_subprocess: bool
     use_hybrid_detector: bool
     use_depth_sensor: bool
     image_width: int
@@ -1059,6 +1073,10 @@ class ProbeConfig:
     # Physical joints already provide actuator dynamics.  The optional
     # upper-software planner is an explicit deployable-checkpoint opt-in.
     simcode4_real_servo_planner: bool = False
+    enable_ball_dropout_reference_hold: bool = True
+    mocap_clock_sync_min_samples: int = 8
+    mocap_clock_sync_min_span_s: float = 0.05
+    mocap_clock_sync_window_s: float = 10.0
 
     @property
     def control_dt(self) -> float:
@@ -1241,6 +1259,8 @@ def _overlay_policy_trace_joint_feedback(
 def _reset_initial_pose_id(value: Any) -> str:
     preset = str(value or RESET_INITIAL_POSE_DEFAULT).strip().lower()
     preset = preset.replace("-", "_").replace(" ", "_")
+    if preset == RESET_INITIAL_POSE_FPLC:
+        return RESET_INITIAL_POSE_FPLC
     if preset in {
             "1", "default1", "default_1", "config1", "config_1",
             "preset1", "preset_1"}:
@@ -1255,6 +1275,8 @@ def _reset_initial_pose_id(value: Any) -> str:
 
 def _reset_initial_pose_q_rad(preset: Any) -> tuple[str, np.ndarray]:
     preset_id = _reset_initial_pose_id(preset)
+    if preset_id == RESET_INITIAL_POSE_FPLC:
+        raise ValueError("simcode9_native reset requires the selected FPLC controller")
     if preset_id == RESET_INITIAL_POSE_HORIZONTAL:
         q = np.deg2rad(RESET_HORIZONTAL_RIGHT_ARM_Q_DEG)
     else:
@@ -1263,7 +1285,7 @@ def _reset_initial_pose_q_rad(preset: Any) -> tuple[str, np.ndarray]:
         len(RIGHT_ARM_JOINTS))
 
 
-def _reset_initial_pose_presets_payload() -> dict[str, Any]:
+def _reset_initial_pose_presets_payload(fplc_controller=None) -> dict[str, Any]:
     presets = []
     for preset_id, label in (
             (RESET_INITIAL_POSE_DEFAULT, "Default 1"),
@@ -1275,8 +1297,16 @@ def _reset_initial_pose_presets_payload() -> dict[str, Any]:
             "rightArmJointPositionRad": _rounded_vector(q_rad),
             "rightArmJointPositionDeg": _rounded_vector(np.rad2deg(q_rad), 3),
         })
+    native = {"id": RESET_INITIAL_POSE_FPLC, "label": "simcode9 native racket-launch"}
+    if fplc_controller is not None:
+        native.update({
+            "rightArmJointPositionRad": _rounded_vector(fplc_controller.native_reset_arm_q),
+            "rightArmJointPositionDeg": _rounded_vector(np.rad2deg(fplc_controller.native_reset_arm_q), 3),
+            "racketPositionM": _rounded_vector(fplc_controller.native_reset_position_m),
+        })
+    presets.append(native)
     return {
-        "default": RESET_INITIAL_POSE_DEFAULT,
+        "default": RESET_INITIAL_POSE_FPLC if fplc_controller is not None else RESET_INITIAL_POSE_DEFAULT,
         "presets": presets,
     }
 
@@ -1858,9 +1888,10 @@ def _policy_inputs_match(
         if real_policy_ball is None and sim_policy_ball is None:
             return envelope_match
         try:
+            ball_dimension = 24 if real_profile in FPLC_PROFILES else 6
             policy_ball_match = np.array_equal(
-                np.asarray(real_policy_ball, dtype=np.float32).reshape(6),
-                np.asarray(sim_policy_ball, dtype=np.float32).reshape(6),
+                np.asarray(real_policy_ball, dtype=np.float32).reshape(ball_dimension),
+                np.asarray(sim_policy_ball, dtype=np.float32).reshape(ball_dimension),
             )
         except (TypeError, ValueError):
             policy_ball_match = False
@@ -2246,7 +2277,7 @@ def _write_policy_trace_csv(samples: list[dict[str, Any]], analysis_dir: Path) -
                 row.get("predictedVelocity") or estimator.get("velocityMps"))
             real_ee = row.get("racket") or ros.get("jointEe")
             if real_ee is None and isinstance(obs, list) and len(obs) >= 29:
-                real_ee = obs[26:29]
+                real_ee = obs[52:55] if len(obs) in (72, 156) else obs[26:29]
             put_point(out_row, "real_ee", real_ee)
             put_point(out_row, "command_ee", row.get("commandRacket"))
             put_point(out_row, "ros_cart", ros.get("cartPosition"))
@@ -2380,9 +2411,12 @@ def _sample_ball_state_6d(sample: dict[str, Any]) -> np.ndarray | None:
             return None
         return list(position) + list(velocity)
 
+    actor_ball = sample.get("policyBallObservation")
+    if isinstance(actor_ball, (list, tuple, np.ndarray)) and len(actor_ball) == 24:
+        actor_ball = None  # FPLC holds eight positions; adjacent XYZ is not velocity.
     candidates: list[Any] = [
         sample.get("ballState6D"),
-        sample.get("policyBallObservation"),
+        actor_ball,
     ]
     policy_input = sample.get("policyInput")
     if isinstance(policy_input, dict):
@@ -2391,7 +2425,8 @@ def _sample_ball_state_6d(sample: dict[str, Any]) -> np.ndarray | None:
     candidates.append(combined(
         sample.get("observedBall"), sample.get("observedVelocity")))
     policy_obs = sample.get("policyObs")
-    if isinstance(policy_obs, (list, tuple)) and len(policy_obs) >= 26:
+    if (isinstance(policy_obs, (list, tuple)) and len(policy_obs) >= 26
+            and len(policy_obs) not in (72, 156)):
         candidates.append(policy_obs[20:26])
 
     for candidate in candidates:
@@ -3283,6 +3318,29 @@ def _analyze_sim_real_gap(
          _numeric_array(sim_rows, "sim.policyCommand"),
          list(RIGHT_ARM_JOINTS), "rad"),
     ]
+    fplc_observation = len(obs_names) in (72, 156)
+    if fplc_observation:
+        # Keep only fields actually present in these independent actor schemas.
+        group_specs = [spec for spec in group_specs if spec[0] in {
+            "policy_obs", "joint_position", "joint_velocity", "joint_acceleration",
+            "policy_action", "executed_action", "command_position"}]
+        age_start = 61 if len(obs_names) == 72 else 124
+        for name, start, stop, unit in (
+                ("ball_observation", 28, 31, "m"),
+                ("ball_position_history", 28, 52, "m"),
+                ("racket_position", 52, 55, "m"),
+                ("previous_executed_action", 21, 28, "normalized"),
+                ("tracking_error", 14, 21, "rad"),
+                ("ball_age_normalized", age_start, age_start + 8, "age/0.25")):
+            group_specs.append((name, _matrix_slice(sim_rows, "policyObs", start, stop),
+                                _matrix_slice(sim_rows, "sim.policyObs", start, stop),
+                                obs_names[start:stop], unit))
+        report["phaseSemantics"]["policyObs"] = (
+            "FPLC tick-start q/dq obs[0:14], persistent q_ref error obs[14:21], "
+            "held direct ball history obs[28:52], current racket xyz obs[52:55]; "
+            "no direct actor ball/racket velocity slots")
+        report["phaseSemantics"]["policyExecutedAction"] = (
+            "same-tick Cartesian-projected normalized QVEL; next tick obs[21:28]")
     group_matrices: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for group, real, sim, names, unit in group_specs:
         rows = _per_dim_comparison(real, sim, group=group, names=names)
@@ -3308,8 +3366,9 @@ def _analyze_sim_real_gap(
         "policy_action", (np.zeros((0, 0)), np.zeros((0, 0))))
     real_command, sim_command = group_matrices.get(
         "command_position", (np.zeros((0, 0)), np.zeros((0, 0))))
-    real_tracking = _matrix_slice(sim_rows, "policyObs", 42, 49)
-    sim_tracking = _matrix_slice(sim_rows, "sim.policyObs", 42, 49)
+    tracking_start = 14 if fplc_observation else 42
+    real_tracking = _matrix_slice(sim_rows, "policyObs", tracking_start, tracking_start + 7)
+    sim_tracking = _matrix_slice(sim_rows, "sim.policyObs", tracking_start, tracking_start + 7)
     compensated = _numeric_array(
         sim_rows, "command.compensatedReferencePosition")
     published = _numeric_array(sim_rows, "command.publishedSafePosition")
@@ -4094,6 +4153,22 @@ window.addEventListener('resize', draw); draw();
 
 
 def _obs_names(width: int) -> list[str]:
+    if width in (72, 156):
+        prefix = [*(f"arm_q[{i}]" for i in range(7)),
+                  *(f"arm_dq[{i}]" for i in range(7)),
+                  *(f"q_ref_error[{i}]" for i in range(7)),
+                  *(f"projected_previous_action[{i}]" for i in range(7)),
+                  *(f"held_ball_history[{tick}].{axis}" for tick in range(8) for axis in "xyz")]
+        if width == 72:
+            return prefix + [*(f"racket_pose[{i}]" for i in range(9)),
+                             *(f"ball_age_history[{i}]/0.25" for i in range(8)),
+                             "episode_target_x", "episode_target_y", "ball_observed"]
+        return prefix + [*(f"racket_pose_history[{tick}][{i}]" for tick in range(8) for i in range(9)),
+                         *(f"ball_age_history[{i}]/0.25" for i in range(8)),
+                         "desired_apex_z", "episode_target_x", "episode_target_y", "ball_valid", "hit_count/4",
+                         *(f"predicted_contact_ball_{a}" for a in "xyz"), "time_to_contact", "contact_valid",
+                         *(f"racket_target_{a}" for a in "xyz"), *(f"target_rotation6d[{i}]" for i in range(6)),
+                         *(f"target_minus_surface_{a}" for a in "xyz"), "next_crossing_x", "next_crossing_y"]
     if width == 57:
         return [
             *(f"arm_q[{i}]" for i in range(7)),
@@ -4331,22 +4406,11 @@ def _make_analysis_data(
             "simJointPositionObs": sim_policy_obs[0:7],
             "realJointVelocityObs": policy_obs[7:14],
             "simJointVelocityObs": sim_policy_obs[7:14],
-            "realBallObservationObs": policy_obs[20:26],
-            "simBallObservationObs": sim_policy_obs[20:26],
-            "realRacketPositionObs": policy_obs[26:29],
-            "simRacketPositionObs": sim_policy_obs[26:29],
-            "realRacketVelocityObs": policy_obs[29:32],
-            "simRacketVelocityObs": sim_policy_obs[29:32],
-            "realRelativeBallRacketObs": policy_obs[32:35],
-            "simRelativeBallRacketObs": sim_policy_obs[32:35],
-            "realTrackingErrorObs": policy_obs[42:49],
-            "simTrackingErrorObs": sim_policy_obs[42:49],
-            "realNominalVelocityObs": policy_obs[51:58],
-            "simNominalVelocityObs": sim_policy_obs[51:58],
-            "realDelayedTrackingErrorObs": policy_obs[58:65],
-            "simDelayedTrackingErrorObs": sim_policy_obs[58:65],
-            "realContactPhaseObs": policy_obs[65:67],
-            "simContactPhaseObs": sim_policy_obs[65:67],
+            **{side + feature: _policy_observation_feature(values, feature)
+               for side, values in (("real", policy_obs), ("sim", sim_policy_obs))
+               for feature in ("BallObservationObs", "RacketPositionObs", "RacketVelocityObs",
+                               "RelativeBallRacketObs", "TrackingErrorObs", "NominalVelocityObs",
+                               "DelayedTrackingErrorObs", "ContactPhaseObs")},
         })
     sim_comparison = {}
     sim_comparison_path = run_dir / "analysis" / "sim_real_comparison.json"
@@ -4640,6 +4704,8 @@ def _compact_sim_record_sample(sample: dict[str, Any]) -> dict[str, Any]:
             and not np.array_equal(unscaled, sample.get("policyObs"))):
         compact["policyObsUnscaled"] = unscaled
     policy_dq = sample.get("policyJointVelocity")
+    if sample.get("fplcProjection"):
+        compact["fplcProjection"] = dict(sample["fplcProjection"])
     if policy_dq is not None:
         compact["policyJointVelocity"] = policy_dq
     dq_contract = sample.get("dqObservationContract")
@@ -5499,6 +5565,7 @@ class RuntimeOptions:
     policy_ball_handover_mode: str
     ball_source: str
     camera: CameraRuntimeOptions
+    enable_ball_dropout_reference_hold: bool = True
 
 
 COMPENSATION_PARAMETER_TARGET_REAL = "real"
@@ -5792,11 +5859,18 @@ def _sim_mirror_process_main(
         except Exception:
             return False
 
-    def _publish_snapshot(snapshot: dict[str, Any]) -> None:
+    last_snapshot_publish_wall = 0.0
+
+    def _publish_snapshot(snapshot: dict[str, Any], *, throttle: bool = False) -> None:
+        nonlocal last_snapshot_publish_wall
+        now = time.monotonic()
+        if throttle and now - last_snapshot_publish_wall < 1.0 / 60.0:
+            return
         _queue_replace_latest(status_q, {
             "kind": "snapshot",
             "snapshot": dict(snapshot),
         })
+        last_snapshot_publish_wall = now
 
     def _publish_frame() -> None:
         nonlocal last_frame_seq
@@ -6072,10 +6146,11 @@ def _sim_mirror_process_main(
                 snapshot = None
                 for idx, cmd in enumerate(batch_cmds):
                     step_kwargs = {}
-                    if (active_profile
-                            == OBSERVATION_PROFILE_GPU1_QACC_FT_V153):
+                    if active_profile in (OBSERVATION_PROFILE_GPU1_QACC_FT_V153, *FPLC_PROFILES):
                         step_kwargs["confirmed_hit_count"] = int(cmd.get(
                             "confirmed_hit_count", 0) or 0)
+                    if active_profile in FPLC_PROFILES:
+                        step_kwargs["direct_ball_input"] = cmd.get("direct_ball_input")
                     step_snapshot = mirror.step(
                         ball_pos_seq[idx],
                         ball_vel_seq[idx],
@@ -6190,7 +6265,9 @@ def _sim_mirror_process_main(
                 "queued": int(queued),
                 "queuedS": round(float(queued) * sim_dt_s, 6),
             }
-            _publish_snapshot(snapshot)
+            # The complete sourceSeq-tagged 200 Hz samples above remain on
+            # result_q. Viewer diagnostics do not need a second copy per tick.
+            _publish_snapshot(snapshot, throttle=True)
             _publish_frame()
     except BaseException as exc:  # noqa: BLE001 - surface to parent process.
         if not shutdown_requested.is_set() and not isinstance(exc, KeyboardInterrupt):
@@ -6577,6 +6654,7 @@ class SimMirrorSubprocess:
         policy_model: str,
         policy_generation: int,
         confirmed_hit_count: int = 0,
+        direct_ball_input: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         profile = normalize_observation_profile(policy_profile)
         model = _normalize_policy_model_for_profile(profile, policy_model)
@@ -6605,6 +6683,7 @@ class SimMirrorSubprocess:
             "policy_model": str(model),
             "policy_generation": int(policy_generation),
             "confirmed_hit_count": int(confirmed_hit_count),
+            "direct_ball_input": dict(direct_ball_input or {}),
             "target_sim_time_s": float(self.target_sim_time_s),
             "control_dt_s": float(getattr(self.sim_cfg, "control_dt", 0.005)),
             "command_wall_s": round(float(time.time()), 6),
@@ -6741,11 +6820,26 @@ def _policy_uses_valid_ball_obs_age(
             OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
             OBSERVATION_PROFILE_SIMCODE6_QVEL67}:
         return False
-    if profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+    if profile in FPLC_PROFILES or profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
         return True
     if uses_corrected_67d_observation(profile):
         return True
     return bool(requested)
+
+
+def _policy_observation_feature(obs, feature):
+    """Return actor fields by schema, leaving absent velocity/delay slots empty."""
+    slices = {
+        "BallObservationObs": (20, 26), "RacketPositionObs": (26, 29),
+        "RacketVelocityObs": (29, 32), "RelativeBallRacketObs": (32, 35),
+        "TrackingErrorObs": (42, 49), "NominalVelocityObs": (51, 58),
+        "DelayedTrackingErrorObs": (58, 65), "ContactPhaseObs": (65, 67),
+    }
+    if len(obs) in (72, 156):
+        slices = {"BallObservationObs": (28, 31), "RacketPositionObs": (52, 55),
+                  "TrackingErrorObs": (14, 21)}
+    bounds = slices.get(feature)
+    return list(obs[slice(*bounds)]) if bounds is not None else []
 
 
 def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
@@ -6805,7 +6899,20 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             {"name": "contact_time_margin", "start": 66, "stop": 67,
              "unit": "s"},
         ])
-    return {
+    if expected_obs_dim in (72, 156):
+        segments = [("joint_position", 0, 7, "rad"), ("joint_velocity", 7, 14, "rad/s"),
+                    ("persistent_qref_error", 14, 21, "rad"), ("projected_previous_action", 21, 28, "normalized"),
+                    ("held_ball_history", 28, 52, "m")]
+        segments += ([("current_racket_pose", 52, 61, "m,rotation6d"),
+                      ("ball_age_history", 61, 69, "age/0.25"), ("episode_target_xy", 69, 71, "m"),
+                      ("ball_observed", 71, 72, "bool")] if expected_obs_dim == 72 else
+                     [("racket_pose_history", 52, 124, "m,rotation6d"), ("ball_age_history", 124, 132, "age/0.25"),
+                      ("desired_apex", 132, 133, "m"), ("episode_target_xy", 133, 135, "m"),
+                      ("ball_valid", 135, 136, "bool"), ("confirmed_hits", 136, 137, "hits/4"),
+                      ("predicted_contact_context", 137, 156, "m,s,rotation6d")])
+        observation_segments = [dict(name=name, start=start, stop=stop, unit=unit)
+                                for name, start, stop, unit in segments]
+    contract = {
         "observationDim": expected_obs_dim,
         "actionDim": action_dim,
         "modelObservationShape": list(model_obs_shape),
@@ -6830,7 +6937,7 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             controller, "action_jerk_limit", 0.0)),
         "actionClipAbs": float(getattr(
             controller, "action_acc_limit", 1.0)),
-        "armActionLimiter": bool(getattr(
+        "armActionLimiter": bool(expected_obs_dim not in (72, 156) and getattr(
             controller, "arm_action_limiter", False)),
         "controlDtS": float(getattr(controller, "dt", 0.0)),
         "delayConditioning": bool(getattr(
@@ -6842,6 +6949,28 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
         "positionIntegrationCount": 1 if action_mode == "velocity" else 2,
         "observationSegments": observation_segments,
     }
+    if expected_obs_dim in (72, 156):
+        contract["fplc"] = {
+            "projectionRuntime": dict(getattr(controller, "projection_runtime", {})),
+            "actorSchema": controller.contract['saved_nominal_domain']['fixed_contact_actor_observation_schema'],
+            "commandPath": "actor_QVEL -> training_Cartesian_projection -> persistent_qref -> robot_RMP",
+            "projection": dict(controller.last_projection),
+            "positionLowerM": controller.position_lower.tolist(),
+            "positionUpperM": controller.position_upper.tolist(),
+            "relativeRollPitchLimitDeg": np.rad2deg(controller.rp_outer).tolist(),
+            "realRelativeRollPitchLimitDeg": np.rad2deg(controller.real_rp_outer).tolist(),
+            "yawConstrained": False,
+            "safetyLimiterEntered": False,
+            "intervention": "measured_hold_disarm_discard_history_explicit_rearm",
+            "nativeReset": {
+                "targetPositionM": controller.native_reset_target_m.tolist(),
+                "racketPositionM": controller.native_reset_position_m.tolist(),
+                "rightArmJointPositionRad": controller.native_reset_arm_q.tolist(),
+                "positionErrorM": controller.native_reset_error_m,
+                "source": "racket_launch_XY_surface_Z_follow_IK",
+            },
+        }
+    return contract
 
 
 def _workspace_safety_mode(value: Any, default: str = "position_soft") -> str:
@@ -7211,34 +7340,15 @@ def _payload_int(
     return value
 
 
-class RosBridgeNode(Node):
-    def __init__(self, cfg: ProbeConfig):
-        super().__init__("interactive_policy_safety_probe")
-        self.cfg = cfg
-        self.lock = threading.Lock()
-        self.camera_lock = threading.Lock()
-        self.camera_rebuild_lock = threading.Lock()
-        self.latest_joint_q: np.ndarray | None = None
-        self.latest_joint_dq: np.ndarray | None = None
-        self.latest_joint_ddq: np.ndarray | None = None
-        self.latest_joint_stamp_wall: float | None = None
-        self.latest_joint_stamp_monotonic_s: float | None = None
-        self.latest_joint_sample_stamp_s: float | None = None
-        self.latest_joint_sample_dt_s: float | None = None
-        self.latest_joint_header_stamp_s: float | None = None
-        self.latest_joint_sample_stamp_source: str = "unavailable"
-        self.latest_joint_source_sequence: int = -1
-        self.latest_joint_repeated_source_sample: bool = False
-        self.latest_joint_source_fault: str = ""
-        self.latest_joint_dq_source: str = "unavailable"
-        self.latest_joint_ddq_source: str = "unavailable"
-        self.latest_cart_pos: np.ndarray | None = None
-        self.latest_cart_quat_xyzw: np.ndarray | None = None
-        self.latest_cart_psi: float | None = None
-        self.latest_cart_stamp_wall: float | None = None
-        self.publish_count = 0
-        self.cmd_pub = None
+class CameraSource:
+    """Shared camera implementation for a ROS host or camera-only worker."""
 
+    def _initialize_camera_state(self, cfg):
+        self.camera_process = None
+        self.camera_clock = CameraTimestampAligner()
+        self.camera_clock_lock = threading.Lock()
+        self.latest_camera_clock_sync = self.camera_clock.diagnostics()
+        self.camera_detector_clock_epoch = None
         self.camera_detector = None
         self.camera_detector_key: tuple[Any, ...] | None = None
         self.camera_direct_running = False
@@ -7246,7 +7356,7 @@ class RosBridgeNode(Node):
         self.camera_direct_thread: threading.Thread | None = None
         self.camera_frame_slot_lock = threading.Lock()
         self.camera_frame_event = threading.Event()
-        self.camera_frame_pending: tuple[Any, float] | None = None
+        self.camera_frame_pending: tuple[Any, float, dict[str, Any]] | None = None
         self.camera_frames_acquired = 0
         self.camera_frames_replaced = 0
         self.camera_info_payload: dict[str, Any] | None = None
@@ -7350,6 +7460,1631 @@ class RosBridgeNode(Node):
         self.camera_viz_last_enqueue_wall = 0.0
         self.camera_viz_min_period_s = (
             1.0 / max(float(cfg.camera_visualization_rate_hz), 1e-6))
+
+    def _init_camera_ball_source(self) -> None:
+        if not _CAMERA_BALL_AVAILABLE:
+            raise RuntimeError(
+                f"camera ball source unavailable: {_CAMERA_BALL_IMPORT_ERROR}")
+        source_mode = str(self.cfg.camera_source_mode).strip().lower()
+        if source_mode == "direct_realsense":
+            if bool(getattr(self.cfg, "camera_subprocess", True)):
+                from pingpong_controller.camera_process import CameraProcess
+                self.camera_process = CameraProcess(
+                    self.cfg, receiver_clock=lambda: self.get_clock().now().nanoseconds * 1e-9)
+                self.get_logger().info("Direct RealSense detection and visualization use a camera-only process")
+                return
+            self._init_direct_realsense_camera_source()
+            return
+        if source_mode != "ros_topic":
+            raise RuntimeError(f"unsupported camera source mode: {source_mode}")
+        if CameraInfo is None or CompressedImage is None or Image is None:
+            raise RuntimeError("camera ball source requires sensor_msgs CameraInfo/Image/CompressedImage")
+        self.create_subscription(
+            CameraInfo, self.cfg.camera_info_topic,
+            self._camera_info_callback, 10,
+            callback_group=self.vision_callback_group)
+        transport = str(self.cfg.camera_image_transport).strip().lower()
+        if transport in ("compressed", "auto"):
+            self.create_subscription(
+                CompressedImage, self.cfg.camera_image_topic,
+                self._compressed_image_callback, 10,
+                callback_group=self.vision_callback_group)
+        if transport in ("raw", "auto"):
+            self.create_subscription(
+                Image, self.cfg.camera_raw_image_topic,
+                self._raw_image_callback, 10,
+                callback_group=self.vision_callback_group)
+        self.get_logger().info(
+            "Camera ball source active: "
+            f"transport={transport}, compressed={self.cfg.camera_image_topic}, "
+            f"raw={self.cfg.camera_raw_image_topic}, info={self.cfg.camera_info_topic}")
+
+
+    def _load_direct_realsense_calibration(self):
+        if load_calibration is None:
+            return None
+        calibration_path = self._resolve_calibration_json_path(
+            self.cfg.calibration_json_path,
+            int(self.cfg.image_width),
+            int(self.cfg.image_height))
+        if not os.path.exists(calibration_path):
+            self.get_logger().warn(
+                f"No calibration JSON found for direct RealSense: "
+                f"{calibration_path}; output will stay in camera frame")
+            return None
+        try:
+            calibration = load_calibration(calibration_path)
+        except Exception as exc:
+            self.get_logger().warn(
+                f"Failed to load direct RealSense calibration {calibration_path}: "
+                f"{exc}; output will stay in camera frame")
+            return None
+        self.get_logger().info(
+            f"Loaded T_base_camera for direct RealSense from: {calibration_path}")
+        return calibration
+
+
+    def _init_direct_realsense_camera_source(self) -> None:
+        if not self.cfg.use_hybrid_detector:
+            raise RuntimeError(
+                "direct_realsense camera source currently requires "
+                "--use-hybrid-detector-compatible defaults; use "
+                "--camera-source-mode ros_topic for the RGB detector path")
+        if HybridBallDetectorAdapter is None:
+            raise RuntimeError(
+                f"HybridBallDetectorAdapter unavailable: {_CAMERA_BALL_IMPORT_ERROR}")
+
+        calibration = self._load_direct_realsense_calibration()
+        if calibration is not None:
+            width = int(calibration.image_width)
+            height = int(calibration.image_height)
+            output_frame = "base_link"
+        else:
+            width = int(self.cfg.image_width)
+            height = int(self.cfg.image_height)
+            output_frame = "camera"
+
+        detector = HybridBallDetectorAdapter(
+            yolo_model_path=str(self.cfg.yolo_model_path),
+            ball_diameter_mm=40.0,
+            width=width,
+            height=height,
+            fps=int(self.cfg.realsense_fps),
+            yolo_interval=int(self.cfg.yolo_interval),
+            yolo_conf=float(self.cfg.conf_threshold),
+            target_class=str(self.cfg.target_class),
+            ir_params_json=_expand_path_text(self.cfg.ir_params_json),
+            ir_threshold=int(self.cfg.ir_threshold),
+            use_adaptive=bool(self.cfg.use_adaptive_ir),
+            min_radius=int(self.cfg.ir_min_radius),
+            max_radius=int(self.cfg.ir_max_radius),
+            circularity_min=float(self.cfg.ir_circularity_min),
+            laser_power=int(self.cfg.ir_laser_power),
+            exposure=self.cfg.ir_exposure,
+            gain=self.cfg.ir_gain,
+            brightness_percentile=int(self.cfg.ir_brightness_percentile),
+            roi_margin=int(self.cfg.hybrid_roi_margin),
+            calibration_data=calibration,
+            output_frame=output_frame,
+            print_every=999999,
+            use_undistort=True,
+            depth_scale=0.001,
+            depth_correction_model_path=_expand_path_text(
+                self.cfg.depth_correction_model_path),
+            depth_neighborhood_px=int(self.cfg.depth_neighborhood_px),
+            color_match_threshold=0.0,
+            color_circularity_min=0.0,
+            use_depth_sensor=bool(self.cfg.use_depth_sensor),
+            depth_mode=self.camera_options.depth_mode,
+            sensor_surface_to_center_depth_enabled=bool(
+                self.camera_options.sensor_surface_to_center_depth_enabled),
+            use_kalman=bool(self.camera_options.pixel_kalman_enabled),
+            use_ir_depth_kalman=bool(
+                self.camera_options.ir_depth_kalman_enabled),
+            use_synchronized_depth=bool(
+                self.camera_options.synchronized_depth_enabled),
+            depth_temporal_window_frames=int(
+                self.camera_options.depth_temporal_window_frames),
+            velocity_least_squares_enabled=bool(
+                self.camera_options.velocity_least_squares_enabled),
+            velocity_window_frames=int(
+                self.camera_options.velocity_window_frames),
+            clear_buffers_on_detection_loss_enabled=bool(
+                self.camera_options.clear_buffers_on_detection_loss_enabled),
+            motion_consistency_gate_enabled=bool(
+                self.camera_options.motion_consistency_gate_enabled),
+            physics_constrained_velocity_enabled=bool(
+                self.camera_options.physics_constrained_velocity_enabled),
+            trajectory_position_smoothing_enabled=bool(
+                self.camera_options.trajectory_position_smoothing_enabled),
+            impact_velocity_reset_enabled=bool(
+                self.camera_options.impact_velocity_reset_enabled),
+            impact_min_downward_velocity_m_s=float(
+                self.camera_options.impact_min_downward_velocity_m_s),
+            impact_min_upward_velocity_m_s=float(
+                self.camera_options.impact_min_upward_velocity_m_s),
+            impact_min_velocity_jump_m_s=float(
+                self.camera_options.impact_min_velocity_jump_m_s),
+            impact_refractory_s=float(
+                self.camera_options.impact_refractory_s),
+            pixel_kalman_process_noise_pos=float(
+                self.camera_options.pixel_kalman_process_noise_pos),
+            pixel_kalman_process_noise_vel=float(
+                self.camera_options.pixel_kalman_process_noise_vel),
+            pixel_kalman_measurement_noise=float(
+                self.camera_options.pixel_kalman_measurement_noise),
+            pixel_kalman_innovation_gate_px=float(
+                self.camera_options.pixel_kalman_innovation_gate_px),
+            pixel_kalman_reset_after_outliers=int(
+                self.camera_options.pixel_kalman_reset_after_outliers),
+            candidate_filter_enabled=bool(
+                self.camera_options.candidate_filter_enabled),
+            candidate_min_brightness=float(
+                self.camera_options.candidate_min_brightness),
+            candidate_max_depth_disagreement_mm=float(
+                self.camera_options.candidate_max_depth_disagreement_mm),
+            candidate_motion_scale_px=float(
+                self.camera_options.candidate_motion_scale_px),
+        )
+        detector.detector.configure_yolo(self.camera_options.yolo_enabled)
+        # A physical base-frame reset must be corroborated by fresh robot FK.
+        # If FK is unavailable, failing closed is safer than interpreting a
+        # depth/pixel reversal as a racket collision.  Camera-frame offline
+        # tools retain trajectory-only confirmation because FK is incomparable.
+        detector.detector.impact_racket_gate_required = bool(
+            output_frame == "base_link")
+        with self.camera_lock:
+            self.camera_detector = detector
+            self.camera_detector_key = (
+                "direct_realsense", "hybrid", width, height,
+                int(self.cfg.realsense_fps), output_frame)
+            self.camera_info_payload = {
+                "width": width,
+                "height": height,
+                "source": "direct_realsense",
+            }
+            self.camera_info_received = True
+            self.camera_output_frame = output_frame
+            self.camera_active_transport = "direct_realsense/hybrid"
+            self.camera_error = None
+
+        self.camera_direct_running = True
+        self.camera_capture_thread = threading.Thread(
+            target=self._direct_realsense_capture_loop,
+            name="policy_probe_realsense_capture",
+            daemon=True,
+        )
+        self.camera_direct_thread = threading.Thread(
+            target=self._direct_hybrid_reader_loop,
+            name="policy_probe_ball_detection",
+            daemon=True,
+        )
+        self.camera_capture_thread.start()
+        self.camera_direct_thread.start()
+        self.get_logger().info(
+            "Camera ball source active: direct_realsense/hybrid "
+            f"{width}x{height}@{int(self.cfg.realsense_fps)}fps, "
+            f"depth={bool(self.cfg.use_depth_sensor)}, output={output_frame}")
+
+
+    def _resolve_calibration_json_path(
+        self,
+        requested_path: str,
+        image_width: int,
+        image_height: int,
+    ) -> str:
+        if requested_path and str(requested_path).lower() not in ("auto", ""):
+            return _expand_path_text(requested_path)
+
+        search_dirs: list[str] = []
+        for base_dir in (SOURCE_MODULE_DIR, SCRIPT_PATH.parents[1]):
+            calib_dir = os.path.join(str(base_dir), "outputs", "vision_calib")
+            if calib_dir not in search_dirs:
+                search_dirs.append(calib_dir)
+
+        candidates: list[str] = []
+        for calib_dir in search_dirs:
+            candidates.extend(glob.glob(os.path.join(
+                calib_dir, "eye_hand_result_*_undistorted.json")))
+        candidates = sorted(set(candidates))
+        for candidate in candidates:
+            try:
+                calibration = load_calibration(candidate)
+            except Exception:
+                continue
+            if (int(calibration.image_width) == int(image_width)
+                    and int(calibration.image_height) == int(image_height)):
+                self.get_logger().info(
+                    f"Auto-selected calibration for "
+                    f"{image_width}x{image_height}: {candidate}")
+                return candidate
+
+        fallback = os.path.join(
+            search_dirs[0],
+            f"eye_hand_result_{int(image_width)}_undistorted.json")
+        self.get_logger().warn(
+            f"No calibration JSON matched {image_width}x{image_height}; "
+            f"trying {fallback}")
+        return fallback
+
+
+    def _load_extrinsics_for_resolution(self, image_width: int, image_height: int):
+        calibration_path = self._resolve_calibration_json_path(
+            self.cfg.calibration_json_path,
+            int(image_width),
+            int(image_height))
+
+        if not os.path.exists(calibration_path):
+            self.get_logger().warn(
+                f"No calibration JSON found for {image_width}x{image_height}: "
+                f"{calibration_path}; output will stay in camera frame")
+            return None
+        try:
+            calibration = load_calibration(calibration_path)
+        except Exception as exc:
+            self.get_logger().warn(
+                f"Failed to load extrinsics calibration {calibration_path}: {exc}; "
+                "output will stay in camera frame")
+            return None
+        if (int(calibration.image_width) != int(image_width)
+                or int(calibration.image_height) != int(image_height)):
+            self.get_logger().warn(
+                f"Calibration JSON resolution {calibration.image_width}x"
+                f"{calibration.image_height} does not match CameraInfo "
+                f"{image_width}x{image_height}; output will stay in camera frame")
+            return None
+        self.get_logger().info(
+            f"Loaded T_base_camera for camera ball source from: {calibration_path}")
+        return calibration
+
+
+    def _camera_detector_key(
+        self,
+        info: dict[str, Any],
+        options: CameraRuntimeOptions,
+    ) -> tuple[Any, ...]:
+        return (
+            int(info["width"]),
+            int(info["height"]),
+            round(float(info["fx"]), 6),
+            round(float(info["fy"]), 6),
+            round(float(info["cx"]), 6),
+            round(float(info["cy"]), 6),
+            str(self.cfg.calibration_json_path),
+            str(self.cfg.yolo_model_path),
+            str(self.cfg.target_class),
+            round(float(self.cfg.conf_threshold), 6),
+            int(self.cfg.infer_imgsz),
+            str(self.cfg.detector_device),
+            bool(self.cfg.detector_half),
+            round(float(self.cfg.camera_tilt_deg), 6),
+            int(self.cfg.tracker_max_miss_bridge),
+            round(float(self.cfg.tracker_gate_px), 6),
+            tuple(self.cfg.hsv_lower),
+            tuple(self.cfg.hsv_upper),
+            round(float(self.cfg.color_match_threshold), 6),
+            round(float(self.cfg.color_circularity_min), 6),
+            options.detector_key(),
+        )
+
+
+    def set_camera_runtime_options(self, options: CameraRuntimeOptions) -> None:
+        if not self.cfg.enable_camera_ball:
+            return
+        if getattr(self, "camera_process", None) is not None:
+            self.camera_options = options
+            self.camera_process.set_options(options)
+            return
+        with self.camera_lock:
+            old_detector_key = self.camera_options.detector_key()
+            old_yolo_enabled = self.camera_options.yolo_enabled
+            old_ir_depth_processing_key = (
+                self.camera_options.ir_depth_processing_key())
+            old_sensor_depth_correction_key = (
+                self.camera_options.sensor_depth_correction_key())
+            old_velocity_estimation_key = (
+                self.camera_options.velocity_estimation_key())
+            old_observation_quality_key = (
+                self.camera_options.observation_quality_key())
+            old_pixel_kalman_key = self.camera_options.pixel_kalman_key()
+            old_candidate_filter_key = (
+                self.camera_options.candidate_filter_key())
+            self.camera_options = options
+            new_detector_key = options.detector_key()
+            new_ir_depth_processing_key = options.ir_depth_processing_key()
+            new_sensor_depth_correction_key = (
+                options.sensor_depth_correction_key())
+            new_velocity_estimation_key = options.velocity_estimation_key()
+            new_observation_quality_key = options.observation_quality_key()
+            new_pixel_kalman_key = options.pixel_kalman_key()
+            new_candidate_filter_key = options.candidate_filter_key()
+        if str(self.cfg.camera_source_mode).strip().lower() == "direct_realsense":
+            with self.camera_lock:
+                detector = self.camera_detector
+            core = getattr(detector, "detector", None)
+            if core is not None and hasattr(core, "set_depth_mode"):
+                core.set_depth_mode(options.depth_mode)
+            if (old_sensor_depth_correction_key
+                    != new_sensor_depth_correction_key
+                    and core is not None
+                    and hasattr(
+                        core,
+                        "configure_sensor_surface_to_center_depth")):
+                core.configure_sensor_surface_to_center_depth(
+                    enabled=(
+                        options.sensor_surface_to_center_depth_enabled))
+            if (old_yolo_enabled != options.yolo_enabled
+                    and core is not None
+                    and hasattr(core, "configure_yolo")):
+                core.configure_yolo(options.yolo_enabled)
+            if (old_ir_depth_processing_key != new_ir_depth_processing_key
+                    and core is not None
+                    and hasattr(core, "configure_ir_depth_processing")):
+                core.configure_ir_depth_processing(
+                    kalman_enabled=options.ir_depth_kalman_enabled,
+                    synchronized_depth_enabled=(
+                        options.synchronized_depth_enabled),
+                    depth_temporal_window_frames=(
+                        options.depth_temporal_window_frames),
+                )
+            if (old_velocity_estimation_key != new_velocity_estimation_key
+                    and core is not None
+                    and hasattr(core, "configure_velocity_estimation")):
+                core.configure_velocity_estimation(
+                    least_squares_enabled=(
+                        options.velocity_least_squares_enabled),
+                    window_frames=options.velocity_window_frames,
+                    impact_reset_enabled=(
+                        options.impact_velocity_reset_enabled),
+                    impact_min_downward_velocity_m_s=(
+                        options.impact_min_downward_velocity_m_s),
+                    impact_min_upward_velocity_m_s=(
+                        options.impact_min_upward_velocity_m_s),
+                    impact_min_velocity_jump_m_s=(
+                        options.impact_min_velocity_jump_m_s),
+                    impact_refractory_s=options.impact_refractory_s,
+                )
+            if (old_observation_quality_key != new_observation_quality_key
+                    and core is not None
+                    and hasattr(core, "configure_observation_quality")):
+                core.configure_observation_quality(
+                    clear_buffers_on_detection_loss_enabled=(
+                        options.clear_buffers_on_detection_loss_enabled),
+                    motion_consistency_gate_enabled=(
+                        options.motion_consistency_gate_enabled),
+                    physics_constrained_velocity_enabled=(
+                        options.physics_constrained_velocity_enabled),
+                    trajectory_position_smoothing_enabled=(
+                        options.trajectory_position_smoothing_enabled),
+                )
+            if (old_pixel_kalman_key != new_pixel_kalman_key
+                    and core is not None
+                    and hasattr(core, "configure_pixel_kalman")):
+                core.configure_pixel_kalman(
+                    enabled=options.pixel_kalman_enabled,
+                    process_noise_pos=(
+                        options.pixel_kalman_process_noise_pos),
+                    process_noise_vel=(
+                        options.pixel_kalman_process_noise_vel),
+                    measurement_noise=(
+                        options.pixel_kalman_measurement_noise),
+                    innovation_gate_px=(
+                        options.pixel_kalman_innovation_gate_px),
+                    reset_after_outliers=(
+                        options.pixel_kalman_reset_after_outliers),
+                )
+            if (old_candidate_filter_key != new_candidate_filter_key
+                    and core is not None
+                    and hasattr(core, "configure_candidate_filter")):
+                core.configure_candidate_filter(
+                    enabled=options.candidate_filter_enabled,
+                    min_brightness=options.candidate_min_brightness,
+                    max_depth_disagreement_mm=(
+                        options.candidate_max_depth_disagreement_mm),
+                    motion_scale_px=options.candidate_motion_scale_px,
+                )
+            return
+        if old_detector_key != new_detector_key:
+            self._rebuild_camera_detector("runtime option change")
+
+
+    def set_policy_viz_state(
+        self,
+        ball_pos_m: np.ndarray,
+        ball_vel_m_s: np.ndarray,
+        valid: bool,
+        racket_anchor_m: np.ndarray,
+        racket_pos_m: np.ndarray,
+        racket_state_valid: bool = True,
+        stamp_wall: float | None = None,
+        stamp_ros: float | None = None,
+    ) -> None:
+        if stamp_wall is None:
+            stamp_wall = time.time()
+            stamp_ros = self.get_clock().now().nanoseconds * 1e-9
+        elif stamp_ros is None:
+            # Explicit timestamp callers already specify the observation's
+            # clock. Preserve it; a worker must never restamp this pose.
+            stamp_ros = float(stamp_wall)
+        stamp_wall = float(stamp_wall)
+        if getattr(self, "camera_process", None) is not None:
+            self.camera_process.set_viz(
+                (ball_pos_m, ball_vel_m_s, valid, racket_anchor_m, racket_pos_m),
+                racket_state_valid, stamp_wall, stamp_ros=stamp_ros)
+            return
+        racket_position = np.asarray(
+            racket_pos_m, dtype=np.float32).reshape(3).copy()
+        with self.camera_lock:
+            self.latest_policy_viz_state = {
+                "ball_pos_m": np.asarray(ball_pos_m, dtype=np.float32).reshape(3).copy(),
+                "ball_vel_m_s": np.asarray(ball_vel_m_s, dtype=np.float32).reshape(3).copy(),
+                "valid": bool(valid),
+                "racket_anchor_m": np.asarray(racket_anchor_m, dtype=np.float32).reshape(3).copy(),
+                "racket_pos_m": racket_position,
+                "stamp_wall": stamp_wall,
+                "stamp_ros": stamp_ros,
+            }
+            detector = self.camera_detector
+            core = getattr(detector, "detector", detector)
+            if core is not None:
+                detector_racket_position = (
+                    self._sim_position_to_camera_detector_frame(
+                        racket_position))
+                if (racket_state_valid
+                        and detector_racket_position is not None
+                        and hasattr(core, "set_racket_state")):
+                    core.set_racket_state(
+                        detector_racket_position, stamp_ros)
+                elif hasattr(core, "clear_racket_state"):
+                    core.clear_racket_state()
+
+
+    def _sim_position_to_camera_detector_frame(
+        self,
+        position_m: np.ndarray,
+    ) -> np.ndarray | None:
+        """Convert one policy/sim-frame point to the detector output frame.
+
+        Camera ball positions are translated into the policy frame by
+        :meth:`_transform_ball_pos_to_sim_frame`.  Impact validation runs
+        inside the detector, before that translation, so its racket context
+        must receive the inverse transform.  Passing the policy-frame racket
+        position directly made a real 32 mm ball/racket separation appear as
+        roughly 1.27 m and caused every impact candidate to fail closed.
+
+        A camera-frame detector has no comparable robot FK without applying
+        the camera extrinsic, so return ``None`` and let the caller clear the
+        racket context instead of silently mixing coordinate systems.
+        """
+        transformed = np.asarray(
+            position_m, dtype=np.float32).reshape(3).copy()
+        output_frame = str(self.camera_output_frame or "camera")
+        if output_frame == "sim_frame":
+            return transformed
+        if output_frame != "base_link":
+            return None
+        transformed[0] -= float(self.cfg.sim_cartesian_x_offset_m)
+        transformed[1] -= float(self.cfg.sim_cartesian_y_offset_m)
+        transformed[2] -= float(self.cfg.sim_base_height_m)
+        return transformed
+
+
+    def _camera_info_callback(self, msg) -> None:
+        if PingPongBallDetector is None:
+            return
+        fx = float(msg.k[0])
+        fy = float(msg.k[4])
+        cx = float(msg.k[2])
+        cy = float(msg.k[5])
+        dist_coeffs = list(msg.d) if len(msg.d) > 0 else None
+        width = int(msg.width)
+        height = int(msg.height)
+        self.get_logger().info(
+            "CameraInfo received for interactive probe: "
+            f"{width}x{height}, fx={fx:.2f}, fy={fy:.2f}, "
+            f"cx={cx:.2f}, cy={cy:.2f}")
+        with self.camera_lock:
+            if self.camera_info_received:
+                return
+            self.camera_info_payload = {
+                "fx": fx,
+                "fy": fy,
+                "cx": cx,
+                "cy": cy,
+                "dist_coeffs": dist_coeffs,
+                "width": width,
+                "height": height,
+                "distortion_model": str(getattr(msg, "distortion_model", "")),
+            }
+            self.camera_info_received = True
+        self._rebuild_camera_detector("CameraInfo")
+
+
+    def _rebuild_camera_detector(self, reason: str) -> None:
+        if not self.cfg.enable_camera_ball or PingPongBallDetector is None:
+            return
+        with self.camera_rebuild_lock:
+            with self.camera_lock:
+                info = None if self.camera_info_payload is None else dict(self.camera_info_payload)
+                options = self.camera_options
+                current_key = self.camera_detector_key
+            if info is None:
+                return
+            new_key = self._camera_detector_key(info, options)
+            if current_key == new_key and self.camera_detector is not None:
+                return
+            try:
+                detector, output_frame = self._build_camera_detector(info, options)
+            except Exception as exc:
+                with self.camera_lock:
+                    self.camera_detector = None
+                    self.camera_detector_key = None
+                    self.camera_output_frame = None
+                    self.camera_error = str(exc)
+                self.get_logger().error(f"Failed to initialize camera detector: {exc}")
+                raise
+            with self.camera_lock:
+                self.camera_detector = detector
+                self.camera_detector_key = new_key
+                self.camera_output_frame = output_frame
+                self.camera_error = None
+            self.get_logger().info(
+                f"Camera ball detector initialized ({reason}, output: {output_frame}, "
+                f"options={options.payload()})")
+
+
+    def _build_camera_detector(
+        self,
+        info: dict[str, Any],
+        options: CameraRuntimeOptions,
+    ):
+        width = int(info["width"])
+        height = int(info["height"])
+        extrinsics_calibration = self._load_extrinsics_for_resolution(width, height)
+        output_frame = "base_link" if extrinsics_calibration is not None else "camera"
+        color_match_threshold = (
+            self.cfg.color_match_threshold
+            if options.enable_color_filter else 0.0)
+        color_circularity_min = (
+            self.cfg.color_circularity_min
+            if options.enable_color_filter else 0.0)
+        detector = PingPongBallDetector(
+            yolo_model_path=str(self.cfg.yolo_model_path),
+            ball_diameter_mm=40.0,
+            width=width,
+            height=height,
+            fps=60,
+            conf_threshold=self.cfg.conf_threshold,
+            target_class=self.cfg.target_class,
+            camera_tilt_deg=self.cfg.camera_tilt_deg,
+            use_kalman=options.use_kalman,
+            infer_imgsz=self.cfg.infer_imgsz,
+            device=self.cfg.detector_device,
+            half=self.cfg.detector_half,
+            use_undistort=options.use_undistort,
+            print_every=999999,
+            profile_every=0,
+            use_camera=False,
+            camera_fx=float(info["fx"]),
+            camera_fy=float(info["fy"]),
+            camera_cx=float(info["cx"]),
+            camera_cy=float(info["cy"]),
+            camera_dist_coeffs=info.get("dist_coeffs"),
+            output_frame=output_frame,
+            enable_ellipse_fit=options.enable_ellipse_fit,
+            enable_temporal_tracker=options.enable_temporal_tracker,
+            tracker_max_miss_bridge=self.cfg.tracker_max_miss_bridge,
+            tracker_gate_px=self.cfg.tracker_gate_px,
+            hsv_lower=list(self.cfg.hsv_lower),
+            hsv_upper=list(self.cfg.hsv_upper),
+            color_match_threshold=color_match_threshold,
+            color_circularity_min=color_circularity_min,
+        )
+        if extrinsics_calibration is not None:
+            detector.calibration_data = extrinsics_calibration
+            detector.T_base_camera = extrinsics_calibration.T_base_camera
+            detector.R_base_camera = detector.T_base_camera[:3, :3]
+            detector.output_frame = "base_link"
+            output_frame = "base_link"
+        return detector, output_frame
+
+
+    def _should_process_transport(self, transport: str) -> bool:
+        now = time.time()
+        with self.camera_lock:
+            self.camera_last_image_wall_by_transport[transport] = now
+            active = self.camera_active_transport
+            if active is None:
+                self.camera_active_transport = transport
+                return True
+            if active == transport:
+                return True
+            active_age = now - self.camera_last_image_wall_by_transport.get(active, 0.0)
+            if active_age > 1.0:
+                self.camera_active_transport = transport
+                return True
+            return False
+
+
+    def _compressed_image_callback(self, msg) -> None:
+        if not self._should_process_transport("compressed"):
+            return
+        try:
+            np_arr = np.frombuffer(msg.data, np.uint8)
+            image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if image is None:
+                self.get_logger().warn(
+                    "Failed to decode compressed camera image",
+                    throttle_duration_sec=1.0)
+                return
+            stamp_sec, clock_info = self._align_camera_stamp(
+                _stamp_to_sec(msg.header.stamp), 'ros_header')
+            if stamp_sec is None:
+                return
+            self._prepare_camera_clock_epoch(clock_info)
+            self._handle_cv_image(image, stamp_sec, clock_info=clock_info)
+        except Exception as exc:
+            with self.camera_lock:
+                self.camera_error = str(exc)
+            self.get_logger().error(
+                f"Error in compressed camera image callback: {exc}",
+                throttle_duration_sec=1.0)
+
+
+    def _raw_image_callback(self, msg) -> None:
+        if not self._should_process_transport("raw"):
+            return
+        try:
+            image = self._decode_raw_image_msg(msg)
+            stamp_sec, clock_info = self._align_camera_stamp(
+                _stamp_to_sec(msg.header.stamp), 'ros_header')
+            if stamp_sec is None:
+                return
+            self._prepare_camera_clock_epoch(clock_info)
+            self._handle_cv_image(image, stamp_sec, clock_info=clock_info)
+        except Exception as exc:
+            with self.camera_lock:
+                self.camera_error = str(exc)
+            self.get_logger().error(
+                f"Error in raw camera image callback: {exc}",
+                throttle_duration_sec=1.0)
+
+
+    def _decode_raw_image_msg(self, msg) -> np.ndarray:
+        height = int(msg.height)
+        width = int(msg.width)
+        encoding = str(msg.encoding).lower()
+        if height <= 0 or width <= 0:
+            raise ValueError(f"invalid raw image size {width}x{height}")
+        channels_by_encoding = {
+            "bgr8": 3,
+            "rgb8": 3,
+            "bgra8": 4,
+            "rgba8": 4,
+            "mono8": 1,
+            "8uc1": 1,
+            "8uc3": 3,
+            "8uc4": 4,
+        }
+        channels = channels_by_encoding.get(encoding)
+        if channels is None:
+            raise ValueError(f"unsupported raw image encoding: {msg.encoding}")
+        raw = np.frombuffer(msg.data, dtype=np.uint8)
+        step = int(msg.step)
+        min_step = width * channels
+        if step < min_step:
+            raise ValueError(
+                f"invalid raw image step {step} for {width}x{height} {encoding}")
+        rows = raw.reshape((height, step))[:, :min_step]
+        if channels == 1:
+            image = rows.reshape((height, width))
+            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+        image = rows.reshape((height, width, channels))
+        if encoding in ("rgb8", "8uc3"):
+            return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+        if encoding == "rgba8":
+            return cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+        if encoding == "bgra8":
+            return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+        return image.copy()
+
+
+    def resynchronize_camera_clock(self) -> None:
+        if getattr(self, 'camera_process', None) is not None:
+            self.camera_process.resynchronize()
+            return
+        with self.camera_clock_lock:
+            self.camera_clock.reset('source_selected')
+            info = self.camera_clock.diagnostics()
+        with self.camera_lock:
+            self.latest_camera_valid = False
+            self.latest_camera_clock_sync = info
+        with self.camera_frame_slot_lock:
+            self.camera_frame_pending = None
+
+    def _align_camera_stamp(self, source_s, domain, frame_idx=None):
+        receipt = time.monotonic()
+        receiver_s = self.get_clock().now().nanoseconds * 1e-9
+        with self.camera_clock_lock:
+            mapped, info = self.camera_clock.update(
+                source_s, receiver_s, receipt, domain=domain, frame_idx=frame_idx,
+                system_s=time.time())
+        if mapped is None:
+            with self.camera_lock:
+                self.latest_camera_valid = False
+                self.latest_camera_clock_sync = info
+        return mapped, info
+
+    def _prepare_camera_clock_epoch(self, info):
+        key = (info['generation'], info['epoch'])
+        if key == self.camera_detector_clock_epoch:
+            return
+        core = getattr(self.camera_detector, 'detector', None)
+        if core is not None and hasattr(core, '_clear_observation_buffers'):
+            core._clear_observation_buffers()
+            core._reset_velocity_tracking_state()
+            core.last_observation_time = None
+            core.last_yolo_time = 0.
+            core.motion_last_trusted_time = None
+            core.motion_last_trusted_position = None
+            core.motion_last_trusted_velocity = None
+            core.motion_reacquisition_candidates.clear()
+            core.motion_reacquisition_seed = None
+        self.camera_detector_clock_epoch = key
+
+    def _camera_clock_sample_valid(self, info):
+        return sample_clock_valid(info, self.get_clock().now().nanoseconds * 1e-9)
+
+    def _direct_realsense_capture_loop(self) -> None:
+        """Continuously acquire frames, replacing stale unprocessed frames."""
+        self.get_logger().info("Direct RealSense capture loop: entering")
+        with self.camera_lock:
+            detector = self.camera_detector
+        pipeline = getattr(getattr(detector, "detector", None), "pipeline", None)
+        if pipeline is None:
+            with self.camera_lock:
+                self.camera_error = "direct RealSense hybrid pipeline is unavailable"
+            return
+
+        while self.camera_direct_running:
+            try:
+                frames = pipeline.wait_for_frames(timeout_ms=1000)
+                ir = frames.get_infrared_frame(1)
+                if not ir:
+                    continue
+                stamp_sec, clock_info = self._align_camera_stamp(
+                    float(ir.get_timestamp()) * 1e-3,
+                    'realsense/' + str(ir.get_frame_timestamp_domain()),
+                    frame_idx=int(ir.get_frame_number()))
+                if stamp_sec is None:
+                    continue
+                with self.camera_frame_slot_lock:
+                    if self.camera_frame_pending is not None:
+                        self.camera_frames_replaced += 1
+                    self.camera_frame_pending = (frames, stamp_sec, clock_info)
+                    self.camera_frames_acquired += 1
+                self.camera_frame_event.set()
+            except RuntimeError as exc:
+                if not self.camera_direct_running:
+                    break
+                with self.camera_lock:
+                    self.camera_error = f"wait_for_frames timeout: {exc}"
+                self.get_logger().warn(
+                    f"wait_for_frames timeout: {exc}",
+                    throttle_duration_sec=1.0)
+            except Exception as exc:  # noqa: BLE001 - keep capture alive.
+                if not self.camera_direct_running:
+                    break
+                with self.camera_lock:
+                    self.camera_error = str(exc)
+                self.get_logger().error(
+                    f"Direct RealSense capture error: {exc}",
+                    throttle_duration_sec=1.0)
+                time.sleep(0.05)
+        self.get_logger().info("Direct RealSense capture loop: exited")
+
+
+    def _direct_hybrid_reader_loop(self) -> None:
+        """Process the newest captured frame without blocking acquisition."""
+        self.get_logger().info("Direct RealSense detection loop: entering")
+        while self.camera_direct_running:
+            if not self.camera_frame_event.wait(timeout=0.5):
+                continue
+            self.camera_frame_event.clear()
+            with self.camera_frame_slot_lock:
+                pending = self.camera_frame_pending
+                self.camera_frame_pending = None
+            if pending is None:
+                continue
+            frames, stamp_sec, clock_info = pending
+
+            try:
+                detection_started = time.perf_counter()
+                ir_frame = frames.get_infrared_frame(1)
+                if not ir_frame:
+                    continue
+                ir_image = np.asanyarray(ir_frame.get_data())
+                self._prepare_camera_clock_epoch(clock_info)
+
+                with self.camera_lock:
+                    options = self.camera_options
+                    detector = self.camera_detector
+                    self.camera_last_image_wall_by_transport[
+                        "direct_realsense"] = time.time()
+                    self.camera_active_transport = "direct_realsense/hybrid"
+
+                core = getattr(detector, "detector", None)
+                if core is not None and hasattr(
+                        core, "color_image_for_frames"):
+                    rgb_image = core.color_image_for_frames(
+                        frames, ir_image)
+                else:
+                    rgb_image = cv2.cvtColor(
+                        ir_image, cv2.COLOR_GRAY2BGR)
+
+                if not options.detect:
+                    observation = {
+                        "detected": False,
+                        "position": [0, 0, 0],
+                        "velocity": [0, 0, 0],
+                        "raw_measurement": {"detection_disabled": True},
+                    }
+                elif detector is None:
+                    observation = {
+                        "detected": False,
+                        "position": [0, 0, 0],
+                        "velocity": [0, 0, 0],
+                        "raw_measurement": {"no_detector": True},
+                    }
+                elif not options.use_depth_sensor:
+                    if ir_image is None:
+                        observation = {
+                            "detected": False,
+                            "position": [0, 0, 0],
+                            "velocity": [0, 0, 0],
+                            "raw_measurement": {"missing_ir_frame": True},
+                        }
+                    else:
+                        observation = detector.detector.get_observation_offline(
+                            rgb_image, ir_image, None, stamp_sec)
+                else:
+                    observation = detector.detector.get_observation(
+                        observation_time=stamp_sec,
+                        frames=frames,
+                    )
+                    if observation is None:
+                        observation = {
+                            "detected": False,
+                            "position": [0, 0, 0],
+                            "velocity": [0, 0, 0],
+                            "raw_measurement": {"no_observation": True},
+                        }
+
+                raw_measurement = observation.get("raw_measurement")
+                if isinstance(raw_measurement, dict):
+                    raw_measurement["processing_ms"] = round(
+                        (time.perf_counter() - detection_started) * 1000.0,
+                        3)
+                    raw_measurement["capture_to_result_ms"] = round(
+                        max(0.0, self.get_clock().now().nanoseconds * 1e-9 - float(stamp_sec)) * 1000.0,
+                        3)
+
+                observation['_captureClockSync'] = clock_info
+                self._handle_direct_hybrid_observation(
+                    rgb_image, ir_image, observation, stamp_sec)
+            except Exception as exc:  # noqa: BLE001 - keep reader alive.
+                with self.camera_lock:
+                    self.camera_error = str(exc)
+                self.get_logger().error(
+                    f"Direct RealSense hybrid reader error: {exc}",
+                    throttle_duration_sec=1.0)
+                time.sleep(0.01)
+        self.get_logger().info("Direct RealSense detection loop: exited")
+
+
+    def _handle_direct_hybrid_observation(
+        self,
+        image: np.ndarray,
+        ir_image: np.ndarray | None,
+        observation: dict[str, Any],
+        stamp_sec: float,
+    ) -> None:
+        now_wall = time.time()
+        with self.camera_lock:
+            if self.camera_last_callback_wall is not None:
+                dt = now_wall - self.camera_last_callback_wall
+                if dt > 0.0:
+                    self.camera_callback_times.append(dt)
+            self.camera_last_callback_wall = now_wall
+            self.camera_frame_count += 1
+            if bool(observation.get("detected", False)) and not bool(
+                    observation.get("predicted", False)):
+                self.camera_detection_count += 1
+            options = self.camera_options
+            detector = self.camera_detector
+
+        self._store_camera_observation(observation, stamp_sec)
+        if not options.visualize:
+            return
+        # Rendering, overlays and JPEG encoding belong exclusively to the
+        # visualization worker.  The detector thread only publishes its raw
+        # frame/result snapshot and immediately returns to the next frame.
+        self._enqueue_camera_visualization(
+            image, observation, ir_image=ir_image,
+            hybrid=bool(ir_image is not None and detector is not None))
+
+
+    def _handle_cv_image(self, image: np.ndarray, stamp_sec: float, *, clock_info=None) -> None:
+        now_wall = time.time()
+        with self.camera_lock:
+            if self.camera_last_callback_wall is not None:
+                dt = now_wall - self.camera_last_callback_wall
+                if dt > 0.0:
+                    self.camera_callback_times.append(dt)
+            self.camera_last_callback_wall = now_wall
+            options = self.camera_options
+            detector = self.camera_detector
+            detector_ready = bool(self.camera_info_received and detector is not None)
+
+        if not options.detect:
+            observation = {
+                "detected": False,
+                "raw_measurement": {"detection_disabled": True},
+            }
+        elif not detector_ready:
+            observation = {
+                "detected": False,
+                "raw_measurement": {"waiting_for_camera_info": not self.camera_info_received},
+            }
+        else:
+            observation = detector.get_observation(
+                image, observation_time=stamp_sec)
+
+        detected = bool(observation.get("detected", False))
+        is_predicted = bool(observation.get("predicted", False))
+        with self.camera_lock:
+            self.camera_frame_count += 1
+            if detected and not is_predicted:
+                self.camera_detection_count += 1
+
+        if clock_info is not None:
+            observation['_captureClockSync'] = clock_info
+        self._store_camera_observation(observation, stamp_sec)
+        if options.visualize:
+            self._enqueue_camera_visualization(image, observation)
+
+
+    def _transform_ball_pos_to_sim_frame(self, ball_pos_m: np.ndarray) -> np.ndarray:
+        transformed = np.asarray(ball_pos_m, dtype=np.float32).reshape(3).copy()
+        transformed[0] += float(self.cfg.sim_cartesian_x_offset_m)
+        transformed[1] += float(self.cfg.sim_cartesian_y_offset_m)
+        transformed[2] += float(self.cfg.sim_base_height_m)
+        return transformed
+
+
+    def _store_camera_observation(self, observation: dict[str, Any], stamp_sec: float) -> None:
+        now_wall = time.time()
+        detected = bool(observation.get("detected", False))
+        pos_m = None
+        vel_m_s = None
+        detector_pos_m = None
+        detector_vel_m_s = None
+        with self.camera_lock:
+            detector_frame = self.camera_output_frame or "camera"
+        if detected:
+            try:
+                detector_pos_m = np.asarray(
+                    observation.get("position", [0.0, 0.0, 0.0]),
+                    dtype=np.float32).reshape(3) * 1e-3
+                detector_vel_m_s = np.asarray(
+                    observation.get("velocity", [0.0, 0.0, 0.0]),
+                    dtype=np.float32).reshape(3) * 1e-3
+                if detector_frame == "sim_frame":
+                    pos_m = detector_pos_m.astype(np.float32)
+                else:
+                    pos_m = self._transform_ball_pos_to_sim_frame(detector_pos_m)
+                vel_m_s = detector_vel_m_s.astype(np.float32)
+                if not (np.all(np.isfinite(detector_pos_m))
+                        and np.all(np.isfinite(detector_vel_m_s))
+                        and np.all(np.isfinite(pos_m))
+                        and np.all(np.isfinite(vel_m_s))):
+                    detected = False
+                    pos_m = None
+                    vel_m_s = None
+                    detector_pos_m = None
+                    detector_vel_m_s = None
+            except Exception:
+                detected = False
+                pos_m = None
+                vel_m_s = None
+                detector_pos_m = None
+                detector_vel_m_s = None
+        with self.camera_lock:
+            clock_info = observation.get('_captureClockSync')
+            if clock_info is not None:
+                # A result that was processing during a reset cannot cross
+                # the new source/clock epoch and become a fresh observation.
+                with self.camera_clock_lock:
+                    current = self.camera_clock.diagnostics()
+                if ((clock_info['generation'], clock_info['epoch'])
+                        != (current['generation'], current['epoch'])
+                        or not current['ready']):
+                    return
+                self.latest_camera_clock_sync = dict(clock_info)
+            self.latest_camera_ball_pos_m = pos_m
+            self.latest_camera_ball_vel_m_s = vel_m_s
+            self.latest_camera_detector_pos_m = detector_pos_m
+            self.latest_camera_detector_vel_m_s = detector_vel_m_s
+            self.latest_camera_detector_frame = detector_frame
+            self.latest_camera_valid = bool(detected)
+            self.latest_camera_stamp_sec = float(stamp_sec)
+            self.latest_camera_wall = now_wall
+            self.latest_camera_raw_measurement = observation.get("raw_measurement")
+            self.camera_error = None
+
+
+    def _viz_done_thresholds(self) -> dict[str, float]:
+        return {
+            "ball_z_floor": float(self.cfg.done_z_min_m),
+            "ball_z_ceiling": float(self.cfg.done_z_max_m),
+            "ball_x_range": float(self.cfg.done_x_range_m),
+            "ball_y_range": float(self.cfg.done_y_range_m),
+            "racket_anchor_distance": float(self.cfg.done_racket_anchor_distance_m),
+            "racket_z_high_offset": float(self.cfg.done_racket_z_high_offset_m),
+            "racket_z_low_offset": float(self.cfg.done_racket_z_low_offset_m),
+        }
+
+
+    def _compute_viz_sim_ball_state(self, observation: dict[str, Any]):
+        with self.camera_lock:
+            state = dict(self.latest_policy_viz_state)
+        if state:
+            return (
+                np.asarray(state["ball_pos_m"], dtype=np.float64).reshape(3),
+                np.asarray(state["ball_vel_m_s"], dtype=np.float64).reshape(3),
+                bool(state.get("valid", False)),
+                "[SIM control state]",
+            )
+        if not bool(observation.get("detected", False)):
+            return None, None, False, "[SIM raw frame]"
+        pos = observation.get("position")
+        if pos is None:
+            return None, None, False, "[SIM raw frame]"
+        vel = observation.get("velocity")
+        if vel is None:
+            vel = [0.0, 0.0, 0.0]
+        try:
+            pos_m = np.asarray(pos, dtype=np.float64).reshape(3) * 1e-3
+            vel_m_s = np.asarray(vel, dtype=np.float64).reshape(3) * 1e-3
+        except (TypeError, ValueError):
+            return None, None, False, "[SIM raw frame]"
+        return self._transform_ball_pos_to_sim_frame(pos_m), vel_m_s, True, "[SIM raw frame]"
+
+
+    def _normalize_camera_observation_for_overlay(
+        self,
+        observation: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Map hybrid detector fields onto the lightweight web overlay schema."""
+        obs = dict(observation or {})
+        raw_in = obs.get("raw_measurement")
+        raw = dict(raw_in) if isinstance(raw_in, dict) else {}
+        if raw:
+            if raw.get("image_x") is None or raw.get("image_y") is None:
+                px = raw.get("cx_rgb")
+                py = raw.get("cy_rgb")
+                if px is None or py is None:
+                    px = raw.get("cx")
+                    py = raw.get("cy")
+                if px is not None and py is not None:
+                    raw["image_x"] = px
+                    raw["image_y"] = py
+            if raw.get("radius_px") is None and raw.get("radius") is not None:
+                raw["radius_px"] = raw.get("radius")
+            if raw.get("color_bbox") is None and raw.get("yolo_bbox") is not None:
+                try:
+                    x1, y1, x2, y2 = raw.get("yolo_bbox")
+                    raw["color_bbox"] = [x1, y1, x2 - x1, y2 - y1]
+                except Exception:
+                    pass
+            raw.setdefault("detection_method", raw.get("pixel_source", "hybrid"))
+            obs["raw_measurement"] = raw
+        return obs
+
+
+    def _render_visualization_frame(
+        self,
+        frame: np.ndarray,
+        observation: dict[str, Any],
+    ) -> np.ndarray:
+        observation = self._normalize_camera_observation_for_overlay(observation)
+        sim_ball_pos_m, sim_ball_vel_m_s, sim_detected, sim_label = (
+            self._compute_viz_sim_ball_state(observation))
+        with self.camera_lock:
+            frame_count = int(self.camera_frame_count)
+            detection_count = int(self.camera_detection_count)
+            callback_times = list(self.camera_callback_times)
+            output_frame = self.camera_output_frame or "camera"
+            state = dict(self.latest_policy_viz_state)
+        if callback_times:
+            avg_dt = sum(callback_times) / len(callback_times)
+            callback_hz = 1.0 / avg_dt if avg_dt > 0 else 0.0
+        else:
+            callback_hz = 0.0
+        racket_anchor_m = state.get("racket_anchor_m")
+        racket_pos_m = state.get("racket_pos_m")
+        if observation.get("_hybrid_viz_rendered", False):
+            if (draw_sim_done_overlay is not None
+                    and sim_ball_pos_m is not None
+                    and sim_ball_vel_m_s is not None):
+                draw_sim_done_overlay(
+                    frame,
+                    sim_ball_pos_m,
+                    sim_ball_vel_m_s,
+                    racket_anchor_m,
+                    racket_pos_m=racket_pos_m,
+                    thresholds=self._viz_done_thresholds(),
+                    detected=sim_detected,
+                    label=sim_label,
+                )
+            return frame
+        if render_detection_overlay is None:
+            return frame
+        return render_detection_overlay(
+            frame,
+            observation,
+            frame_count=frame_count,
+            detection_count=detection_count,
+            callback_hz=callback_hz,
+            output_frame=output_frame,
+            sim_ball_pos_m=sim_ball_pos_m,
+            sim_ball_vel_m_s=sim_ball_vel_m_s,
+            racket_anchor_m=racket_anchor_m,
+            racket_pos_m=racket_pos_m,
+            done_thresholds=self._viz_done_thresholds(),
+            sim_detected=sim_detected,
+            sim_label=sim_label,
+        )
+
+
+    def _start_camera_visualization_worker(self) -> None:
+        if self.camera_viz_thread is not None and self.camera_viz_thread.is_alive():
+            return
+        self.camera_viz_running = True
+        self.camera_viz_thread = threading.Thread(
+            target=self._camera_visualization_worker_loop,
+            name="policy_probe_camera_viz",
+            daemon=True,
+        )
+        self.camera_viz_thread.start()
+
+
+    def _enqueue_camera_visualization(
+        self,
+        image: np.ndarray,
+        observation: dict[str, Any],
+        ir_image: np.ndarray | None = None,
+        hybrid: bool = False,
+    ) -> None:
+        if cv2 is None or image is None or image.size == 0:
+            return
+        self._start_camera_visualization_worker()
+        now = time.time()
+        with self.camera_viz_slot_lock:
+            if self.camera_viz_pending is not None:
+                return
+            # At the camera's native rate, every acquired frame is already
+            # rate-limited by the device.  A second 60 Hz clock comparison is
+            # sensitive to sub-millisecond scheduling jitter and periodically
+            # rejects good frames.  Keep the gate only for intentional
+            # downsampling; the one-slot worker queue still provides bounded
+            # backpressure if JPEG/overlay rendering is slower than capture.
+            needs_downsample = (
+                float(self.cfg.camera_visualization_rate_hz) + 1e-6
+                < float(self.cfg.realsense_fps))
+            min_period = max(0.0, self.camera_viz_min_period_s - 0.001)
+            if (needs_downsample
+                    and now - self.camera_viz_last_enqueue_wall < min_period):
+                return
+        frame_copy = image.copy()
+        ir_copy = None if ir_image is None else ir_image.copy()
+        obs_copy = dict(observation)
+        raw = obs_copy.get("raw_measurement")
+        if isinstance(raw, dict):
+            obs_copy["raw_measurement"] = dict(raw)
+        with self.camera_viz_slot_lock:
+            if self.camera_viz_pending is not None:
+                return
+            self.camera_viz_pending = (frame_copy, ir_copy, obs_copy, bool(hybrid))
+            self.camera_viz_last_enqueue_wall = now
+        self.camera_viz_event.set()
+
+
+    def _camera_visualization_worker_loop(self) -> None:
+        while self.camera_viz_running:
+            if not self.camera_viz_event.wait(timeout=0.5):
+                continue
+            self.camera_viz_event.clear()
+            with self.camera_viz_slot_lock:
+                pending = self.camera_viz_pending
+                self.camera_viz_pending = None
+            if pending is None:
+                continue
+            image, ir_image, observation, hybrid = pending
+            with self.camera_lock:
+                options = self.camera_options
+                detector = self.camera_detector
+            if not options.visualize:
+                continue
+
+            if hybrid and ir_image is not None and detector is not None:
+                try:
+                    viz_image = detector.detector._render_visualization(
+                        image, ir_image, observation)
+                    if viz_image is not None:
+                        hybrid_obs_for_viz = dict(observation)
+                        raw = hybrid_obs_for_viz.get("raw_measurement")
+                        if isinstance(raw, dict):
+                            hybrid_obs_for_viz["raw_measurement"] = dict(raw)
+                        hybrid_obs_for_viz["_hybrid_viz_rendered"] = True
+                        self._store_camera_visualization(
+                            viz_image, hybrid_obs_for_viz)
+                        continue
+                except Exception as exc:  # noqa: BLE001 - fallback below.
+                    with self.camera_lock:
+                        self.camera_error = f"hybrid visualization failed: {exc}"
+
+            self._store_camera_visualization(image, observation)
+
+
+    def _store_camera_visualization(
+        self,
+        image: np.ndarray,
+        observation: dict[str, Any],
+    ) -> None:
+        if cv2 is None:
+            return
+        overlay = image
+        try:
+            overlay = self._render_visualization_frame(image, observation)
+        except Exception as exc:  # noqa: BLE001 - viz must not stop the stream.
+            with self.camera_lock:
+                self.camera_error = f"visualization overlay failed: {exc}"
+            overlay = image
+        try:
+            max_width = int(self.cfg.camera_web_max_width)
+            if max_width > 0 and overlay.shape[1] > max_width:
+                scale = float(max_width) / float(overlay.shape[1])
+                overlay = cv2.resize(
+                    overlay,
+                    (max_width, max(1, int(round(overlay.shape[0] * scale)))),
+                    interpolation=cv2.INTER_AREA,
+                )
+            quality = int(min(95, max(25, self.cfg.camera_web_jpeg_quality)))
+            ok, encoded = cv2.imencode(
+                ".jpg", overlay, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            if not ok:
+                return
+            with self.camera_lock:
+                self.latest_viz_jpeg = encoded.tobytes()
+                self.latest_viz_seq += 1
+                self.latest_viz_wall = time.time()
+                self.latest_viz_monotonic_s = time.perf_counter()
+        except Exception as exc:  # noqa: BLE001 - viz must not affect control.
+            with self.camera_lock:
+                self.camera_error = f"visualization encode failed: {exc}"
+
+
+    def latest_camera_visualization(self) -> tuple[bytes | None, dict[str, Any]]:
+        if getattr(self, "camera_process", None) is not None:
+            return self.camera_process.visualization()
+        now = time.time()
+        with self.camera_lock:
+            age = (
+                None if self.latest_viz_wall is None
+                else max(0.0, now - self.latest_viz_wall))
+            info = {
+                "seq": int(self.latest_viz_seq),
+                "ageS": None if age is None else round(float(age), 6),
+                "wallTimeS": (
+                    None if self.latest_viz_wall is None
+                    else round(float(self.latest_viz_wall), 6)),
+                "monotonicTimeS": (
+                    None if self.latest_viz_monotonic_s is None
+                    else round(float(self.latest_viz_monotonic_s), 6)),
+                "enabled": bool(self.camera_options.visualize),
+            }
+            frame = self.latest_viz_jpeg
+        return frame, info
+
+
+    def camera_frame_rotation(self) -> np.ndarray | None:
+        """Return R_base_camera for camera-frame covariance rotation."""
+        if getattr(self, "camera_process", None) is not None:
+            return self.camera_process.rotation()
+        with self.camera_lock:
+            detector = self.camera_detector
+            output_frame = self.camera_output_frame
+        if detector is None or output_frame not in ("base_link", "sim_frame"):
+            return None
+        rotation = getattr(detector, "R_base_camera", None)
+        if rotation is None:
+            transform = getattr(detector, "T_base_camera", None)
+            if transform is not None:
+                T = np.asarray(transform, dtype=np.float64)
+                if T.shape == (4, 4) and np.all(np.isfinite(T)):
+                    rotation = T[:3, :3]
+        if rotation is None:
+            return None
+        R = np.asarray(rotation, dtype=np.float64)
+        if R.shape != (3, 3) or not np.all(np.isfinite(R)):
+            return None
+        return R.copy()
+
+
+    def camera_ball_state(self) -> tuple[np.ndarray, np.ndarray, bool, dict[str, Any]]:
+        if getattr(self, "camera_process", None) is not None:
+            return self.camera_process.state()
+        now = time.time()
+        with self.camera_lock:
+            pos = (
+                None if self.latest_camera_ball_pos_m is None
+                else self.latest_camera_ball_pos_m.copy())
+            vel = (
+                None if self.latest_camera_ball_vel_m_s is None
+                else self.latest_camera_ball_vel_m_s.copy())
+            detector_pos = (
+                None if self.latest_camera_detector_pos_m is None
+                else self.latest_camera_detector_pos_m.copy())
+            detector_vel = (
+                None if self.latest_camera_detector_vel_m_s is None
+                else self.latest_camera_detector_vel_m_s.copy())
+            age = (
+                None if self.latest_camera_wall is None
+                else max(0.0, now - self.latest_camera_wall))
+            viz_age = (
+                None if self.latest_viz_wall is None
+                else max(0.0, now - self.latest_viz_wall))
+            image_ages = {
+                key: round(float(max(0.0, now - wall)), 6)
+                for key, wall in self.camera_last_image_wall_by_transport.items()
+            }
+            raw_measurement = self.latest_camera_raw_measurement
+            measurement = dict(_camera_measurement_payload(raw_measurement) or {},
+                               clockSync=dict(self.latest_camera_clock_sync))
+            detector_core = getattr(
+                self.camera_detector, "detector", None)
+            rgb_fps_values = getattr(
+                detector_core, "color_fps_queue", ())
+            rgb_fps = (
+                float(np.mean(list(rgb_fps_values)))
+                if rgb_fps_values else 0.0)
+            feedback = {
+                "enabled": bool(self.cfg.enable_camera_ball),
+                "available": bool(_CAMERA_BALL_AVAILABLE),
+                "ready": bool(self.camera_info_received and self.camera_detector is not None),
+                "sourceMode": self.cfg.camera_source_mode,
+                "useHybridDetector": bool(self.cfg.use_hybrid_detector),
+                "useDepthSensor": bool(self.cfg.use_depth_sensor),
+                "imageWidth": int(self.cfg.image_width),
+                "imageHeight": int(self.cfg.image_height),
+                "realsenseFps": int(self.cfg.realsense_fps),
+                "cameraInfoReceived": bool(self.camera_info_received),
+                "detectorReady": bool(self.camera_detector is not None),
+                "clockSync": dict(self.latest_camera_clock_sync),
+                "sourceTimestampS": self.latest_camera_clock_sync.get('sourceTimestampS'),
+                "measurementTimestampS": self.latest_camera_stamp_sec,
+                "measurementAgeS": (None if self.latest_camera_stamp_sec is None else
+                    self.get_clock().now().nanoseconds * 1e-9 - self.latest_camera_stamp_sec),
+                "detected": bool(self.latest_camera_valid),
+                "stampS": (
+                    None if self.latest_camera_stamp_sec is None
+                    # Preserve the source timestamp exactly.  Rounding here
+                    # made the same camera frame look a few tenths of a
+                    # microsecond newer than the raw measurement path, so the
+                    # trajectory predictor counted it twice.
+                    else float(self.latest_camera_stamp_sec)
+                ),
+                "ageS": None if age is None else round(float(age), 6),
+                "frame": self.camera_output_frame,
+                "detectorFrame": self.latest_camera_detector_frame,
+                "controlFrame": "sim_frame",
+                "detectorBall": (
+                    None if detector_pos is None
+                    else [round(float(v), 6) for v in detector_pos]),
+                "detectorVelocity": (
+                    None if detector_vel is None
+                    else [round(float(v), 6) for v in detector_vel]),
+                "controlBall": (
+                    None if pos is None
+                    else [round(float(v), 6) for v in pos]),
+                "controlVelocity": (
+                    None if vel is None
+                    else [round(float(v), 6) for v in vel]),
+                "measurement": measurement,
+                "imageTopic": self.cfg.camera_image_topic,
+                "rawImageTopic": self.cfg.camera_raw_image_topic,
+                "imageTransport": self.cfg.camera_image_transport,
+                "activeTransport": self.camera_active_transport,
+                "imageAgesS": image_ages,
+                "cameraInfoTopic": self.cfg.camera_info_topic,
+                "frameCount": int(self.camera_frame_count),
+                "detectionCount": int(self.camera_detection_count),
+                "captureCount": int(self.camera_frames_acquired),
+                "captureReplacedCount": int(self.camera_frames_replaced),
+                "rgbFrameCount": int(getattr(
+                    detector_core, "color_frame_count", 0)),
+                "rgbFps": round(rgb_fps, 3),
+                "callbackHz": (
+                    round(float(1.0 / (sum(self.camera_callback_times) / len(self.camera_callback_times))), 3)
+                    if len(self.camera_callback_times) > 0
+                    and sum(self.camera_callback_times) > 0.0 else 0.0
+                ),
+                "visualizationRateHz": round(
+                    float(self.cfg.camera_visualization_rate_hz), 3),
+                "webMaxWidth": int(self.cfg.camera_web_max_width),
+                "webJpegQuality": int(self.cfg.camera_web_jpeg_quality),
+                "visualizationSeq": int(self.latest_viz_seq),
+                "visualizationAgeS": None if viz_age is None else round(float(viz_age), 6),
+                "runtime": self.camera_options.payload(),
+                "error": self.camera_error,
+            }
+            valid = bool(self.latest_camera_valid and pos is not None and vel is not None
+                         and self._camera_clock_sample_valid(self.latest_camera_clock_sync))
+            feedback['ready'] = bool(feedback['ready'] and self.latest_camera_clock_sync.get('ready'))
+            feedback['detected'] = valid
+        if not valid:
+            return (
+                np.zeros(3, dtype=np.float32),
+                np.zeros(3, dtype=np.float32),
+                False,
+                feedback,
+            )
+        return pos, vel, True, feedback
+
+
+    def camera_ball_measurement(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, bool, float | None]:
+        pos, vel, valid, stamp_sec, _measurement = (
+            self.camera_ball_measurement_with_diagnostics())
+        return pos, vel, valid, stamp_sec
+
+
+    def camera_ball_measurement_with_diagnostics(
+        self,
+    ) -> tuple[
+        np.ndarray,
+        np.ndarray,
+        bool,
+        float | None,
+        dict[str, Any] | None,
+    ]:
+        if getattr(self, "camera_process", None) is not None:
+            return self.camera_process.measurement()
+        with self.camera_lock:
+            pos = (
+                None if self.latest_camera_ball_pos_m is None
+                else self.latest_camera_ball_pos_m.copy())
+            vel = (
+                None if self.latest_camera_ball_vel_m_s is None
+                else self.latest_camera_ball_vel_m_s.copy())
+            valid = bool(
+                self.latest_camera_valid and pos is not None and vel is not None
+                and self._camera_clock_sample_valid(self.latest_camera_clock_sync))
+            stamp_sec = self.latest_camera_stamp_sec
+            measurement = _camera_measurement_payload(
+                self.latest_camera_raw_measurement)
+            measurement = dict(measurement or {}, clockSync=dict(self.latest_camera_clock_sync))
+        if not valid:
+            return (
+                np.zeros(3, dtype=np.float32),
+                np.zeros(3, dtype=np.float32),
+                False,
+                stamp_sec,
+                measurement,
+            )
+        return pos, vel, True, stamp_sec, measurement
+
+
+    def camera_control_frame_status(self) -> tuple[bool, str]:
+        """Report whether camera observations include a calibrated rotation."""
+        if getattr(self, "camera_process", None) is not None:
+            return self.camera_process.frame_status()
+        with self.camera_lock:
+            frame = str(self.camera_output_frame or "camera")
+        return frame in {"base_link", "sim_frame"}, frame
+
+
+    def _close_camera_detector(self, detector: Any) -> None:
+        if detector is None:
+            return
+        try:
+            close = getattr(detector, "close", None)
+            if callable(close):
+                close()
+                return
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f"Error closing camera detector: {exc}")
+        for candidate in (
+                detector,
+                getattr(detector, "detector", None),
+                getattr(getattr(detector, "detector", None), "pipeline", None),
+                getattr(detector, "pipeline", None)):
+            if candidate is None:
+                continue
+            pipeline = (
+                candidate if hasattr(candidate, "stop")
+                else getattr(candidate, "pipeline", None))
+            stop = getattr(pipeline, "stop", None)
+            if not callable(stop):
+                continue
+            try:
+                stop()
+            except Exception:
+                pass
+
+
+    def shutdown_camera_source(self) -> None:
+        if getattr(self, "camera_process", None) is not None:
+            self.camera_process.close()
+            self.camera_process = None
+            return
+        self.camera_direct_running = False
+        self.camera_frame_event.set()
+        with self.camera_lock:
+            detector = self.camera_detector
+        self._close_camera_detector(detector)
+        capture_thread = self.camera_capture_thread
+        if capture_thread is not None and capture_thread.is_alive():
+            capture_thread.join(timeout=3.0)
+        thread = self.camera_direct_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+        self.camera_viz_running = False
+        self.camera_viz_event.set()
+        viz_thread = self.camera_viz_thread
+        if viz_thread is not None and viz_thread.is_alive():
+            viz_thread.join(timeout=1.0)
+        with self.camera_lock:
+            detector = self.camera_detector
+            self.camera_detector = None
+            self.camera_detector_key = None
+            self.camera_capture_thread = None
+            self.camera_direct_thread = None
+            self.camera_viz_thread = None
+        self._close_camera_detector(detector)
+
+
+class RosBridgeNode(CameraSource, Node):
+    def __init__(self, cfg: ProbeConfig):
+        super().__init__("interactive_policy_safety_probe")
+        self.cfg = cfg
+        self.lock = threading.Lock()
+        self.camera_lock = threading.Lock()
+        self.camera_rebuild_lock = threading.Lock()
+        self.latest_joint_q: np.ndarray | None = None
+        self.latest_joint_dq: np.ndarray | None = None
+        self.latest_joint_ddq: np.ndarray | None = None
+        self.latest_joint_stamp_wall: float | None = None
+        self.latest_joint_stamp_monotonic_s: float | None = None
+        self.latest_joint_sample_stamp_s: float | None = None
+        self.latest_joint_sample_dt_s: float | None = None
+        self.latest_joint_header_stamp_s: float | None = None
+        self.latest_joint_sample_stamp_source: str = "unavailable"
+        self.latest_joint_source_sequence: int = -1
+        self.latest_joint_repeated_source_sample: bool = False
+        self.latest_joint_source_fault: str = ""
+        self.latest_joint_dq_source: str = "unavailable"
+        self.latest_joint_ddq_source: str = "unavailable"
+        self.latest_cart_pos: np.ndarray | None = None
+        self.latest_cart_quat_xyzw: np.ndarray | None = None
+        self.latest_cart_psi: float | None = None
+        self.latest_cart_stamp_wall: float | None = None
+        self.publish_count = 0
+        self.cmd_pub = None
+
+        self._initialize_camera_state(cfg)
         self.control_callback_group = (
             MutuallyExclusiveCallbackGroup()
             if MutuallyExclusiveCallbackGroup is not None else None)
@@ -7362,8 +9097,9 @@ class RosBridgeNode(Node):
         self.backend_control_timer = None
 
         if cfg.ros_bridge:
-            self.cmd_pub = self.create_publisher(
-                MechUnitCmdArray, cfg.command_topic, 10)
+            if cfg.ros_publish_commands:
+                self.cmd_pub = self.create_publisher(
+                    MechUnitCmdArray, cfg.command_topic, 10)
             self.create_subscription(
                 JointState, cfg.joint_state_topic, self._joint_state_callback, 10,
                 callback_group=self.state_callback_group)
@@ -7371,7 +9107,8 @@ class RosBridgeNode(Node):
                 MechUnitStateArray, cfg.cart_state_topic, self._cart_state_callback, 10,
                 callback_group=self.state_callback_group)
             self.get_logger().info(
-                f"ROS feedback bridge active: publish {cfg.command_topic}, "
+                f"ROS feedback bridge active: "
+                f"{'publish ' + cfg.command_topic if cfg.ros_publish_commands else 'command publisher disabled'}, "
                 f"subscribe {cfg.joint_state_topic}, {cfg.cart_state_topic}")
 
         if cfg.enable_camera_ball:
@@ -7388,11 +9125,16 @@ class RosBridgeNode(Node):
             self.get_logger().warn(
                 'Mocap ball source started without calibration; using identity '
                 'T_robot_mocap until a calibration file is provided')
-        self.mocap_input = MocapBallInput(
+        mocap_input_class = MocapBallInput
+        if bool(getattr(self.cfg, 'mocap_subprocess', False)):
+            from pingpong_controller.mocap_process import MocapInputProcess
+            mocap_input_class = MocapInputProcess
+        self.mocap_input = mocap_input_class(
             udp_host=str(self.cfg.mocap_udp_host),
             udp_port=int(self.cfg.mocap_udp_port),
             calibration_path=calibration_path or None,
             marker_id=int(self.cfg.mocap_marker_id),
+            marker_x_limits_m=getattr(self.cfg, 'mocap_marker_x_limits_m', None),
             position_unit=str(self.cfg.mocap_position_unit),
             timestamp_unit=str(self.cfg.mocap_timestamp_unit),
             velocity_alpha=float(self.cfg.mocap_velocity_alpha),
@@ -7404,6 +9146,10 @@ class RosBridgeNode(Node):
             sim_cartesian_x_offset_m=float(self.cfg.sim_cartesian_x_offset_m),
             sim_cartesian_y_offset_m=float(self.cfg.sim_cartesian_y_offset_m),
             sim_base_height_m=float(self.cfg.sim_base_height_m),
+            receiver_clock=self.now_sec,
+            clock_sync_min_samples=int(getattr(self.cfg, 'mocap_clock_sync_min_samples', 8)),
+            clock_sync_min_span_s=float(getattr(self.cfg, 'mocap_clock_sync_min_span_s', 0.05)),
+            clock_sync_window_s=float(getattr(self.cfg, 'mocap_clock_sync_window_s', 10.0)),
         )
         self.mocap_marker_id = int(self.cfg.mocap_marker_id)
         if not self.mocap_input.start():
@@ -7413,7 +9159,10 @@ class RosBridgeNode(Node):
             f'Mocap ball source active: udp={self.cfg.mocap_udp_host}:'
             f'{self.cfg.mocap_udp_port}, marker={self.cfg.mocap_marker_id}, '
             f'unit={self.cfg.mocap_position_unit}, '
-            f'calibration={calibration_path or "identity"}')
+            f'calibration={calibration_path or "identity"}; '
+            'waiting for source-to-ROS timestamp synchronization')
+        if bool(getattr(self.cfg, 'mocap_subprocess', False)):
+            self.get_logger().info('Mocap UDP parsing/clock synchronization use a sensor-only process')
 
     def set_mocap_marker_id(self, marker_id: int) -> None:
         """Update the OptiTrack ball marker YY used by marker_YY_px/py/pz."""
@@ -7423,9 +9172,34 @@ class RosBridgeNode(Node):
         if marker_id == self.mocap_marker_id:
             return
         self.mocap_marker_id = marker_id
-        self.mocap_input.marker_id = marker_id
-        self.mocap_input.detector.marker_id = marker_id
+        setter = getattr(self.mocap_input, 'set_marker_id', None)
+        if callable(setter):
+            setter(marker_id)
+        else:
+            self.mocap_input.marker_id = marker_id
+            self.mocap_input.detector.marker_id = marker_id
         self.get_logger().info(f'Mocap ball marker id updated to {marker_id}')
+
+    def resynchronize_ball_clock(self, source):
+        if source == 'camera' and self.cfg.enable_camera_ball:
+            self.resynchronize_camera_clock()
+        elif source == 'mocap' and self.mocap_input is not None:
+            self.mocap_input.resynchronize()
+
+    def ball_clock_status(self, source):
+        if source == 'camera' and self.cfg.enable_camera_ball:
+            if self.camera_process is not None:
+                info = self.camera_process.state()[3].get('clockSync', {})
+            else:
+                with self.camera_lock:
+                    info = dict(self.latest_camera_clock_sync)
+                if not self._camera_clock_sample_valid(info):
+                    info.update(ready=False, status='waiting_for_fresh_capture')
+        elif source == 'mocap' and self.mocap_input is not None:
+            info = self.mocap_input.get_control_state()[3].get('clockSync', {})
+        else:
+            return dict(source=source, required=False, ready=True, status='not_required')
+        return dict(info, source=source, required=True)
 
     def _joint_state_callback(self, msg) -> None:
         name_to_pos: dict[str, float] = {}
@@ -7635,1338 +9409,38 @@ class RosBridgeNode(Node):
                 self.latest_cart_stamp_wall = time.time()
             return
 
-    def _init_camera_ball_source(self) -> None:
-        if not _CAMERA_BALL_AVAILABLE:
-            raise RuntimeError(
-                f"camera ball source unavailable: {_CAMERA_BALL_IMPORT_ERROR}")
-        source_mode = str(self.cfg.camera_source_mode).strip().lower()
-        if source_mode == "direct_realsense":
-            self._init_direct_realsense_camera_source()
-            return
-        if source_mode != "ros_topic":
-            raise RuntimeError(f"unsupported camera source mode: {source_mode}")
-        if CameraInfo is None or CompressedImage is None or Image is None:
-            raise RuntimeError("camera ball source requires sensor_msgs CameraInfo/Image/CompressedImage")
-        self.create_subscription(
-            CameraInfo, self.cfg.camera_info_topic,
-            self._camera_info_callback, 10,
-            callback_group=self.vision_callback_group)
-        transport = str(self.cfg.camera_image_transport).strip().lower()
-        if transport in ("compressed", "auto"):
-            self.create_subscription(
-                CompressedImage, self.cfg.camera_image_topic,
-                self._compressed_image_callback, 10,
-                callback_group=self.vision_callback_group)
-        if transport in ("raw", "auto"):
-            self.create_subscription(
-                Image, self.cfg.camera_raw_image_topic,
-                self._raw_image_callback, 10,
-                callback_group=self.vision_callback_group)
-        self.get_logger().info(
-            "Camera ball source active: "
-            f"transport={transport}, compressed={self.cfg.camera_image_topic}, "
-            f"raw={self.cfg.camera_raw_image_topic}, info={self.cfg.camera_info_topic}")
 
-    def _load_direct_realsense_calibration(self):
-        if load_calibration is None:
-            return None
-        calibration_path = self._resolve_calibration_json_path(
-            self.cfg.calibration_json_path,
-            int(self.cfg.image_width),
-            int(self.cfg.image_height))
-        if not os.path.exists(calibration_path):
-            self.get_logger().warn(
-                f"No calibration JSON found for direct RealSense: "
-                f"{calibration_path}; output will stay in camera frame")
-            return None
-        try:
-            calibration = load_calibration(calibration_path)
-        except Exception as exc:
-            self.get_logger().warn(
-                f"Failed to load direct RealSense calibration {calibration_path}: "
-                f"{exc}; output will stay in camera frame")
-            return None
-        self.get_logger().info(
-            f"Loaded T_base_camera for direct RealSense from: {calibration_path}")
-        return calibration
 
-    def _init_direct_realsense_camera_source(self) -> None:
-        if not self.cfg.use_hybrid_detector:
-            raise RuntimeError(
-                "direct_realsense camera source currently requires "
-                "--use-hybrid-detector-compatible defaults; use "
-                "--camera-source-mode ros_topic for the RGB detector path")
-        if HybridBallDetectorAdapter is None:
-            raise RuntimeError(
-                f"HybridBallDetectorAdapter unavailable: {_CAMERA_BALL_IMPORT_ERROR}")
 
-        calibration = self._load_direct_realsense_calibration()
-        if calibration is not None:
-            width = int(calibration.image_width)
-            height = int(calibration.image_height)
-            output_frame = "base_link"
-        else:
-            width = int(self.cfg.image_width)
-            height = int(self.cfg.image_height)
-            output_frame = "camera"
 
-        detector = HybridBallDetectorAdapter(
-            yolo_model_path=str(self.cfg.yolo_model_path),
-            ball_diameter_mm=40.0,
-            width=width,
-            height=height,
-            fps=int(self.cfg.realsense_fps),
-            yolo_interval=int(self.cfg.yolo_interval),
-            yolo_conf=float(self.cfg.conf_threshold),
-            target_class=str(self.cfg.target_class),
-            ir_params_json=_expand_path_text(self.cfg.ir_params_json),
-            ir_threshold=int(self.cfg.ir_threshold),
-            use_adaptive=bool(self.cfg.use_adaptive_ir),
-            min_radius=int(self.cfg.ir_min_radius),
-            max_radius=int(self.cfg.ir_max_radius),
-            circularity_min=float(self.cfg.ir_circularity_min),
-            laser_power=int(self.cfg.ir_laser_power),
-            exposure=self.cfg.ir_exposure,
-            gain=self.cfg.ir_gain,
-            brightness_percentile=int(self.cfg.ir_brightness_percentile),
-            roi_margin=int(self.cfg.hybrid_roi_margin),
-            calibration_data=calibration,
-            output_frame=output_frame,
-            print_every=999999,
-            use_undistort=True,
-            depth_scale=0.001,
-            depth_correction_model_path=_expand_path_text(
-                self.cfg.depth_correction_model_path),
-            depth_neighborhood_px=int(self.cfg.depth_neighborhood_px),
-            color_match_threshold=0.0,
-            color_circularity_min=0.0,
-            use_depth_sensor=bool(self.cfg.use_depth_sensor),
-            depth_mode=self.camera_options.depth_mode,
-            sensor_surface_to_center_depth_enabled=bool(
-                self.camera_options.sensor_surface_to_center_depth_enabled),
-            use_kalman=bool(self.camera_options.pixel_kalman_enabled),
-            use_ir_depth_kalman=bool(
-                self.camera_options.ir_depth_kalman_enabled),
-            use_synchronized_depth=bool(
-                self.camera_options.synchronized_depth_enabled),
-            depth_temporal_window_frames=int(
-                self.camera_options.depth_temporal_window_frames),
-            velocity_least_squares_enabled=bool(
-                self.camera_options.velocity_least_squares_enabled),
-            velocity_window_frames=int(
-                self.camera_options.velocity_window_frames),
-            clear_buffers_on_detection_loss_enabled=bool(
-                self.camera_options.clear_buffers_on_detection_loss_enabled),
-            motion_consistency_gate_enabled=bool(
-                self.camera_options.motion_consistency_gate_enabled),
-            physics_constrained_velocity_enabled=bool(
-                self.camera_options.physics_constrained_velocity_enabled),
-            trajectory_position_smoothing_enabled=bool(
-                self.camera_options.trajectory_position_smoothing_enabled),
-            impact_velocity_reset_enabled=bool(
-                self.camera_options.impact_velocity_reset_enabled),
-            impact_min_downward_velocity_m_s=float(
-                self.camera_options.impact_min_downward_velocity_m_s),
-            impact_min_upward_velocity_m_s=float(
-                self.camera_options.impact_min_upward_velocity_m_s),
-            impact_min_velocity_jump_m_s=float(
-                self.camera_options.impact_min_velocity_jump_m_s),
-            impact_refractory_s=float(
-                self.camera_options.impact_refractory_s),
-            pixel_kalman_process_noise_pos=float(
-                self.camera_options.pixel_kalman_process_noise_pos),
-            pixel_kalman_process_noise_vel=float(
-                self.camera_options.pixel_kalman_process_noise_vel),
-            pixel_kalman_measurement_noise=float(
-                self.camera_options.pixel_kalman_measurement_noise),
-            pixel_kalman_innovation_gate_px=float(
-                self.camera_options.pixel_kalman_innovation_gate_px),
-            pixel_kalman_reset_after_outliers=int(
-                self.camera_options.pixel_kalman_reset_after_outliers),
-            candidate_filter_enabled=bool(
-                self.camera_options.candidate_filter_enabled),
-            candidate_min_brightness=float(
-                self.camera_options.candidate_min_brightness),
-            candidate_max_depth_disagreement_mm=float(
-                self.camera_options.candidate_max_depth_disagreement_mm),
-            candidate_motion_scale_px=float(
-                self.camera_options.candidate_motion_scale_px),
-        )
-        detector.detector.configure_yolo(self.camera_options.yolo_enabled)
-        # A physical base-frame reset must be corroborated by fresh robot FK.
-        # If FK is unavailable, failing closed is safer than interpreting a
-        # depth/pixel reversal as a racket collision.  Camera-frame offline
-        # tools retain trajectory-only confirmation because FK is incomparable.
-        detector.detector.impact_racket_gate_required = bool(
-            output_frame == "base_link")
-        with self.camera_lock:
-            self.camera_detector = detector
-            self.camera_detector_key = (
-                "direct_realsense", "hybrid", width, height,
-                int(self.cfg.realsense_fps), output_frame)
-            self.camera_info_payload = {
-                "width": width,
-                "height": height,
-                "source": "direct_realsense",
-            }
-            self.camera_info_received = True
-            self.camera_output_frame = output_frame
-            self.camera_active_transport = "direct_realsense/hybrid"
-            self.camera_error = None
 
-        self.camera_direct_running = True
-        self.camera_capture_thread = threading.Thread(
-            target=self._direct_realsense_capture_loop,
-            name="policy_probe_realsense_capture",
-            daemon=True,
-        )
-        self.camera_direct_thread = threading.Thread(
-            target=self._direct_hybrid_reader_loop,
-            name="policy_probe_ball_detection",
-            daemon=True,
-        )
-        self.camera_capture_thread.start()
-        self.camera_direct_thread.start()
-        self.get_logger().info(
-            "Camera ball source active: direct_realsense/hybrid "
-            f"{width}x{height}@{int(self.cfg.realsense_fps)}fps, "
-            f"depth={bool(self.cfg.use_depth_sensor)}, output={output_frame}")
 
-    def _resolve_calibration_json_path(
-        self,
-        requested_path: str,
-        image_width: int,
-        image_height: int,
-    ) -> str:
-        if requested_path and str(requested_path).lower() not in ("auto", ""):
-            return _expand_path_text(requested_path)
 
-        search_dirs: list[str] = []
-        for base_dir in (SOURCE_MODULE_DIR, SCRIPT_PATH.parents[1]):
-            calib_dir = os.path.join(str(base_dir), "outputs", "vision_calib")
-            if calib_dir not in search_dirs:
-                search_dirs.append(calib_dir)
 
-        candidates: list[str] = []
-        for calib_dir in search_dirs:
-            candidates.extend(glob.glob(os.path.join(
-                calib_dir, "eye_hand_result_*_undistorted.json")))
-        candidates = sorted(set(candidates))
-        for candidate in candidates:
-            try:
-                calibration = load_calibration(candidate)
-            except Exception:
-                continue
-            if (int(calibration.image_width) == int(image_width)
-                    and int(calibration.image_height) == int(image_height)):
-                self.get_logger().info(
-                    f"Auto-selected calibration for "
-                    f"{image_width}x{image_height}: {candidate}")
-                return candidate
 
-        fallback = os.path.join(
-            search_dirs[0],
-            f"eye_hand_result_{int(image_width)}_undistorted.json")
-        self.get_logger().warn(
-            f"No calibration JSON matched {image_width}x{image_height}; "
-            f"trying {fallback}")
-        return fallback
 
-    def _load_extrinsics_for_resolution(self, image_width: int, image_height: int):
-        calibration_path = self._resolve_calibration_json_path(
-            self.cfg.calibration_json_path,
-            int(image_width),
-            int(image_height))
 
-        if not os.path.exists(calibration_path):
-            self.get_logger().warn(
-                f"No calibration JSON found for {image_width}x{image_height}: "
-                f"{calibration_path}; output will stay in camera frame")
-            return None
-        try:
-            calibration = load_calibration(calibration_path)
-        except Exception as exc:
-            self.get_logger().warn(
-                f"Failed to load extrinsics calibration {calibration_path}: {exc}; "
-                "output will stay in camera frame")
-            return None
-        if (int(calibration.image_width) != int(image_width)
-                or int(calibration.image_height) != int(image_height)):
-            self.get_logger().warn(
-                f"Calibration JSON resolution {calibration.image_width}x"
-                f"{calibration.image_height} does not match CameraInfo "
-                f"{image_width}x{image_height}; output will stay in camera frame")
-            return None
-        self.get_logger().info(
-            f"Loaded T_base_camera for camera ball source from: {calibration_path}")
-        return calibration
 
-    def _camera_detector_key(
-        self,
-        info: dict[str, Any],
-        options: CameraRuntimeOptions,
-    ) -> tuple[Any, ...]:
-        return (
-            int(info["width"]),
-            int(info["height"]),
-            round(float(info["fx"]), 6),
-            round(float(info["fy"]), 6),
-            round(float(info["cx"]), 6),
-            round(float(info["cy"]), 6),
-            str(self.cfg.calibration_json_path),
-            str(self.cfg.yolo_model_path),
-            str(self.cfg.target_class),
-            round(float(self.cfg.conf_threshold), 6),
-            int(self.cfg.infer_imgsz),
-            str(self.cfg.detector_device),
-            bool(self.cfg.detector_half),
-            round(float(self.cfg.camera_tilt_deg), 6),
-            int(self.cfg.tracker_max_miss_bridge),
-            round(float(self.cfg.tracker_gate_px), 6),
-            tuple(self.cfg.hsv_lower),
-            tuple(self.cfg.hsv_upper),
-            round(float(self.cfg.color_match_threshold), 6),
-            round(float(self.cfg.color_circularity_min), 6),
-            options.detector_key(),
-        )
 
-    def set_camera_runtime_options(self, options: CameraRuntimeOptions) -> None:
-        if not self.cfg.enable_camera_ball:
-            return
-        with self.camera_lock:
-            old_detector_key = self.camera_options.detector_key()
-            old_yolo_enabled = self.camera_options.yolo_enabled
-            old_ir_depth_processing_key = (
-                self.camera_options.ir_depth_processing_key())
-            old_sensor_depth_correction_key = (
-                self.camera_options.sensor_depth_correction_key())
-            old_velocity_estimation_key = (
-                self.camera_options.velocity_estimation_key())
-            old_observation_quality_key = (
-                self.camera_options.observation_quality_key())
-            old_pixel_kalman_key = self.camera_options.pixel_kalman_key()
-            old_candidate_filter_key = (
-                self.camera_options.candidate_filter_key())
-            self.camera_options = options
-            new_detector_key = options.detector_key()
-            new_ir_depth_processing_key = options.ir_depth_processing_key()
-            new_sensor_depth_correction_key = (
-                options.sensor_depth_correction_key())
-            new_velocity_estimation_key = options.velocity_estimation_key()
-            new_observation_quality_key = options.observation_quality_key()
-            new_pixel_kalman_key = options.pixel_kalman_key()
-            new_candidate_filter_key = options.candidate_filter_key()
-        if str(self.cfg.camera_source_mode).strip().lower() == "direct_realsense":
-            with self.camera_lock:
-                detector = self.camera_detector
-            core = getattr(detector, "detector", None)
-            if core is not None and hasattr(core, "set_depth_mode"):
-                core.set_depth_mode(options.depth_mode)
-            if (old_sensor_depth_correction_key
-                    != new_sensor_depth_correction_key
-                    and core is not None
-                    and hasattr(
-                        core,
-                        "configure_sensor_surface_to_center_depth")):
-                core.configure_sensor_surface_to_center_depth(
-                    enabled=(
-                        options.sensor_surface_to_center_depth_enabled))
-            if (old_yolo_enabled != options.yolo_enabled
-                    and core is not None
-                    and hasattr(core, "configure_yolo")):
-                core.configure_yolo(options.yolo_enabled)
-            if (old_ir_depth_processing_key != new_ir_depth_processing_key
-                    and core is not None
-                    and hasattr(core, "configure_ir_depth_processing")):
-                core.configure_ir_depth_processing(
-                    kalman_enabled=options.ir_depth_kalman_enabled,
-                    synchronized_depth_enabled=(
-                        options.synchronized_depth_enabled),
-                    depth_temporal_window_frames=(
-                        options.depth_temporal_window_frames),
-                )
-            if (old_velocity_estimation_key != new_velocity_estimation_key
-                    and core is not None
-                    and hasattr(core, "configure_velocity_estimation")):
-                core.configure_velocity_estimation(
-                    least_squares_enabled=(
-                        options.velocity_least_squares_enabled),
-                    window_frames=options.velocity_window_frames,
-                    impact_reset_enabled=(
-                        options.impact_velocity_reset_enabled),
-                    impact_min_downward_velocity_m_s=(
-                        options.impact_min_downward_velocity_m_s),
-                    impact_min_upward_velocity_m_s=(
-                        options.impact_min_upward_velocity_m_s),
-                    impact_min_velocity_jump_m_s=(
-                        options.impact_min_velocity_jump_m_s),
-                    impact_refractory_s=options.impact_refractory_s,
-                )
-            if (old_observation_quality_key != new_observation_quality_key
-                    and core is not None
-                    and hasattr(core, "configure_observation_quality")):
-                core.configure_observation_quality(
-                    clear_buffers_on_detection_loss_enabled=(
-                        options.clear_buffers_on_detection_loss_enabled),
-                    motion_consistency_gate_enabled=(
-                        options.motion_consistency_gate_enabled),
-                    physics_constrained_velocity_enabled=(
-                        options.physics_constrained_velocity_enabled),
-                    trajectory_position_smoothing_enabled=(
-                        options.trajectory_position_smoothing_enabled),
-                )
-            if (old_pixel_kalman_key != new_pixel_kalman_key
-                    and core is not None
-                    and hasattr(core, "configure_pixel_kalman")):
-                core.configure_pixel_kalman(
-                    enabled=options.pixel_kalman_enabled,
-                    process_noise_pos=(
-                        options.pixel_kalman_process_noise_pos),
-                    process_noise_vel=(
-                        options.pixel_kalman_process_noise_vel),
-                    measurement_noise=(
-                        options.pixel_kalman_measurement_noise),
-                    innovation_gate_px=(
-                        options.pixel_kalman_innovation_gate_px),
-                    reset_after_outliers=(
-                        options.pixel_kalman_reset_after_outliers),
-                )
-            if (old_candidate_filter_key != new_candidate_filter_key
-                    and core is not None
-                    and hasattr(core, "configure_candidate_filter")):
-                core.configure_candidate_filter(
-                    enabled=options.candidate_filter_enabled,
-                    min_brightness=options.candidate_min_brightness,
-                    max_depth_disagreement_mm=(
-                        options.candidate_max_depth_disagreement_mm),
-                    motion_scale_px=options.candidate_motion_scale_px,
-                )
-            return
-        if old_detector_key != new_detector_key:
-            self._rebuild_camera_detector("runtime option change")
 
-    def set_policy_viz_state(
-        self,
-        ball_pos_m: np.ndarray,
-        ball_vel_m_s: np.ndarray,
-        valid: bool,
-        racket_anchor_m: np.ndarray,
-        racket_pos_m: np.ndarray,
-        racket_state_valid: bool = True,
-    ) -> None:
-        stamp_wall = time.time()
-        racket_position = np.asarray(
-            racket_pos_m, dtype=np.float32).reshape(3).copy()
-        with self.camera_lock:
-            self.latest_policy_viz_state = {
-                "ball_pos_m": np.asarray(ball_pos_m, dtype=np.float32).reshape(3).copy(),
-                "ball_vel_m_s": np.asarray(ball_vel_m_s, dtype=np.float32).reshape(3).copy(),
-                "valid": bool(valid),
-                "racket_anchor_m": np.asarray(racket_anchor_m, dtype=np.float32).reshape(3).copy(),
-                "racket_pos_m": racket_position,
-                "stamp_wall": stamp_wall,
-            }
-            detector = self.camera_detector
-            core = getattr(detector, "detector", detector)
-            if core is not None:
-                detector_racket_position = (
-                    self._sim_position_to_camera_detector_frame(
-                        racket_position))
-                if (racket_state_valid
-                        and detector_racket_position is not None
-                        and hasattr(core, "set_racket_state")):
-                    core.set_racket_state(
-                        detector_racket_position, stamp_wall)
-                elif hasattr(core, "clear_racket_state"):
-                    core.clear_racket_state()
 
-    def _sim_position_to_camera_detector_frame(
-        self,
-        position_m: np.ndarray,
-    ) -> np.ndarray | None:
-        """Convert one policy/sim-frame point to the detector output frame.
 
-        Camera ball positions are translated into the policy frame by
-        :meth:`_transform_ball_pos_to_sim_frame`.  Impact validation runs
-        inside the detector, before that translation, so its racket context
-        must receive the inverse transform.  Passing the policy-frame racket
-        position directly made a real 32 mm ball/racket separation appear as
-        roughly 1.27 m and caused every impact candidate to fail closed.
 
-        A camera-frame detector has no comparable robot FK without applying
-        the camera extrinsic, so return ``None`` and let the caller clear the
-        racket context instead of silently mixing coordinate systems.
-        """
-        transformed = np.asarray(
-            position_m, dtype=np.float32).reshape(3).copy()
-        output_frame = str(self.camera_output_frame or "camera")
-        if output_frame == "sim_frame":
-            return transformed
-        if output_frame != "base_link":
-            return None
-        transformed[0] -= float(self.cfg.sim_cartesian_x_offset_m)
-        transformed[1] -= float(self.cfg.sim_cartesian_y_offset_m)
-        transformed[2] -= float(self.cfg.sim_base_height_m)
-        return transformed
 
-    def _camera_info_callback(self, msg) -> None:
-        if PingPongBallDetector is None:
-            return
-        fx = float(msg.k[0])
-        fy = float(msg.k[4])
-        cx = float(msg.k[2])
-        cy = float(msg.k[5])
-        dist_coeffs = list(msg.d) if len(msg.d) > 0 else None
-        width = int(msg.width)
-        height = int(msg.height)
-        self.get_logger().info(
-            "CameraInfo received for interactive probe: "
-            f"{width}x{height}, fx={fx:.2f}, fy={fy:.2f}, "
-            f"cx={cx:.2f}, cy={cy:.2f}")
-        with self.camera_lock:
-            if self.camera_info_received:
-                return
-            self.camera_info_payload = {
-                "fx": fx,
-                "fy": fy,
-                "cx": cx,
-                "cy": cy,
-                "dist_coeffs": dist_coeffs,
-                "width": width,
-                "height": height,
-                "distortion_model": str(getattr(msg, "distortion_model", "")),
-            }
-            self.camera_info_received = True
-        self._rebuild_camera_detector("CameraInfo")
 
-    def _rebuild_camera_detector(self, reason: str) -> None:
-        if not self.cfg.enable_camera_ball or PingPongBallDetector is None:
-            return
-        with self.camera_rebuild_lock:
-            with self.camera_lock:
-                info = None if self.camera_info_payload is None else dict(self.camera_info_payload)
-                options = self.camera_options
-                current_key = self.camera_detector_key
-            if info is None:
-                return
-            new_key = self._camera_detector_key(info, options)
-            if current_key == new_key and self.camera_detector is not None:
-                return
-            try:
-                detector, output_frame = self._build_camera_detector(info, options)
-            except Exception as exc:
-                with self.camera_lock:
-                    self.camera_detector = None
-                    self.camera_detector_key = None
-                    self.camera_output_frame = None
-                    self.camera_error = str(exc)
-                self.get_logger().error(f"Failed to initialize camera detector: {exc}")
-                raise
-            with self.camera_lock:
-                self.camera_detector = detector
-                self.camera_detector_key = new_key
-                self.camera_output_frame = output_frame
-                self.camera_error = None
-            self.get_logger().info(
-                f"Camera ball detector initialized ({reason}, output: {output_frame}, "
-                f"options={options.payload()})")
 
-    def _build_camera_detector(
-        self,
-        info: dict[str, Any],
-        options: CameraRuntimeOptions,
-    ):
-        width = int(info["width"])
-        height = int(info["height"])
-        extrinsics_calibration = self._load_extrinsics_for_resolution(width, height)
-        output_frame = "base_link" if extrinsics_calibration is not None else "camera"
-        color_match_threshold = (
-            self.cfg.color_match_threshold
-            if options.enable_color_filter else 0.0)
-        color_circularity_min = (
-            self.cfg.color_circularity_min
-            if options.enable_color_filter else 0.0)
-        detector = PingPongBallDetector(
-            yolo_model_path=str(self.cfg.yolo_model_path),
-            ball_diameter_mm=40.0,
-            width=width,
-            height=height,
-            fps=60,
-            conf_threshold=self.cfg.conf_threshold,
-            target_class=self.cfg.target_class,
-            camera_tilt_deg=self.cfg.camera_tilt_deg,
-            use_kalman=options.use_kalman,
-            infer_imgsz=self.cfg.infer_imgsz,
-            device=self.cfg.detector_device,
-            half=self.cfg.detector_half,
-            use_undistort=options.use_undistort,
-            print_every=999999,
-            profile_every=0,
-            use_camera=False,
-            camera_fx=float(info["fx"]),
-            camera_fy=float(info["fy"]),
-            camera_cx=float(info["cx"]),
-            camera_cy=float(info["cy"]),
-            camera_dist_coeffs=info.get("dist_coeffs"),
-            output_frame=output_frame,
-            enable_ellipse_fit=options.enable_ellipse_fit,
-            enable_temporal_tracker=options.enable_temporal_tracker,
-            tracker_max_miss_bridge=self.cfg.tracker_max_miss_bridge,
-            tracker_gate_px=self.cfg.tracker_gate_px,
-            hsv_lower=list(self.cfg.hsv_lower),
-            hsv_upper=list(self.cfg.hsv_upper),
-            color_match_threshold=color_match_threshold,
-            color_circularity_min=color_circularity_min,
-        )
-        if extrinsics_calibration is not None:
-            detector.calibration_data = extrinsics_calibration
-            detector.T_base_camera = extrinsics_calibration.T_base_camera
-            detector.R_base_camera = detector.T_base_camera[:3, :3]
-            detector.output_frame = "base_link"
-            output_frame = "base_link"
-        return detector, output_frame
 
-    def _should_process_transport(self, transport: str) -> bool:
-        now = time.time()
-        with self.camera_lock:
-            self.camera_last_image_wall_by_transport[transport] = now
-            active = self.camera_active_transport
-            if active is None:
-                self.camera_active_transport = transport
-                return True
-            if active == transport:
-                return True
-            active_age = now - self.camera_last_image_wall_by_transport.get(active, 0.0)
-            if active_age > 1.0:
-                self.camera_active_transport = transport
-                return True
-            return False
 
-    def _compressed_image_callback(self, msg) -> None:
-        if not self._should_process_transport("compressed"):
-            return
-        try:
-            np_arr = np.frombuffer(msg.data, np.uint8)
-            image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-            if image is None:
-                self.get_logger().warn(
-                    "Failed to decode compressed camera image",
-                    throttle_duration_sec=1.0)
-                return
-            stamp_sec = _stamp_to_sec(msg.header.stamp)
-            self._handle_cv_image(image, stamp_sec)
-        except Exception as exc:
-            with self.camera_lock:
-                self.camera_error = str(exc)
-            self.get_logger().error(
-                f"Error in compressed camera image callback: {exc}",
-                throttle_duration_sec=1.0)
 
-    def _raw_image_callback(self, msg) -> None:
-        if not self._should_process_transport("raw"):
-            return
-        try:
-            image = self._decode_raw_image_msg(msg)
-            stamp_sec = _stamp_to_sec(msg.header.stamp)
-            self._handle_cv_image(image, stamp_sec)
-        except Exception as exc:
-            with self.camera_lock:
-                self.camera_error = str(exc)
-            self.get_logger().error(
-                f"Error in raw camera image callback: {exc}",
-                throttle_duration_sec=1.0)
 
-    def _decode_raw_image_msg(self, msg) -> np.ndarray:
-        height = int(msg.height)
-        width = int(msg.width)
-        encoding = str(msg.encoding).lower()
-        if height <= 0 or width <= 0:
-            raise ValueError(f"invalid raw image size {width}x{height}")
-        channels_by_encoding = {
-            "bgr8": 3,
-            "rgb8": 3,
-            "bgra8": 4,
-            "rgba8": 4,
-            "mono8": 1,
-            "8uc1": 1,
-            "8uc3": 3,
-            "8uc4": 4,
-        }
-        channels = channels_by_encoding.get(encoding)
-        if channels is None:
-            raise ValueError(f"unsupported raw image encoding: {msg.encoding}")
-        raw = np.frombuffer(msg.data, dtype=np.uint8)
-        step = int(msg.step)
-        min_step = width * channels
-        if step < min_step:
-            raise ValueError(
-                f"invalid raw image step {step} for {width}x{height} {encoding}")
-        rows = raw.reshape((height, step))[:, :min_step]
-        if channels == 1:
-            image = rows.reshape((height, width))
-            return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        image = rows.reshape((height, width, channels))
-        if encoding in ("rgb8", "8uc3"):
-            return cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-        if encoding == "rgba8":
-            return cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
-        if encoding == "bgra8":
-            return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
-        return image.copy()
 
-    def _direct_realsense_capture_loop(self) -> None:
-        """Continuously acquire frames, replacing stale unprocessed frames."""
-        self.get_logger().info("Direct RealSense capture loop: entering")
-        with self.camera_lock:
-            detector = self.camera_detector
-        pipeline = getattr(getattr(detector, "detector", None), "pipeline", None)
-        if pipeline is None:
-            with self.camera_lock:
-                self.camera_error = "direct RealSense hybrid pipeline is unavailable"
-            return
 
-        while self.camera_direct_running:
-            try:
-                frames = pipeline.wait_for_frames(timeout_ms=1000)
-                stamp = self.get_clock().now().to_msg()
-                stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
-                with self.camera_frame_slot_lock:
-                    if self.camera_frame_pending is not None:
-                        self.camera_frames_replaced += 1
-                    self.camera_frame_pending = (frames, stamp_sec)
-                    self.camera_frames_acquired += 1
-                self.camera_frame_event.set()
-            except RuntimeError as exc:
-                if not self.camera_direct_running:
-                    break
-                with self.camera_lock:
-                    self.camera_error = f"wait_for_frames timeout: {exc}"
-                self.get_logger().warn(
-                    f"wait_for_frames timeout: {exc}",
-                    throttle_duration_sec=1.0)
-            except Exception as exc:  # noqa: BLE001 - keep capture alive.
-                if not self.camera_direct_running:
-                    break
-                with self.camera_lock:
-                    self.camera_error = str(exc)
-                self.get_logger().error(
-                    f"Direct RealSense capture error: {exc}",
-                    throttle_duration_sec=1.0)
-                time.sleep(0.05)
-        self.get_logger().info("Direct RealSense capture loop: exited")
 
-    def _direct_hybrid_reader_loop(self) -> None:
-        """Process the newest captured frame without blocking acquisition."""
-        self.get_logger().info("Direct RealSense detection loop: entering")
-        while self.camera_direct_running:
-            if not self.camera_frame_event.wait(timeout=0.5):
-                continue
-            self.camera_frame_event.clear()
-            with self.camera_frame_slot_lock:
-                pending = self.camera_frame_pending
-                self.camera_frame_pending = None
-            if pending is None:
-                continue
-            frames, stamp_sec = pending
 
-            try:
-                detection_started = time.perf_counter()
-                ir_frame = frames.get_infrared_frame(1)
-                if not ir_frame:
-                    continue
-                ir_image = np.asanyarray(ir_frame.get_data())
 
-                with self.camera_lock:
-                    options = self.camera_options
-                    detector = self.camera_detector
-                    self.camera_last_image_wall_by_transport[
-                        "direct_realsense"] = time.time()
-                    self.camera_active_transport = "direct_realsense/hybrid"
 
-                core = getattr(detector, "detector", None)
-                if core is not None and hasattr(
-                        core, "color_image_for_frames"):
-                    rgb_image = core.color_image_for_frames(
-                        frames, ir_image)
-                else:
-                    rgb_image = cv2.cvtColor(
-                        ir_image, cv2.COLOR_GRAY2BGR)
 
-                if not options.detect:
-                    observation = {
-                        "detected": False,
-                        "position": [0, 0, 0],
-                        "velocity": [0, 0, 0],
-                        "raw_measurement": {"detection_disabled": True},
-                    }
-                elif detector is None:
-                    observation = {
-                        "detected": False,
-                        "position": [0, 0, 0],
-                        "velocity": [0, 0, 0],
-                        "raw_measurement": {"no_detector": True},
-                    }
-                elif not options.use_depth_sensor:
-                    if ir_image is None:
-                        observation = {
-                            "detected": False,
-                            "position": [0, 0, 0],
-                            "velocity": [0, 0, 0],
-                            "raw_measurement": {"missing_ir_frame": True},
-                        }
-                    else:
-                        observation = detector.detector.get_observation_offline(
-                            rgb_image, ir_image, None, stamp_sec)
-                else:
-                    observation = detector.detector.get_observation(
-                        observation_time=stamp_sec,
-                        frames=frames,
-                    )
-                    if observation is None:
-                        observation = {
-                            "detected": False,
-                            "position": [0, 0, 0],
-                            "velocity": [0, 0, 0],
-                            "raw_measurement": {"no_observation": True},
-                        }
 
-                raw_measurement = observation.get("raw_measurement")
-                if isinstance(raw_measurement, dict):
-                    raw_measurement["processing_ms"] = round(
-                        (time.perf_counter() - detection_started) * 1000.0,
-                        3)
-                    raw_measurement["capture_to_result_ms"] = round(
-                        max(0.0, time.time() - float(stamp_sec)) * 1000.0,
-                        3)
-
-                self._handle_direct_hybrid_observation(
-                    rgb_image, ir_image, observation, stamp_sec)
-            except Exception as exc:  # noqa: BLE001 - keep reader alive.
-                with self.camera_lock:
-                    self.camera_error = str(exc)
-                self.get_logger().error(
-                    f"Direct RealSense hybrid reader error: {exc}",
-                    throttle_duration_sec=1.0)
-                time.sleep(0.01)
-        self.get_logger().info("Direct RealSense detection loop: exited")
-
-    def _handle_direct_hybrid_observation(
-        self,
-        image: np.ndarray,
-        ir_image: np.ndarray | None,
-        observation: dict[str, Any],
-        stamp_sec: float,
-    ) -> None:
-        now_wall = time.time()
-        with self.camera_lock:
-            if self.camera_last_callback_wall is not None:
-                dt = now_wall - self.camera_last_callback_wall
-                if dt > 0.0:
-                    self.camera_callback_times.append(dt)
-            self.camera_last_callback_wall = now_wall
-            self.camera_frame_count += 1
-            if bool(observation.get("detected", False)) and not bool(
-                    observation.get("predicted", False)):
-                self.camera_detection_count += 1
-            options = self.camera_options
-            detector = self.camera_detector
-
-        self._store_camera_observation(observation, stamp_sec)
-        if not options.visualize:
-            return
-        # Rendering, overlays and JPEG encoding belong exclusively to the
-        # visualization worker.  The detector thread only publishes its raw
-        # frame/result snapshot and immediately returns to the next frame.
-        self._enqueue_camera_visualization(
-            image, observation, ir_image=ir_image,
-            hybrid=bool(ir_image is not None and detector is not None))
-
-    def _handle_cv_image(self, image: np.ndarray, stamp_sec: float) -> None:
-        now_wall = time.time()
-        with self.camera_lock:
-            if self.camera_last_callback_wall is not None:
-                dt = now_wall - self.camera_last_callback_wall
-                if dt > 0.0:
-                    self.camera_callback_times.append(dt)
-            self.camera_last_callback_wall = now_wall
-            options = self.camera_options
-            detector = self.camera_detector
-            detector_ready = bool(self.camera_info_received and detector is not None)
-
-        if not options.detect:
-            observation = {
-                "detected": False,
-                "raw_measurement": {"detection_disabled": True},
-            }
-        elif not detector_ready:
-            observation = {
-                "detected": False,
-                "raw_measurement": {"waiting_for_camera_info": not self.camera_info_received},
-            }
-        else:
-            observation = detector.get_observation(
-                image, observation_time=stamp_sec)
-
-        detected = bool(observation.get("detected", False))
-        is_predicted = bool(observation.get("predicted", False))
-        with self.camera_lock:
-            self.camera_frame_count += 1
-            if detected and not is_predicted:
-                self.camera_detection_count += 1
-
-        self._store_camera_observation(observation, stamp_sec)
-        if options.visualize:
-            self._enqueue_camera_visualization(image, observation)
-
-    def _transform_ball_pos_to_sim_frame(self, ball_pos_m: np.ndarray) -> np.ndarray:
-        transformed = np.asarray(ball_pos_m, dtype=np.float32).reshape(3).copy()
-        transformed[0] += float(self.cfg.sim_cartesian_x_offset_m)
-        transformed[1] += float(self.cfg.sim_cartesian_y_offset_m)
-        transformed[2] += float(self.cfg.sim_base_height_m)
-        return transformed
-
-    def _store_camera_observation(self, observation: dict[str, Any], stamp_sec: float) -> None:
-        now_wall = time.time()
-        detected = bool(observation.get("detected", False))
-        pos_m = None
-        vel_m_s = None
-        detector_pos_m = None
-        detector_vel_m_s = None
-        with self.camera_lock:
-            detector_frame = self.camera_output_frame or "camera"
-        if detected:
-            try:
-                detector_pos_m = np.asarray(
-                    observation.get("position", [0.0, 0.0, 0.0]),
-                    dtype=np.float32).reshape(3) * 1e-3
-                detector_vel_m_s = np.asarray(
-                    observation.get("velocity", [0.0, 0.0, 0.0]),
-                    dtype=np.float32).reshape(3) * 1e-3
-                if detector_frame == "sim_frame":
-                    pos_m = detector_pos_m.astype(np.float32)
-                else:
-                    pos_m = self._transform_ball_pos_to_sim_frame(detector_pos_m)
-                vel_m_s = detector_vel_m_s.astype(np.float32)
-                if not (np.all(np.isfinite(detector_pos_m))
-                        and np.all(np.isfinite(detector_vel_m_s))
-                        and np.all(np.isfinite(pos_m))
-                        and np.all(np.isfinite(vel_m_s))):
-                    detected = False
-                    pos_m = None
-                    vel_m_s = None
-                    detector_pos_m = None
-                    detector_vel_m_s = None
-            except Exception:
-                detected = False
-                pos_m = None
-                vel_m_s = None
-                detector_pos_m = None
-                detector_vel_m_s = None
-        with self.camera_lock:
-            self.latest_camera_ball_pos_m = pos_m
-            self.latest_camera_ball_vel_m_s = vel_m_s
-            self.latest_camera_detector_pos_m = detector_pos_m
-            self.latest_camera_detector_vel_m_s = detector_vel_m_s
-            self.latest_camera_detector_frame = detector_frame
-            self.latest_camera_valid = bool(detected)
-            self.latest_camera_stamp_sec = float(stamp_sec)
-            self.latest_camera_wall = now_wall
-            self.latest_camera_raw_measurement = observation.get("raw_measurement")
-            self.camera_error = None
-
-    def _viz_done_thresholds(self) -> dict[str, float]:
-        return {
-            "ball_z_floor": float(self.cfg.done_z_min_m),
-            "ball_z_ceiling": float(self.cfg.done_z_max_m),
-            "ball_x_range": float(self.cfg.done_x_range_m),
-            "ball_y_range": float(self.cfg.done_y_range_m),
-            "racket_anchor_distance": float(self.cfg.done_racket_anchor_distance_m),
-            "racket_z_high_offset": float(self.cfg.done_racket_z_high_offset_m),
-            "racket_z_low_offset": float(self.cfg.done_racket_z_low_offset_m),
-        }
-
-    def _compute_viz_sim_ball_state(self, observation: dict[str, Any]):
-        with self.camera_lock:
-            state = dict(self.latest_policy_viz_state)
-        if state:
-            return (
-                np.asarray(state["ball_pos_m"], dtype=np.float64).reshape(3),
-                np.asarray(state["ball_vel_m_s"], dtype=np.float64).reshape(3),
-                bool(state.get("valid", False)),
-                "[SIM control state]",
-            )
-        if not bool(observation.get("detected", False)):
-            return None, None, False, "[SIM raw frame]"
-        pos = observation.get("position")
-        if pos is None:
-            return None, None, False, "[SIM raw frame]"
-        vel = observation.get("velocity")
-        if vel is None:
-            vel = [0.0, 0.0, 0.0]
-        try:
-            pos_m = np.asarray(pos, dtype=np.float64).reshape(3) * 1e-3
-            vel_m_s = np.asarray(vel, dtype=np.float64).reshape(3) * 1e-3
-        except (TypeError, ValueError):
-            return None, None, False, "[SIM raw frame]"
-        return self._transform_ball_pos_to_sim_frame(pos_m), vel_m_s, True, "[SIM raw frame]"
-
-    def _normalize_camera_observation_for_overlay(
-        self,
-        observation: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Map hybrid detector fields onto the lightweight web overlay schema."""
-        obs = dict(observation or {})
-        raw_in = obs.get("raw_measurement")
-        raw = dict(raw_in) if isinstance(raw_in, dict) else {}
-        if raw:
-            if raw.get("image_x") is None or raw.get("image_y") is None:
-                px = raw.get("cx_rgb")
-                py = raw.get("cy_rgb")
-                if px is None or py is None:
-                    px = raw.get("cx")
-                    py = raw.get("cy")
-                if px is not None and py is not None:
-                    raw["image_x"] = px
-                    raw["image_y"] = py
-            if raw.get("radius_px") is None and raw.get("radius") is not None:
-                raw["radius_px"] = raw.get("radius")
-            if raw.get("color_bbox") is None and raw.get("yolo_bbox") is not None:
-                try:
-                    x1, y1, x2, y2 = raw.get("yolo_bbox")
-                    raw["color_bbox"] = [x1, y1, x2 - x1, y2 - y1]
-                except Exception:
-                    pass
-            raw.setdefault("detection_method", raw.get("pixel_source", "hybrid"))
-            obs["raw_measurement"] = raw
-        return obs
-
-    def _render_visualization_frame(
-        self,
-        frame: np.ndarray,
-        observation: dict[str, Any],
-    ) -> np.ndarray:
-        observation = self._normalize_camera_observation_for_overlay(observation)
-        sim_ball_pos_m, sim_ball_vel_m_s, sim_detected, sim_label = (
-            self._compute_viz_sim_ball_state(observation))
-        with self.camera_lock:
-            frame_count = int(self.camera_frame_count)
-            detection_count = int(self.camera_detection_count)
-            callback_times = list(self.camera_callback_times)
-            output_frame = self.camera_output_frame or "camera"
-            state = dict(self.latest_policy_viz_state)
-        if callback_times:
-            avg_dt = sum(callback_times) / len(callback_times)
-            callback_hz = 1.0 / avg_dt if avg_dt > 0 else 0.0
-        else:
-            callback_hz = 0.0
-        racket_anchor_m = state.get("racket_anchor_m")
-        racket_pos_m = state.get("racket_pos_m")
-        if observation.get("_hybrid_viz_rendered", False):
-            if (draw_sim_done_overlay is not None
-                    and sim_ball_pos_m is not None
-                    and sim_ball_vel_m_s is not None):
-                draw_sim_done_overlay(
-                    frame,
-                    sim_ball_pos_m,
-                    sim_ball_vel_m_s,
-                    racket_anchor_m,
-                    racket_pos_m=racket_pos_m,
-                    thresholds=self._viz_done_thresholds(),
-                    detected=sim_detected,
-                    label=sim_label,
-                )
-            return frame
-        if render_detection_overlay is None:
-            return frame
-        return render_detection_overlay(
-            frame,
-            observation,
-            frame_count=frame_count,
-            detection_count=detection_count,
-            callback_hz=callback_hz,
-            output_frame=output_frame,
-            sim_ball_pos_m=sim_ball_pos_m,
-            sim_ball_vel_m_s=sim_ball_vel_m_s,
-            racket_anchor_m=racket_anchor_m,
-            racket_pos_m=racket_pos_m,
-            done_thresholds=self._viz_done_thresholds(),
-            sim_detected=sim_detected,
-            sim_label=sim_label,
-        )
-
-    def _start_camera_visualization_worker(self) -> None:
-        if self.camera_viz_thread is not None and self.camera_viz_thread.is_alive():
-            return
-        self.camera_viz_running = True
-        self.camera_viz_thread = threading.Thread(
-            target=self._camera_visualization_worker_loop,
-            name="policy_probe_camera_viz",
-            daemon=True,
-        )
-        self.camera_viz_thread.start()
-
-    def _enqueue_camera_visualization(
-        self,
-        image: np.ndarray,
-        observation: dict[str, Any],
-        ir_image: np.ndarray | None = None,
-        hybrid: bool = False,
-    ) -> None:
-        if cv2 is None or image is None or image.size == 0:
-            return
-        self._start_camera_visualization_worker()
-        now = time.time()
-        with self.camera_viz_slot_lock:
-            if self.camera_viz_pending is not None:
-                return
-            # At the camera's native rate, every acquired frame is already
-            # rate-limited by the device.  A second 60 Hz clock comparison is
-            # sensitive to sub-millisecond scheduling jitter and periodically
-            # rejects good frames.  Keep the gate only for intentional
-            # downsampling; the one-slot worker queue still provides bounded
-            # backpressure if JPEG/overlay rendering is slower than capture.
-            needs_downsample = (
-                float(self.cfg.camera_visualization_rate_hz) + 1e-6
-                < float(self.cfg.realsense_fps))
-            min_period = max(0.0, self.camera_viz_min_period_s - 0.001)
-            if (needs_downsample
-                    and now - self.camera_viz_last_enqueue_wall < min_period):
-                return
-        frame_copy = image.copy()
-        ir_copy = None if ir_image is None else ir_image.copy()
-        obs_copy = dict(observation)
-        raw = obs_copy.get("raw_measurement")
-        if isinstance(raw, dict):
-            obs_copy["raw_measurement"] = dict(raw)
-        with self.camera_viz_slot_lock:
-            if self.camera_viz_pending is not None:
-                return
-            self.camera_viz_pending = (frame_copy, ir_copy, obs_copy, bool(hybrid))
-            self.camera_viz_last_enqueue_wall = now
-        self.camera_viz_event.set()
-
-    def _camera_visualization_worker_loop(self) -> None:
-        while self.camera_viz_running:
-            if not self.camera_viz_event.wait(timeout=0.5):
-                continue
-            self.camera_viz_event.clear()
-            with self.camera_viz_slot_lock:
-                pending = self.camera_viz_pending
-                self.camera_viz_pending = None
-            if pending is None:
-                continue
-            image, ir_image, observation, hybrid = pending
-            with self.camera_lock:
-                options = self.camera_options
-                detector = self.camera_detector
-            if not options.visualize:
-                continue
-
-            if hybrid and ir_image is not None and detector is not None:
-                try:
-                    viz_image = detector.detector._render_visualization(
-                        image, ir_image, observation)
-                    if viz_image is not None:
-                        hybrid_obs_for_viz = dict(observation)
-                        raw = hybrid_obs_for_viz.get("raw_measurement")
-                        if isinstance(raw, dict):
-                            hybrid_obs_for_viz["raw_measurement"] = dict(raw)
-                        hybrid_obs_for_viz["_hybrid_viz_rendered"] = True
-                        self._store_camera_visualization(
-                            viz_image, hybrid_obs_for_viz)
-                        continue
-                except Exception as exc:  # noqa: BLE001 - fallback below.
-                    with self.camera_lock:
-                        self.camera_error = f"hybrid visualization failed: {exc}"
-
-            self._store_camera_visualization(image, observation)
-
-    def _store_camera_visualization(
-        self,
-        image: np.ndarray,
-        observation: dict[str, Any],
-    ) -> None:
-        if cv2 is None:
-            return
-        overlay = image
-        try:
-            overlay = self._render_visualization_frame(image, observation)
-        except Exception as exc:  # noqa: BLE001 - viz must not stop the stream.
-            with self.camera_lock:
-                self.camera_error = f"visualization overlay failed: {exc}"
-            overlay = image
-        try:
-            max_width = int(self.cfg.camera_web_max_width)
-            if max_width > 0 and overlay.shape[1] > max_width:
-                scale = float(max_width) / float(overlay.shape[1])
-                overlay = cv2.resize(
-                    overlay,
-                    (max_width, max(1, int(round(overlay.shape[0] * scale)))),
-                    interpolation=cv2.INTER_AREA,
-                )
-            quality = int(min(95, max(25, self.cfg.camera_web_jpeg_quality)))
-            ok, encoded = cv2.imencode(
-                ".jpg", overlay, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-            if not ok:
-                return
-            with self.camera_lock:
-                self.latest_viz_jpeg = encoded.tobytes()
-                self.latest_viz_seq += 1
-                self.latest_viz_wall = time.time()
-                self.latest_viz_monotonic_s = time.perf_counter()
-        except Exception as exc:  # noqa: BLE001 - viz must not affect control.
-            with self.camera_lock:
-                self.camera_error = f"visualization encode failed: {exc}"
-
-    def latest_camera_visualization(self) -> tuple[bytes | None, dict[str, Any]]:
-        now = time.time()
-        with self.camera_lock:
-            age = (
-                None if self.latest_viz_wall is None
-                else max(0.0, now - self.latest_viz_wall))
-            info = {
-                "seq": int(self.latest_viz_seq),
-                "ageS": None if age is None else round(float(age), 6),
-                "wallTimeS": (
-                    None if self.latest_viz_wall is None
-                    else round(float(self.latest_viz_wall), 6)),
-                "monotonicTimeS": (
-                    None if self.latest_viz_monotonic_s is None
-                    else round(float(self.latest_viz_monotonic_s), 6)),
-                "enabled": bool(self.camera_options.visualize),
-            }
-            frame = self.latest_viz_jpeg
-        return frame, info
-
-    def camera_frame_rotation(self) -> np.ndarray | None:
-        """Return R_base_camera for camera-frame covariance rotation."""
-        with self.camera_lock:
-            detector = self.camera_detector
-            output_frame = self.camera_output_frame
-        if detector is None or output_frame not in ("base_link", "sim_frame"):
-            return None
-        rotation = getattr(detector, "R_base_camera", None)
-        if rotation is None:
-            transform = getattr(detector, "T_base_camera", None)
-            if transform is not None:
-                T = np.asarray(transform, dtype=np.float64)
-                if T.shape == (4, 4) and np.all(np.isfinite(T)):
-                    rotation = T[:3, :3]
-        if rotation is None:
-            return None
-        R = np.asarray(rotation, dtype=np.float64)
-        if R.shape != (3, 3) or not np.all(np.isfinite(R)):
-            return None
-        return R.copy()
-
-    def camera_ball_state(self) -> tuple[np.ndarray, np.ndarray, bool, dict[str, Any]]:
-        now = time.time()
-        with self.camera_lock:
-            pos = (
-                None if self.latest_camera_ball_pos_m is None
-                else self.latest_camera_ball_pos_m.copy())
-            vel = (
-                None if self.latest_camera_ball_vel_m_s is None
-                else self.latest_camera_ball_vel_m_s.copy())
-            detector_pos = (
-                None if self.latest_camera_detector_pos_m is None
-                else self.latest_camera_detector_pos_m.copy())
-            detector_vel = (
-                None if self.latest_camera_detector_vel_m_s is None
-                else self.latest_camera_detector_vel_m_s.copy())
-            age = (
-                None if self.latest_camera_wall is None
-                else max(0.0, now - self.latest_camera_wall))
-            viz_age = (
-                None if self.latest_viz_wall is None
-                else max(0.0, now - self.latest_viz_wall))
-            image_ages = {
-                key: round(float(max(0.0, now - wall)), 6)
-                for key, wall in self.camera_last_image_wall_by_transport.items()
-            }
-            raw_measurement = self.latest_camera_raw_measurement
-            measurement = _camera_measurement_payload(raw_measurement)
-            detector_core = getattr(
-                self.camera_detector, "detector", None)
-            rgb_fps_values = getattr(
-                detector_core, "color_fps_queue", ())
-            rgb_fps = (
-                float(np.mean(list(rgb_fps_values)))
-                if rgb_fps_values else 0.0)
-            feedback = {
-                "enabled": bool(self.cfg.enable_camera_ball),
-                "available": bool(_CAMERA_BALL_AVAILABLE),
-                "ready": bool(self.camera_info_received and self.camera_detector is not None),
-                "sourceMode": self.cfg.camera_source_mode,
-                "useHybridDetector": bool(self.cfg.use_hybrid_detector),
-                "useDepthSensor": bool(self.cfg.use_depth_sensor),
-                "imageWidth": int(self.cfg.image_width),
-                "imageHeight": int(self.cfg.image_height),
-                "realsenseFps": int(self.cfg.realsense_fps),
-                "cameraInfoReceived": bool(self.camera_info_received),
-                "detectorReady": bool(self.camera_detector is not None),
-                "detected": bool(self.latest_camera_valid),
-                "stampS": (
-                    None if self.latest_camera_stamp_sec is None
-                    # Preserve the source timestamp exactly.  Rounding here
-                    # made the same camera frame look a few tenths of a
-                    # microsecond newer than the raw measurement path, so the
-                    # trajectory predictor counted it twice.
-                    else float(self.latest_camera_stamp_sec)
-                ),
-                "ageS": None if age is None else round(float(age), 6),
-                "frame": self.camera_output_frame,
-                "detectorFrame": self.latest_camera_detector_frame,
-                "controlFrame": "sim_frame",
-                "detectorBall": (
-                    None if detector_pos is None
-                    else [round(float(v), 6) for v in detector_pos]),
-                "detectorVelocity": (
-                    None if detector_vel is None
-                    else [round(float(v), 6) for v in detector_vel]),
-                "controlBall": (
-                    None if pos is None
-                    else [round(float(v), 6) for v in pos]),
-                "controlVelocity": (
-                    None if vel is None
-                    else [round(float(v), 6) for v in vel]),
-                "measurement": measurement,
-                "imageTopic": self.cfg.camera_image_topic,
-                "rawImageTopic": self.cfg.camera_raw_image_topic,
-                "imageTransport": self.cfg.camera_image_transport,
-                "activeTransport": self.camera_active_transport,
-                "imageAgesS": image_ages,
-                "cameraInfoTopic": self.cfg.camera_info_topic,
-                "frameCount": int(self.camera_frame_count),
-                "detectionCount": int(self.camera_detection_count),
-                "captureCount": int(self.camera_frames_acquired),
-                "captureReplacedCount": int(self.camera_frames_replaced),
-                "rgbFrameCount": int(getattr(
-                    detector_core, "color_frame_count", 0)),
-                "rgbFps": round(rgb_fps, 3),
-                "callbackHz": (
-                    round(float(1.0 / (sum(self.camera_callback_times) / len(self.camera_callback_times))), 3)
-                    if len(self.camera_callback_times) > 0
-                    and sum(self.camera_callback_times) > 0.0 else 0.0
-                ),
-                "visualizationRateHz": round(
-                    float(self.cfg.camera_visualization_rate_hz), 3),
-                "webMaxWidth": int(self.cfg.camera_web_max_width),
-                "webJpegQuality": int(self.cfg.camera_web_jpeg_quality),
-                "visualizationSeq": int(self.latest_viz_seq),
-                "visualizationAgeS": None if viz_age is None else round(float(viz_age), 6),
-                "runtime": self.camera_options.payload(),
-                "error": self.camera_error,
-            }
-            valid = bool(self.latest_camera_valid and pos is not None and vel is not None)
-        if not valid:
-            return (
-                np.zeros(3, dtype=np.float32),
-                np.zeros(3, dtype=np.float32),
-                False,
-                feedback,
-            )
-        return pos, vel, True, feedback
 
     def _poll_mocap_ball_state(self) -> None:
         if self.mocap_input is None:
@@ -8974,8 +9448,7 @@ class RosBridgeNode(Node):
         pos_sim, vel_sim, valid, feedback = self.mocap_input.get_control_state()
         pos_waist = feedback.get('waist03Ball')
         vel_waist = feedback.get('waist03Velocity')
-        stamp_sec = feedback.get('sourceTimestampS')
-        now_wall = time.time()
+        stamp_sec = feedback.get('measurementTimestampS')
         with self.mocap_lock:
             self.latest_mocap_ball_pos_m = (
                 None if not valid else np.asarray(pos_sim, dtype=np.float32).copy())
@@ -8990,12 +9463,11 @@ class RosBridgeNode(Node):
             self.latest_mocap_valid = bool(valid)
             self.latest_mocap_stamp_sec = (
                 None if stamp_sec is None else float(stamp_sec))
-            self.latest_mocap_wall = now_wall
+            self.latest_mocap_wall = feedback.get('receiverTimestampS')
             self.latest_mocap_feedback = dict(feedback)
 
     def mocap_ball_state(self) -> tuple[np.ndarray, np.ndarray, bool, dict[str, Any]]:
         self._poll_mocap_ball_state()
-        now = time.time()
         with self.mocap_lock:
             pos = (
                 None if self.latest_mocap_ball_pos_m is None
@@ -9003,18 +9475,15 @@ class RosBridgeNode(Node):
             vel = (
                 None if self.latest_mocap_ball_vel_m_s is None
                 else self.latest_mocap_ball_vel_m_s.copy())
-            age = (
-                None if self.latest_mocap_wall is None
-                else max(0.0, now - self.latest_mocap_wall))
             feedback = dict(self.latest_mocap_feedback)
             feedback.update({
                 'enabled': bool(self.cfg.enable_mocap_ball),
                 'available': bool(_MOCAP_BALL_AVAILABLE),
-                'ready': self.mocap_input is not None,
-                'ageS': None if age is None else round(float(age), 6),
+                'ready': bool(self.mocap_input is not None
+                              and feedback.get('clockSync', {}).get('ready', False)),
                 'stampS': (
                     None if self.latest_mocap_stamp_sec is None
-                    else round(float(self.latest_mocap_stamp_sec), 6)),
+                    else float(self.latest_mocap_stamp_sec)),
                 'detected': bool(self.latest_mocap_valid),
                 'controlFrame': 'sim_frame',
                 'detectorFrame': 'waist03_cartesian',
@@ -9064,49 +9533,8 @@ class RosBridgeNode(Node):
             )
         return pos, vel, True, stamp_sec, feedback
 
-    def camera_ball_measurement(
-        self,
-    ) -> tuple[np.ndarray, np.ndarray, bool, float | None]:
-        pos, vel, valid, stamp_sec, _measurement = (
-            self.camera_ball_measurement_with_diagnostics())
-        return pos, vel, valid, stamp_sec
 
-    def camera_ball_measurement_with_diagnostics(
-        self,
-    ) -> tuple[
-        np.ndarray,
-        np.ndarray,
-        bool,
-        float | None,
-        dict[str, Any] | None,
-    ]:
-        with self.camera_lock:
-            pos = (
-                None if self.latest_camera_ball_pos_m is None
-                else self.latest_camera_ball_pos_m.copy())
-            vel = (
-                None if self.latest_camera_ball_vel_m_s is None
-                else self.latest_camera_ball_vel_m_s.copy())
-            valid = bool(
-                self.latest_camera_valid and pos is not None and vel is not None)
-            stamp_sec = self.latest_camera_stamp_sec
-            measurement = _camera_measurement_payload(
-                self.latest_camera_raw_measurement)
-        if not valid:
-            return (
-                np.zeros(3, dtype=np.float32),
-                np.zeros(3, dtype=np.float32),
-                False,
-                stamp_sec,
-                measurement,
-            )
-        return pos, vel, True, stamp_sec, measurement
 
-    def camera_control_frame_status(self) -> tuple[bool, str]:
-        """Report whether camera observations include a calibrated rotation."""
-        with self.camera_lock:
-            frame = str(self.camera_output_frame or "camera")
-        return frame in {"base_link", "sim_frame"}, frame
 
     def now_sec(self) -> float:
         return float(self.get_clock().now().nanoseconds) * 1e-9
@@ -9335,60 +9763,7 @@ class RosBridgeNode(Node):
             except Exception:
                 pass
 
-    def _close_camera_detector(self, detector: Any) -> None:
-        if detector is None:
-            return
-        try:
-            close = getattr(detector, "close", None)
-            if callable(close):
-                close()
-                return
-        except Exception as exc:  # noqa: BLE001
-            self.get_logger().warn(f"Error closing camera detector: {exc}")
-        for candidate in (
-                detector,
-                getattr(detector, "detector", None),
-                getattr(getattr(detector, "detector", None), "pipeline", None),
-                getattr(detector, "pipeline", None)):
-            if candidate is None:
-                continue
-            pipeline = (
-                candidate if hasattr(candidate, "stop")
-                else getattr(candidate, "pipeline", None))
-            stop = getattr(pipeline, "stop", None)
-            if not callable(stop):
-                continue
-            try:
-                stop()
-            except Exception:
-                pass
 
-    def shutdown_camera_source(self) -> None:
-        self.stop_backend_control_timer()
-        self.camera_direct_running = False
-        self.camera_frame_event.set()
-        with self.camera_lock:
-            detector = self.camera_detector
-        self._close_camera_detector(detector)
-        capture_thread = self.camera_capture_thread
-        if capture_thread is not None and capture_thread.is_alive():
-            capture_thread.join(timeout=3.0)
-        thread = self.camera_direct_thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=3.0)
-        self.camera_viz_running = False
-        self.camera_viz_event.set()
-        viz_thread = self.camera_viz_thread
-        if viz_thread is not None and viz_thread.is_alive():
-            viz_thread.join(timeout=1.0)
-        with self.camera_lock:
-            detector = self.camera_detector
-            self.camera_detector = None
-            self.camera_detector_key = None
-            self.camera_capture_thread = None
-            self.camera_direct_thread = None
-            self.camera_viz_thread = None
-        self._close_camera_detector(detector)
 
     def shutdown_mocap_source(self) -> None:
         with self.mocap_lock:
@@ -9488,6 +9863,12 @@ class RosBridge:
     def set_mocap_marker_id(self, marker_id: int) -> None:
         self.node.set_mocap_marker_id(marker_id)
 
+    def resynchronize_ball_clock(self, source):
+        self.node.resynchronize_ball_clock(source)
+
+    def ball_clock_status(self, source):
+        return self.node.ball_clock_status(source)
+
     def camera_ball_measurement(
         self,
     ) -> tuple[np.ndarray, np.ndarray, bool, float | None]:
@@ -9543,6 +9924,7 @@ class RosBridge:
 
     def shutdown(self) -> None:
         try:
+            self.node.stop_backend_control_timer()
             self.node.shutdown_camera_source()
             self.node.shutdown_mocap_source()
             self.executor.shutdown()
@@ -9555,6 +9937,11 @@ class RosBridge:
 class PolicySafetyProbe:
     def __init__(self, cfg: ProbeConfig):
         self.cfg = cfg
+        self.base_ee_limits_m = (
+            cfg.ee_x_limits_m, cfg.ee_y_limits_m, cfg.ee_z_limits_m)
+        self._set_policy_workspace_limits(cfg.policy_profile)
+        if cfg.policy_profile in FPLC_PROFILES:
+            cfg.workspace_safety_mode = "position"
         self.lock = threading.Lock()
         self.ros_bridge: RosBridge | None = None
         self.ball_estimator: Any | None = None
@@ -9583,6 +9970,8 @@ class PolicySafetyProbe:
         self.policy_ball_sample_age_s = 0.0
         self.policy_ball_sample_has_valid = False
         self.policy_ball_sample_source_stamp_s: float | None = None
+        self.policy_ball_hold_source_key: tuple[Any, ...] | None = None
+        self.policy_ball_hold_monotonic_s: float | None = None
         self.policy_ball_handover_blend = BoundedHandoverBlend(
             max_position_innovation_m=float(
                 cfg.high_ball_prediction_reacquisition_gate_m),
@@ -9627,10 +10016,6 @@ class PolicySafetyProbe:
         self.last_policy_dq_adapter_info = (
             self.policy_dq_adapter.status())
         self.safe_q = target_right_arm_q_rad().astype(np.float32)
-        reset_pose_id, reset_pose_q = _reset_initial_pose_q_rad(
-            cfg.reset_initial_pose_id)
-        self.reset_initial_pose_id = reset_pose_id
-        self.reset_initial_pose_q = reset_pose_q.astype(np.float64).copy()
         # Compatibility name only: this object intentionally has no
         # filter/reset/observe entry points.  Policy publication and reset
         # must never enter RightArmCommandSafetyLimiter; the small amount of
@@ -9703,6 +10088,7 @@ class PolicySafetyProbe:
         self.publish_rearm_required = False
         self.publish_rearm_off_seen = False
         self.publish_rearm_reason = ""
+        self.publish_rearm_details: dict[str, Any] = {}
         self.last_command_arm: dict[str, Any] = {
             "armed": False,
             "reason": "not_requested",
@@ -9723,6 +10109,9 @@ class PolicySafetyProbe:
         self.control_loop_last_error: str | None = None
         self.control_loop_last_wall: float | None = None
         self.control_loop_tick = 0
+        from pingpong_controller.control_deadline import PolicyDeadlineMonitor
+        self.policy_deadline_monitor = PolicyDeadlineMonitor(cfg.control_dt)
+        self.policy_tick_active = False
         self.backend_snapshot_period_s = (
             1.0 / max(float(cfg.backend_snapshot_rate_hz), 1e-6))
         self.backend_next_snapshot_wall = 0.0
@@ -9744,6 +10133,10 @@ class PolicySafetyProbe:
         self.policy_generation = 0
         self.controller = self._build_release_locked_policy_controller(
             self.active_policy_profile)
+        self.reset_initial_pose_id, self.reset_initial_pose_q = self._resolve_reset_initial_pose(
+            cfg.reset_initial_pose_id)
+        if self.active_policy_profile in FPLC_PROFILES:
+            self.safe_q = self.reset_initial_pose_q.astype(np.float32).copy()
         self.active_policy_model = _controller_policy_model_id(
             self.active_policy_profile,
             self.controller,
@@ -9757,8 +10150,10 @@ class PolicySafetyProbe:
         self.policy_controllers = {
             self.active_policy_profile: self.controller,
         }
-        if self.active_policy_profile in EAGER_POLICY_PROFILES:
-            for switch_profile in EAGER_POLICY_PROFILES:
+        preload_profiles = (FPLC_PROFILES if self.active_policy_profile in FPLC_PROFILES
+                            else EAGER_POLICY_PROFILES)
+        if self.active_policy_profile in PROFILE_IDENTIFIED_MODEL_PROFILES:
+            for switch_profile in preload_profiles:
                 if switch_profile not in self.policy_controllers:
                     self.policy_controllers[switch_profile] = (
                         self._build_release_locked_policy_controller(
@@ -9906,6 +10301,11 @@ class PolicySafetyProbe:
         policy_model: str | None = None,
     ):
         cfg = self.cfg
+        if profile in FPLC_PROFILES:
+            model, xml = fplc_assets(profile)
+            return FPLCPolicyController(
+                str(model), observation_profile=profile,
+                dt=cfg.control_dt, robot_xml_path=str(xml))
         gpu0_model_paths = {
             GPU0_RMP_MODEL_V85: cfg.simcode7_v85_model_path,
             GPU0_RMP_MODEL_V91: cfg.simcode7_v91_model_path,
@@ -10121,8 +10521,6 @@ class PolicySafetyProbe:
                 "resetPose",
                 payload.get("initialPose", self.reset_initial_pose_id),
             ))
-        reset_pose_id, requested_reset_q = _reset_initial_pose_q_rad(
-            preset_raw)
         with self.lock:
             self._accept_control_client_payload(
                 payload, allow_reset_takeover=True)
@@ -10135,6 +10533,7 @@ class PolicySafetyProbe:
                 policy_selection_changed = bool(
                     self._select_policy_model(payload["policyModel"])
                     or policy_selection_changed)
+            reset_pose_id, requested_reset_q = self._resolve_reset_initial_pose(preset_raw)
             if self.runtime_options is not None:
                 runtime_updates = {
                     "policy_profile": self.active_policy_profile,
@@ -10179,10 +10578,11 @@ class PolicySafetyProbe:
                 self.policy_plant_matcher.initialized = False
                 self.policy_plant_matcher.previous_sample = None
             self._sync_policy_to_safe_pose(reset_seed_q)
-            self.safety_limiter.last_cmd = np.asarray(
-                reset_seed_q, dtype=np.float64).copy()
-            self.safety_limiter.last_vel = np.zeros(
-                len(RIGHT_ARM_JOINTS), dtype=np.float64)
+            if self.active_policy_profile not in FPLC_PROFILES:
+                self.safety_limiter.last_cmd = np.asarray(
+                    reset_seed_q, dtype=np.float64).copy()
+                self.safety_limiter.last_vel = np.zeros(
+                    len(RIGHT_ARM_JOINTS), dtype=np.float64)
             reset_ball_pos, reset_ball_vel, reset_ball_contract = (
                 self._reset_ball_state(reset_target_q))
             self.reset_ball_contract = dict(reset_ball_contract)
@@ -10298,6 +10698,8 @@ class PolicySafetyProbe:
             self.policy_ball_sample_age_s = 0.0
             self.policy_ball_sample_has_valid = False
             self.policy_ball_sample_source_stamp_s = None
+            self.policy_ball_hold_source_key = None
+            self.policy_ball_hold_monotonic_s = None
             self.policy_confirmed_hit_count = 0
             self._previous_inferred_contact_flag = False
             self.last_estimator_info = self._estimator_off_payload()
@@ -10364,6 +10766,7 @@ class PolicySafetyProbe:
         """Return the profile-specific reset ball contract."""
         velocity = np.zeros(3, dtype=np.float32)
         if (uses_corrected_67d_observation(self.active_policy_profile)
+                or self.active_policy_profile in FPLC_PROFILES
                 or self.active_policy_profile
                 == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
             env_cfg = dict(getattr(
@@ -10496,6 +10899,18 @@ class PolicySafetyProbe:
             return self.safe_q.astype(np.float64)
         return q.astype(np.float64)
 
+    def _resolve_reset_initial_pose(self, preset: Any) -> tuple[str, np.ndarray]:
+        if self.active_policy_profile in FPLC_PROFILES:
+            q = self.controller.native_reset_arm_q.astype(np.float64).copy()
+            limits = fplc_workspace_intersection((
+                self.cfg.ee_x_limits_m, self.cfg.ee_y_limits_m, self.cfg.ee_z_limits_m))
+            if not self.controller.pose_is_safe(q, limits):
+                raise RuntimeError("simcode9 native reset lies outside the configured real safety workspace")
+            return RESET_INITIAL_POSE_FPLC, q
+        if _reset_initial_pose_id(preset) == RESET_INITIAL_POSE_FPLC:
+            preset = RESET_INITIAL_POSE_HORIZONTAL
+        return _reset_initial_pose_q_rad(preset)
+
     def _sync_policy_to_safe_pose(
         self,
         q_reference: np.ndarray | None = None,
@@ -10514,6 +10929,8 @@ class PolicySafetyProbe:
         self.controller.last_cmd_qvel = self.controller.arm_cmd_qvel.copy()
         self.controller.last_cmd_qacc = np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float32)
         self.controller.last_action = np.zeros(len(RIGHT_ARM_JOINTS), dtype=np.float32)
+        if getattr(self, "active_policy_profile", "") in FPLC_PROFILES:
+            self.controller.invalidate_after_intervention()
         if (getattr(self, "active_policy_profile", "")
                 == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
             self.controller.prev_action = np.zeros(
@@ -10702,6 +11119,7 @@ class PolicySafetyProbe:
             self.publish_rearm_required = False
             self.publish_rearm_off_seen = False
             self.publish_rearm_reason = ""
+            self.publish_rearm_details = {}
 
     def _resume_or_reanchor_active_reset(
         self,
@@ -10743,7 +11161,7 @@ class PolicySafetyProbe:
         }
         return True
 
-    def _require_publish_rearm(self, reason: str) -> None:
+    def _require_publish_rearm(self, reason: str, *, details: dict[str, Any] | None = None) -> None:
         normalized_reason = str(reason or "safety_transition")
         if (bool(getattr(self, "publish_rearm_required", False))
                 and str(getattr(
@@ -10752,6 +11170,11 @@ class PolicySafetyProbe:
         self.publish_rearm_required = True
         self.publish_rearm_off_seen = False
         self.publish_rearm_reason = normalized_reason
+        # Preserve the first triggering sample until an explicit re-arm/reset.
+        # Live feedback may already be fresh when the browser sees the stop.
+        self.publish_rearm_details = dict(details or {})
+        print(f"[CommandSafety][STOP] Send command disabled: {normalized_reason} "
+              f"details={json.dumps(self.publish_rearm_details, ensure_ascii=False)}", flush=True)
         self.policy_switch_publish_rearm_required = bool(
             self.publish_rearm_reason in {
                 "policy_profile_changed",
@@ -10849,6 +11272,7 @@ class PolicySafetyProbe:
             self.publish_rearm_required = False
             self.publish_rearm_off_seen = False
             self.publish_rearm_reason = ""
+            self.publish_rearm_details = {}
             self.policy_switch_publish_rearm_required = False
             self.reset_publish_blocked = False
             self._release_reset_hold_for_rearm()
@@ -11012,7 +11436,10 @@ class PolicySafetyProbe:
             self.reset_tracking_paused = True
             self.reset_publish_blocked = True
             self.command_stream_active = False
-            self._require_publish_rearm("reset_joint_feedback_stale")
+            self._require_publish_rearm("reset_joint_feedback_stale", details={
+                "jointFeedbackAgeS": self.last_reset_feedback.get("ageS"),
+                "maximumJointFeedbackAgeS": RESET_FEEDBACK_MAX_AGE_S,
+            })
             if getattr(self, "runtime_options", None) is not None:
                 self.runtime_options = replace(
                     self.runtime_options, publish_commands=False)
@@ -11031,8 +11458,9 @@ class PolicySafetyProbe:
                 return q.copy()
         self.reset_tracking_paused = False
         q, dq, done = trajectory.step()
-        self.safety_limiter.last_cmd = np.asarray(q, dtype=np.float64).copy()
-        self.safety_limiter.last_vel = np.asarray(dq, dtype=np.float64).copy()
+        if getattr(self, "active_policy_profile", "") not in FPLC_PROFILES:
+            self.safety_limiter.last_cmd = np.asarray(q, dtype=np.float64).copy()
+            self.safety_limiter.last_vel = np.asarray(dq, dtype=np.float64).copy()
         if getattr(self, "controller", None) is not None:
             self._sync_controller_to_tracking_command(
                 q, dq, reset_acceleration=False)
@@ -11149,6 +11577,22 @@ class PolicySafetyProbe:
         self.policy_needs_reentry_reset = True
         self._reset_policy_dq_adapter("policy_paused")
 
+    def _set_policy_workspace_limits(self, profile: str) -> None:
+        """Select from the original envelope, never the previous policy's box."""
+        limits = self.base_ee_limits_m
+        if profile in FPLC_PROFILES:
+            limits = fplc_workspace_intersection(limits)
+        self.cfg.ee_x_limits_m, self.cfg.ee_y_limits_m, self.cfg.ee_z_limits_m = limits
+        # Reset/profile selection can produce a snapshot before the next
+        # control tick. Keep its done monitor on the same envelope immediately.
+        monitor = getattr(self, "done_monitor", None)
+        if monitor is not None:
+            mode = ("position" if profile in FPLC_PROFILES else getattr(
+                self, "active_workspace_safety_mode", self.cfg.workspace_safety_mode))
+            enabled = mode != "off"
+            monitor.ee_x_limits, monitor.ee_y_limits, monitor.ee_z_limits = (
+                limits if enabled else (None, None, None))
+
     def _select_policy_profile(self, requested_profile: object) -> bool:
         """Atomically switch between pre-authenticated deployment profiles."""
         profile = normalize_observation_profile(requested_profile)
@@ -11170,8 +11614,12 @@ class PolicySafetyProbe:
             self.policy_controllers[profile] = controller
         reset_q = np.asarray(
             self._safety_limiter_reset_reference(), dtype=np.float32).reshape(-1)
+        self._set_policy_workspace_limits(profile)
         self.active_policy_profile = profile
         self.controller = controller
+        if (profile in FPLC_PROFILES or getattr(self, "reset_initial_pose_id", None) == RESET_INITIAL_POSE_FPLC):
+            self.reset_initial_pose_id, self.reset_initial_pose_q = self._resolve_reset_initial_pose(
+                getattr(self, "reset_initial_pose_id", RESET_INITIAL_POSE_DEFAULT))
         self.active_policy_model = _controller_policy_model_id(
             profile,
             self.controller,
@@ -11197,6 +11645,8 @@ class PolicySafetyProbe:
 
     def _select_policy_model(self, requested_model: object) -> bool:
         """Switch the active profile's approved hash-pinned actor."""
+        if self.active_policy_profile in FPLC_PROFILES:
+            return False
         if self.active_policy_profile == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
             # GPU1 has one authenticated actor.  Ignore the disabled GPU0
             # selector's stale value and keep the runtime identity explicit.
@@ -11719,16 +12169,22 @@ class PolicySafetyProbe:
                     policy_generation=self.policy_generation,
                     confirmed_hit_count=int(getattr(
                         self, "policy_confirmed_hit_count", 0)),
+                    direct_ball_input={
+                        key: value.tolist() if isinstance(value, np.ndarray) else value
+                        for key, value in dict(getattr(
+                            self, "fplc_direct_ball_input", {}) or {}).items()},
                 )
                 self.recorder.record_sim_control_samples(
                     self.sim_mirror.drain_completed_samples())
             else:
                 submitted_wall_s = time.time()
                 direct_step_kwargs = {}
-                if (self.active_policy_profile
-                        == OBSERVATION_PROFILE_GPU1_QACC_FT_V153):
+                if self.active_policy_profile in (OBSERVATION_PROFILE_GPU1_QACC_FT_V153, *FPLC_PROFILES):
                     direct_step_kwargs["confirmed_hit_count"] = int(getattr(
                         self, "policy_confirmed_hit_count", 0))
+                if self.active_policy_profile in FPLC_PROFILES:
+                    direct_step_kwargs["direct_ball_input"] = dict(getattr(
+                        self, "fplc_direct_ball_input", {}) or {})
                 snap = self.sim_mirror.step(
                     ball_pos,
                     ball_vel,
@@ -14462,7 +14918,7 @@ class PolicySafetyProbe:
             getattr(self, "active_policy_profile", "") in {
                 OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                 OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-            })
+                *FPLC_PROFILES})
         maximum_arm_age_s = (
             0.010 if requires_timed_feedback
             else 0.05
@@ -14482,21 +14938,27 @@ class PolicySafetyProbe:
             if self._reset_recovery_active():
                 self.reset_publish_blocked = True
                 self._require_publish_rearm(
-                    "reset_arm_fresh_joint_feedback_required")
+                    "reset_arm_fresh_joint_feedback_required", details={
+                        "jointFeedbackAgeS": feedback_age_s,
+                        "maximumJointFeedbackAgeS": maximum_arm_age_s,
+                    })
             return False
-        hold_q = np.clip(
-            hold_q,
-            RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
-            RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
-        )
+        is_fplc = getattr(self, "active_policy_profile", "") in FPLC_PROFILES
+        if not is_fplc:
+            hold_q = np.clip(
+                hold_q,
+                RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
+                RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
+            )
         self._resume_or_reanchor_active_reset(hold_q)
         # This helper resets recurrent policy command history from current ROS
         # feedback rather than the fixed reset/safe pose.
         self._reset_real_policy_for_sim_reentry()
-        self.safety_limiter.last_cmd = hold_q.copy()
-        self.safety_limiter.last_vel = np.zeros_like(hold_q)
-        self._reset_servo_target_planner(hold_q)
-        self._reset_compensator_to_current_arm(hold_q)
+        if not is_fplc:
+            self.safety_limiter.last_cmd = hold_q.copy()
+            self.safety_limiter.last_vel = np.zeros_like(hold_q)
+            self._reset_servo_target_planner(hold_q)
+            self._reset_compensator_to_current_arm(hold_q)
         self._hold_racket_tracker("command_stream_arm_hold", hold_q)
         self._hold_juggle_controller(
             "command stream armed; toggle juggling Start off then on",
@@ -14533,11 +14995,12 @@ class PolicySafetyProbe:
         except Exception:
             feedback_q = None
         hold_q = self._right_arm_joint_vector_or_none(feedback_q)
+        is_fplc = getattr(self, "active_policy_profile", "") in FPLC_PROFILES
         fresh = bool(
             hold_q is not None
-            and (feedback_age_s is None
-                 or (math.isfinite(float(feedback_age_s))
-                     and float(feedback_age_s) <= 0.05)))
+            and ((feedback_age_s is None and not is_fplc)
+                 or (feedback_age_s is not None and math.isfinite(float(feedback_age_s))
+                     and float(feedback_age_s) <= (0.010 if is_fplc else 0.05))))
         if not fresh or hold_q is None:
             self._hold_racket_tracker(
                 "command_stream_disabled_no_fresh_feedback")
@@ -14560,16 +15023,18 @@ class PolicySafetyProbe:
                 flush=True,
             )
             return False
-        hold_q = np.clip(
-            np.asarray(hold_q, dtype=np.float64),
-            RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
-            RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
-        )
+        if not is_fplc:
+            hold_q = np.clip(
+                np.asarray(hold_q, dtype=np.float64),
+                RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
+                RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
+            )
         self.ros_bridge.publish_right_arm_command(hold_q)
-        self.safety_limiter.last_cmd = hold_q.copy()
-        self.safety_limiter.last_vel = np.zeros_like(hold_q)
-        self._reset_servo_target_planner(hold_q)
-        self._reset_compensator_to_current_arm(hold_q)
+        if not is_fplc:
+            self.safety_limiter.last_cmd = hold_q.copy()
+            self.safety_limiter.last_vel = np.zeros_like(hold_q)
+            self._reset_servo_target_planner(hold_q)
+            self._reset_compensator_to_current_arm(hold_q)
         self._hold_racket_tracker("command_stream_disabled", hold_q)
         self._hold_juggle_controller(
             "command stream disabled; juggling requires rearm",
@@ -14615,11 +15080,12 @@ class PolicySafetyProbe:
         except Exception:
             feedback_q = None
         hold_q = self._right_arm_joint_vector_or_none(feedback_q)
+        is_fplc = getattr(self, "active_policy_profile", "") in FPLC_PROFILES
         fresh = bool(
             hold_q is not None
-            and (feedback_age_s is None
-                 or (math.isfinite(float(feedback_age_s))
-                     and float(feedback_age_s) <= 0.05)))
+            and ((feedback_age_s is None and not is_fplc)
+                 or (feedback_age_s is not None and math.isfinite(float(feedback_age_s))
+                     and float(feedback_age_s) <= (0.010 if is_fplc else 0.05))))
         if not fresh or hold_q is None:
             self.command_stream_active = False
             self.last_command_disable_hold = {
@@ -14634,16 +15100,18 @@ class PolicySafetyProbe:
                 flush=True,
             )
             return False
-        hold_q = np.clip(
-            np.asarray(hold_q, dtype=np.float64),
-            RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
-            RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
-        )
+        if not is_fplc:
+            hold_q = np.clip(
+                np.asarray(hold_q, dtype=np.float64),
+                RightArmCommandSafetyLimiter.POS_LIMIT_LOW_RAD,
+                RightArmCommandSafetyLimiter.POS_LIMIT_HIGH_RAD,
+            )
         self.ros_bridge.publish_right_arm_command(hold_q)
-        self.safety_limiter.last_cmd = hold_q.copy()
-        self.safety_limiter.last_vel = np.zeros_like(hold_q)
-        self._reset_servo_target_planner(hold_q)
-        self._reset_compensator_to_current_arm(hold_q)
+        if not is_fplc:
+            self.safety_limiter.last_cmd = hold_q.copy()
+            self.safety_limiter.last_vel = np.zeros_like(hold_q)
+            self._reset_servo_target_planner(hold_q)
+            self._reset_compensator_to_current_arm(hold_q)
         self._hold_racket_tracker("hard_workspace_stop", hold_q)
         self.last_policy_nominal_reference = hold_q.copy()
         self.last_compensated_reference = hold_q.copy()
@@ -14848,6 +15316,12 @@ class PolicySafetyProbe:
             self.compensation_was_enabled = False
             return self._publish_hold_on_command_disable()
         publish_profile_name = str(profile).strip().lower()
+        if (getattr(self, "active_policy_profile", "") in FPLC_PROFILES
+                and publish_profile_name != "reset"
+                and bool(getattr(self, "publish_rearm_required", False))):
+            # The caller can still hold this tick's old RuntimeOptions after
+            # inference/profile failure. Never re-arm from that stale request.
+            return self._publish_hold_on_command_disable()
         if (publish_profile_name == "reset"
                 and bool(getattr(self, "reset_publish_blocked", False))):
             self.compensation_was_enabled = False
@@ -15059,6 +15533,69 @@ class PolicySafetyProbe:
                 return held
         else:
             self.gpu0_rmp_safety_intervention_streak = 0
+        if (getattr(self, "active_policy_profile", profile_name) in FPLC_PROFILES
+                and publish_profile_name != "reset"):
+            limits = fplc_workspace_intersection((
+                self.cfg.ee_x_limits_m, self.cfg.ee_y_limits_m, self.cfg.ee_z_limits_m))
+            try:
+                measured_q, _measured_dq, feedback_age, _source = (
+                    self.ros_bridge.get_joint_feedback_with_age())
+            except Exception:
+                measured_q, feedback_age = None, None
+            actor_target = self._right_arm_joint_vector_or_none(
+                getattr(self.controller, "last_cmd_q", None))
+            actor_command = bool(
+                publish_profile_name == "normal"
+                and str(getattr(options, "control_mode", "policy")) == "policy")
+            feedback_fresh = bool(
+                measured_q is not None and feedback_age is not None
+                and math.isfinite(float(feedback_age))
+                and 0.0 <= float(feedback_age) <= 0.010)
+            command_delta = (
+                None if actor_target is None
+                else float(np.max(np.abs(safe - actor_target))))
+            faults = {
+                "joint_feedback_not_fresh": not feedback_fresh,
+                "measured_pose_outside_envelope": bool(
+                    measured_q is not None
+                    and not self.controller.pose_is_safe(measured_q, limits)),
+                "target_pose_outside_envelope": not self.controller.pose_is_safe(safe, limits),
+                "actor_target_missing": bool(actor_command and actor_target is None),
+                "actor_target_rewritten": bool(
+                    actor_command and command_delta is not None and command_delta > 1e-6),
+            }
+            if any(faults.values()):
+                details = {
+                    "faults": [name for name, active in faults.items() if active],
+                    "jointFeedbackAgeS": (
+                        float(feedback_age) if feedback_age is not None
+                        and math.isfinite(float(feedback_age)) else None),
+                    "maximumJointFeedbackAgeS": 0.010,
+                    "actorCommandDeltaMaxAbsRad": command_delta,
+                    "positionLimitsM": [list(pair) for pair in limits],
+                    "relativeRollPitchLimitDeg": np.rad2deg(self.controller.real_rp_outer).tolist(),
+                }
+                # Extra FK only on a stop, never on the normal 200 Hz path.
+                for name, q in (("measuredPose", measured_q), ("targetPose", safe)):
+                    if self._right_arm_joint_vector_or_none(q) is not None:
+                        try:
+                            pose = self.controller._pose(q)
+                            details[name] = {
+                                "positionM": _rounded_vector(pose[2]),
+                                "relativeRpyDeg": _rounded_vector(np.rad2deg(pose[3])),
+                            }
+                        except (RuntimeError, ValueError, np.linalg.LinAlgError):
+                            pass
+                self.controller.invalidate_after_intervention()
+                self._mark_policy_paused()
+                self._require_publish_rearm(
+                    "fplc_workspace_or_command_boundary_fault", details=details)
+                self.done_failsafe_active = True
+                self.done_failsafe_reason = "fplc_workspace_or_command_boundary_fault"
+                self.done_failsafe_conditions = {"fplc_hard_envelope": True}
+                self._latch_hard_workspace_stop(
+                    "fplc_workspace_or_command_boundary_fault", {"fplc_hard_envelope": True})
+                return self._stop_hard_workspace_command_stream()
         self.ros_bridge.publish_right_arm_command(safe)
         self.last_published_safe_reference = np.asarray(
             safe, dtype=np.float64).copy()
@@ -15112,7 +15649,9 @@ class PolicySafetyProbe:
     def _start_backend_control_loop(self) -> None:
         if self.control_loop_thread is not None and self.control_loop_thread.is_alive():
             return
-        if self.ros_bridge is not None:
+        if (self.ros_bridge is not None
+                and self.active_policy_profile not in {
+                    *FPLC_PROFILES, OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85}):
             self.control_loop_stop.clear()
             self.control_loop_uses_ros_timer = True
             self.ros_bridge.start_backend_control_timer(
@@ -15120,6 +15659,9 @@ class PolicySafetyProbe:
             return
         self.control_loop_stop.clear()
         self.control_loop_uses_ros_timer = False
+        # The fixed 5 ms FPLC/GPU0 loop runs independently of the ROS executor's
+        # feedback/camera callback queue. Reads still use atomic measured
+        # samples and the same freshness gates; no samples are manufactured.
         self.control_loop_thread = threading.Thread(
             target=self._backend_control_loop,
             name="policy_probe_200hz_control",
@@ -15223,6 +15765,7 @@ class PolicySafetyProbe:
 
     def _run_backend_control_once(self) -> None:
         start = time.perf_counter()
+        self.control_tick_started_perf = start
         try:
             self._run_backend_control_tick()
             self.control_loop_last_error = None
@@ -15248,9 +15791,14 @@ class PolicySafetyProbe:
         self._run_backend_control_once()
 
     def _backend_control_loop(self) -> None:
+        if self.active_policy_profile in {*FPLC_PROFILES, OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85}:
+            from pingpong_controller.control_runtime import configure_control_thread
+            self.control_thread_runtime = configure_control_thread()
+            print('[ControlTiming][SCHEDULER] ' + json.dumps(self.control_thread_runtime), flush=True)
         next_t = time.perf_counter()
         dt = self.cfg.control_dt
         while not self.control_loop_stop.is_set():
+            self.control_tick_deadline_perf = next_t + dt
             self._run_backend_control_once()
             next_t += dt
             sleep_s = next_t - time.perf_counter()
@@ -15279,6 +15827,45 @@ class PolicySafetyProbe:
     def _run_backend_control_tick(self) -> None:
         with self.lock:
             options = self.runtime_options or self._runtime_options_from_payload({})
+            scheduling = getattr(self, 'control_thread_runtime', {})
+            if (options.publish_commands
+                    and scheduling.get('requestedRealtimePriority', 0) > 0
+                    and scheduling.get('realtimeApplied') is False
+                    and getattr(self.cfg, 'ros_bridge', False)):
+                self._require_publish_rearm('control_realtime_unavailable', details=dict(scheduling))
+                self._mark_policy_paused()
+                held = self._publish_hold_on_command_disable()
+                self.latest_snapshot_payload = self.snapshot(
+                    'control_schedule_hold', 'control_realtime_unavailable',
+                    {'control_realtime_unavailable': True},
+                    self.last_ball_pos, self.last_observed_ball_pos,
+                    self.last_observed_ball_vel, False, 0., 0.,
+                    runtime_options=replace(options, publish_commands=False),
+                    use_ros_state=options.use_ros_state, publish_commands=False,
+                    command_published=held, raw_valid=False)
+                return
+            deadline_fault = self.policy_deadline_monitor.start(
+                time.perf_counter(),
+                self.policy_tick_active and options.publish_commands
+                and self.active_policy_profile in {
+                    *FPLC_PROFILES, OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85},
+                self.active_policy_profile)
+            if deadline_fault is not None:
+                self.policy_tick_active = False
+                self._require_publish_rearm('policy_control_timing_fault', details=deadline_fault)
+                self._mark_policy_paused()
+                if hasattr(self.controller, 'invalidate_after_intervention'):
+                    self.controller.invalidate_after_intervention()
+                held = self._publish_hold_on_command_disable()
+                self.latest_snapshot_payload = self.snapshot(
+                    'policy_timing_hold', 'policy_control_timing_fault',
+                    {'policy_control_timing_fault': True},
+                    self.last_ball_pos, self.last_observed_ball_pos,
+                    self.last_observed_ball_vel, False, 0., 0.,
+                    runtime_options=replace(options, publish_commands=False),
+                    use_ros_state=options.use_ros_state, publish_commands=False,
+                    command_published=held, raw_valid=False)
+                return
             if (options.publish_commands
                     and time.monotonic()
                     > float(self.command_publish_lease_deadline_wall)):
@@ -16249,7 +16836,7 @@ class PolicySafetyProbe:
                 options,
                 "policy_profile",
                 OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
-            )) == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
+            )) in (OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85, *FPLC_PROFILES))
         )
         if ((strict_camera_mode or corrected_policy_age)
                 and _is_sensor_ball_source(options.ball_source)):
@@ -16286,6 +16873,15 @@ class PolicySafetyProbe:
                     t_predict = t_update
             if t_predict < t_update:
                 t_predict = t_update
+            if (getattr(options, 'ball_source', '') == 'mocap'
+                    and self.last_ball_observation_stamp_s is not None
+                    and t_update < self.last_ball_observation_stamp_s):
+                # The synchronized ROS clock can start a new epoch. Discard
+                # observation timing/filter state instead of rejecting every
+                # new frame until the previous epoch's time is reached.
+                est.reset()
+                self.last_ball_observation_stamp_s = None
+                self.next_ball_observation_s = t_update
         obs_rate = max(float(options.ball_observation_rate_hz), 1e-6)
         obs_period = 1.0 / obs_rate
 
@@ -16390,6 +16986,110 @@ class PolicySafetyProbe:
         vel = np.asarray(out.get("velocity", [0.0, 0.0, 0.0]), dtype=np.float32).reshape(3) * 1e-3
         return pos, vel, True, max(0.0, age_s), info
 
+    def _hold_fplc_ball_state(
+        self,
+        pos: np.ndarray,
+        vel: np.ndarray,
+        valid: bool,
+        age_s: float | None,
+        options: RuntimeOptions,
+        *,
+        source_timestamp_s: float | None,
+    ) -> tuple[np.ndarray, np.ndarray, bool, float]:
+        """Bound detector dropouts without adding a second 90 Hz sampler.
+
+        FPLC owns its fractional camera clock and observed/history flags.
+        Only represented-state validity is held here, as on GPU0 REAL-RMP;
+        the direct observed flag remains false during a detector miss.
+        Prediction expiry and explicit invalid drag input never gain a hold.
+        """
+        profile = normalize_observation_profile(options.policy_profile)
+        source_key = (
+            profile, options.ball_source, options.use_ball_estimator,
+            getattr(options, "estimator_backend", None),
+            getattr(options, "high_ball_occlusion_prediction", False),
+            getattr(options, "sensor_depth_anomaly_prediction", False),
+        )
+        if (getattr(self, "policy_ball_sample_profile", None) != profile
+                or getattr(self, "policy_ball_hold_source_key", None) != source_key):
+            self._reset_policy_ball_sampling_contract()
+            self.policy_ball_sample_profile = profile
+            self.policy_ball_hold_source_key = source_key
+        now = time.monotonic()
+        previous_wall = self.policy_ball_hold_monotonic_s
+        self.policy_ball_hold_monotonic_s = now
+        timeout = FPLCPolicyController.LOST_BALL_TIMEOUT_S
+        direct = dict(getattr(self, "fplc_direct_ball_input", {}) or {})
+        observed = bool(direct.get("ball_observed", valid))
+        propagated = bool(direct.get("ball_state_already_propagated", False))
+        try:
+            p = np.asarray(pos, dtype=np.float32).reshape(3)
+            v = np.asarray(vel, dtype=np.float32).reshape(3)
+            age = 0.0 if age_s is None else float(age_s)
+            finite = bool(np.all(np.isfinite(p)) and np.all(np.isfinite(v)))
+        except (TypeError, ValueError, OverflowError):
+            p, v = np.zeros(3, np.float32), np.zeros(3, np.float32)
+            age, finite = timeout, False
+        state = "invalid"
+        accepted = False
+        represented_valid = False
+        if valid:
+            # A malformed/expired purported observation is a fault, not a miss.
+            age_available = age_s is not None or not _is_sensor_ball_source(options.ball_source)
+            represented_valid = bool(
+                finite and age_available and math.isfinite(age) and 0.0 <= age <= timeout)
+            self.policy_ball_sample_has_valid = bool(
+                represented_valid and observed and not propagated)
+            if self.policy_ball_sample_has_valid:
+                previous_stamp = self.policy_ball_sample_source_stamp_s
+                self.policy_ball_sample_pos = p.copy()
+                self.policy_ball_sample_vel = v.copy()
+                self.policy_ball_sample_age_s = age
+                self.policy_ball_sample_source_stamp_s = source_timestamp_s
+                if previous_stamp is None or source_timestamp_s != previous_stamp:
+                    self.policy_ball_sample_sequence += 1
+                state, accepted = "fresh", True
+            elif represented_valid:
+                # Never extend an estimator/predictor's validity budget.
+                state = "represented"
+        elif (not observed and not propagated
+                and _is_sensor_ball_source(options.ball_source)
+                and self.policy_ball_sample_has_valid
+                and previous_wall is not None):
+            elapsed = now - previous_wall
+            if math.isfinite(elapsed) and elapsed >= 0.0:
+                age = self.policy_ball_sample_age_s + max(float(self.cfg.control_dt), elapsed)
+                p = self.policy_ball_sample_pos.copy()
+                v = self.policy_ball_sample_vel.copy()
+                self.policy_ball_sample_age_s = age
+                represented_valid = bool(age <= timeout)
+                state = "held_dropout" if represented_valid else "expired"
+            self.policy_ball_sample_has_valid = represented_valid
+        else:
+            self.policy_ball_sample_has_valid = False
+        if not math.isfinite(age) or age < 0.0:
+            age = float(getattr(self.cfg, "ball_lost_timeout_s", .6))
+        self.last_policy_ball_handover_info = {
+            "mode": "fplc_state_hold",
+            "state": state,
+            "sourceTimestampS": source_timestamp_s,
+            "heldSourceTimestampS": self.policy_ball_sample_source_stamp_s,
+            "sourceObserved": observed,
+            "representedStateValid": represented_valid,
+            "representedAgeS": age,
+            "validityTimeoutS": timeout,
+            "sampleAccepted": accepted,
+            "forcedRefresh": False,
+        }
+        hold_enabled = bool(getattr(options, "enable_ball_dropout_reference_hold", True))
+        direct["enable_dropout_reference_hold"] = hold_enabled
+        direct["hold_reference_on_dropout"] = bool(
+            hold_enabled and represented_valid and not observed
+            and _is_sensor_ball_source(options.ball_source))
+        self.last_policy_ball_handover_info["referenceHoldEnabled"] = hold_enabled
+        self.fplc_direct_ball_input = direct
+        return p.copy(), v.copy(), represented_valid, age
+
     def _apply_policy_ball_sampling_contract(
         self,
         pos: np.ndarray,
@@ -16404,6 +17104,10 @@ class PolicySafetyProbe:
         """Apply the actuator/servo policies' configured fractional hold."""
         profile = normalize_observation_profile(getattr(
             options, "policy_profile", OBSERVATION_PROFILE_LEGACY_BUG_COMPAT))
+        if profile in FPLC_PROFILES and options.control_mode == "policy":
+            return self._hold_fplc_ball_state(
+                pos, vel, valid, age_s, options,
+                source_timestamp_s=source_timestamp_s)
         sampled_profiles = {
             OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
             OBSERVATION_PROFILE_SIMCODE4_SERVO67,
@@ -16587,6 +17291,8 @@ class PolicySafetyProbe:
         self.policy_ball_sample_age_s = 0.0
         self.policy_ball_sample_has_valid = False
         self.policy_ball_sample_source_stamp_s = None
+        self.policy_ball_hold_source_key = None
+        self.policy_ball_hold_monotonic_s = None
         self.policy_ball_handover_pending = False
         blend = getattr(self, "policy_ball_handover_blend", None)
         if blend is not None:
@@ -16619,7 +17325,7 @@ class PolicySafetyProbe:
             )) in {
                 OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                 OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-            }
+                *FPLC_PROFILES}
             and _is_sensor_ball_source(getattr(options, "ball_source", ""))
         )
         unavailable_age_s = (
@@ -16653,6 +17359,8 @@ class PolicySafetyProbe:
         mode: str,
         options: RuntimeOptions | None = None,
     ) -> None:
+        if getattr(self, "active_policy_profile", "") in FPLC_PROFILES:
+            mode = "position"
         mode = _workspace_safety_mode(mode, self.cfg.workspace_safety_mode)
         previous_mode = getattr(self, "active_workspace_safety_mode", None)
         if previous_mode != mode:
@@ -16668,7 +17376,9 @@ class PolicySafetyProbe:
             self.workspace_hold_trigger_reason = ""
             self.workspace_hold_constraint = ""
             current_command = self._right_arm_joint_vector_or_none(
-                getattr(self.safety_limiter, "last_cmd", None))
+                self.controller.current_arm_cmd_q()
+                if getattr(self, "active_policy_profile", "") in FPLC_PROFILES
+                else getattr(self.safety_limiter, "last_cmd", None))
             if current_command is not None:
                 self.workspace_hold_q = current_command.copy()
                 self.workspace_hold_last_safe_q = current_command.copy()
@@ -16909,7 +17619,7 @@ class PolicySafetyProbe:
                     getattr(self, "active_policy_profile", "") in {
                         OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                         OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-                    })
+                *FPLC_PROFILES})
                 maximum_age_s = (
                     0.010 if strict_feedback_profile else 0.05)
                 error = sample.transition_error(
@@ -17461,6 +18171,9 @@ class PolicySafetyProbe:
         observation_scales: tuple[float, ...] = (),
     ) -> None:
         """Forward the atomic JointState sample into the policy controller."""
+        extra = {}
+        if getattr(self, "active_policy_profile", "") in FPLC_PROFILES:
+            extra = dict(getattr(self, "fplc_direct_ball_input", {}) or {})
         self.controller.predict(
             ball_pos,
             ball_vel,
@@ -17473,6 +18186,7 @@ class PolicySafetyProbe:
             observation_scales=observation_scales,
             confirmed_hit_count=int(getattr(
                 self, "policy_confirmed_hit_count", 0)),
+            **extra,
         )
 
     def _policy_compensation_feedback_q(
@@ -17609,6 +18323,9 @@ class PolicySafetyProbe:
             getattr(options, "workspace_safety_mode", default_workspace_mode),
             default_workspace_mode,
         )
+        if active_policy_profile in FPLC_PROFILES:
+            workspace_mode = "position"
+            self._apply_workspace_safety_mode(workspace_mode, options)
         safety_ball_pos = np.asarray(
             ball_pos if done_ball_pos is None else done_ball_pos,
             dtype=np.float32,
@@ -18177,6 +18894,7 @@ class PolicySafetyProbe:
                 uses_corrected_67d_observation(getattr(
                     self, "active_policy_profile",
                     OBSERVATION_PROFILE_LEGACY_BUG_COMPAT))
+                or self.active_policy_profile in FPLC_PROFILES
                 or self.active_policy_profile
                 == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
             maximum_feedback_age_s = (
@@ -18184,7 +18902,7 @@ class PolicySafetyProbe:
                 if self.active_policy_profile in {
                     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                     OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-                }
+                *FPLC_PROFILES}
                 else 0.05
             )
             feedback_is_mandatory = bool(
@@ -18192,7 +18910,7 @@ class PolicySafetyProbe:
                 or (self.active_policy_profile in {
                         OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                         OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-                    }
+                *FPLC_PROFILES}
                     and options.use_ros_state))
             if (measured_feedback_profile
                     and feedback_is_mandatory
@@ -18215,14 +18933,18 @@ class PolicySafetyProbe:
                     f"sample={joint_sample_error or 'ok'})")
                 if options.publish_commands:
                     self._require_publish_rearm(
-                        "policy_joint_feedback_fault")
+                        "policy_joint_feedback_fault", details={
+                            "jointFeedbackAgeS": arm_feedback_age_s,
+                            "maximumJointFeedbackAgeS": maximum_feedback_age_s,
+                            "sampleError": joint_sample_error,
+                        })
                 self.last_control_mode = "policy"
                 return "policy_feedback_hold", reason, {}, age_s, False
             if (self.active_policy_profile
                     in {
                         OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                         OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-                    }
+                *FPLC_PROFILES}
                     and (not valid or age_s
                          > 0.350)):
                 hold_q = (
@@ -18263,7 +18985,7 @@ class PolicySafetyProbe:
             if (self.active_policy_profile in {
                     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                     OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-                    }
+                *FPLC_PROFILES}
                     and not options.publish_commands
                     and not options.use_ros_state):
                 # Explicitly local, non-publishing probe mode has no encoder
@@ -18277,16 +18999,27 @@ class PolicySafetyProbe:
                         self.controller.arm_cmd_qvel,
                         dtype=np.float32,
                     ).copy()
-            self._predict_policy_with_feedback(
-                ball_pos,
-                ball_vel,
-                valid=valid,
-                age_s=age_s,
-                arm_q=arm_q,
-                arm_dq=policy_arm_dq,
-                arm_sample_stamp_s=arm_sample_stamp_s,
-                observation_scales=options.policy_observation_scales,
-            )
+            try:
+                self._predict_policy_with_feedback(
+                    ball_pos,
+                    ball_vel,
+                    valid=valid,
+                    age_s=age_s,
+                    arm_q=arm_q,
+                    arm_dq=policy_arm_dq,
+                    arm_sample_stamp_s=arm_sample_stamp_s,
+                    observation_scales=options.policy_observation_scales,
+                )
+            except (RuntimeError, ValueError, np.linalg.LinAlgError) as exc:
+                if self.active_policy_profile not in FPLC_PROFILES:
+                    raise
+                self.controller.invalidate_after_intervention()
+                self._mark_policy_paused()
+                self._require_publish_rearm("fplc_inference_fault")
+                if options.publish_commands:
+                    self._publish_hold_on_command_disable()
+                self.last_control_mode = "policy"
+                return "policy_feedback_hold", f"FPLC inference blocked: {exc}", {}, age_s, False
             policy_executed = True
             raw_policy_command = self.controller.latest_command_state()
             self._apply_contact_action_shield(
@@ -18419,6 +19152,15 @@ class PolicySafetyProbe:
                 self.done_failsafe_conditions = dict(hard_conditions)
                 done_action = _workspace_done_action(
                     workspace_mode, hard_conditions)
+                if active_policy_profile in FPLC_PROFILES:
+                    # End a new-model episode explicitly; legacy parking
+                    # streams must not keep Send enabled after ball done.
+                    done_action = "stop"
+                    self.controller.invalidate_after_intervention()
+                    self._require_publish_rearm("fplc_episode_done", details={
+                        "doneReason": self.done_failsafe_reason,
+                        "conditions": dict(hard_conditions),
+                    })
                 hard_workspace_stop = done_action == "stop"
                 soft_workspace_reset = done_action == "reset"
                 if hard_workspace_stop:
@@ -18778,6 +19520,8 @@ class PolicySafetyProbe:
         controller_dim = int(getattr(controller, "_expected_obs_dim", 0) or 0)
         if controller_dim > 0:
             return controller_dim
+        if canonical in FPLC_PROFILES:
+            return int(FPLC_CONTRACTS[canonical]["actor_dim"])
         if canonical == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
             return 57
         if canonical in {
@@ -18821,7 +19565,7 @@ class PolicySafetyProbe:
         )
         if policy_profile in {
                 OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
-                OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153, *FPLC_PROFILES}:
             # These authenticated actors forbid input rescaling.
             policy_observation_scales = tuple(
                 1.0 for _ in range(profile_obs_dim))
@@ -19064,7 +19808,7 @@ class PolicySafetyProbe:
         elif (policy_profile in {
                     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                     OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-                }
+                *FPLC_PROFILES}
                 and self.ros_bridge is not None):
             # Real shadow mode must exercise the same measured q/dq contract
             # as command publication; only the ROS-free browser smoke path may
@@ -19094,7 +19838,7 @@ class PolicySafetyProbe:
             # even when the UI switches to simcode6 after another profile was
             # launched with a different experiment-wide camera rate.
             obs_rate = 60.0
-        elif policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+        elif policy_profile in FPLC_PROFILES or policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
             obs_rate = 90.0
         elif policy_profile == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
             obs_rate = 60.0
@@ -19494,6 +20238,8 @@ class PolicySafetyProbe:
             payload.get("workspaceSafetyMode", self.cfg.workspace_safety_mode),
             self.cfg.workspace_safety_mode,
         )
+        if policy_profile in FPLC_PROFILES:
+            workspace_mode = "position"
         contact_action_shield = ContactActionShieldOptions(
             enabled=bool(payload.get(
                 "enableContactActionShield",
@@ -19556,7 +20302,7 @@ class PolicySafetyProbe:
         )
         if policy_profile in {
                 OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
-                OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153, *FPLC_PROFILES}:
             # Any post-actor rewrite changes persistent q_ref and therefore
             # corrupts the next observation's q_ref-q term.
             contact_action_shield = replace(
@@ -19570,7 +20316,7 @@ class PolicySafetyProbe:
                 OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
                 OBSERVATION_PROFILE_SIMCODE6_QVEL67,
                 OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
-                OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153, *FPLC_PROFILES}:
             # Hardware is the checkpoint's actuator plant.  Applying any
             # software compensation here would duplicate the modeled joint
             # dynamics and invalidate both commands and observation history.
@@ -19583,7 +20329,7 @@ class PolicySafetyProbe:
             enable_policy_dq_adapter=bool(payload.get(
                 "enablePolicyDqAdapter",
                 self.cfg.enable_policy_dq_adapter,
-            )),
+            )) and policy_profile not in FPLC_PROFILES,
             policy_observation_scales=policy_observation_scales,
             racket_tracking_height_offset_m=tracking_height_offset_m,
             racket_tracking_use_mpc=bool(payload.get(
@@ -19599,6 +20345,8 @@ class PolicySafetyProbe:
             use_ros_state=use_ros_state,
             publish_commands=publish_commands,
             enable_compensation=enable_compensation,
+            enable_ball_dropout_reference_hold=bool(payload.get(
+                "enableBallDropoutReferenceHold", getattr(self.cfg, "enable_ball_dropout_reference_hold", True))),
             compensation_parameter_target=compensation_parameter_target,
             compensation_mode=comp_mode,
             comp_delay_ms=comp_delay_ms,
@@ -19933,6 +20681,51 @@ class PolicySafetyProbe:
             return None, {"seq": 0, "ageS": None, "enabled": False}
         return self.sim_mirror.latest_visualization()
 
+    def _clear_ball_clock_history(self):
+        self._reset_policy_ball_sampling_contract()
+        self.ball_estimator = None
+        self.ball_estimator_key = None
+        self.high_ball_occlusion_predictor = None
+        self.high_ball_occlusion_predictor_key = None
+        self.last_ball_observation_stamp_s = None
+        self.ball_observation_clock_domain = None
+        self.next_ball_observation_s = 0.
+        self.policy_needs_reentry_reset = True
+
+    def _defer_snapshot_for_control_budget(self):
+        start = getattr(self, 'control_tick_started_perf', None)
+        if start is None:
+            return False
+        deadline = getattr(self, 'control_tick_deadline_perf', start + self.cfg.control_dt)
+        remaining = deadline - time.perf_counter()
+        if remaining < .0025:
+            self.control_snapshots_deferred = int(getattr(self, 'control_snapshots_deferred', 0)) + 1
+            return True
+        return False
+
+    def _select_ball_clock(self, options):
+        source = options.ball_source
+        previous = getattr(self, 'selected_ball_clock_source', None)
+        bridge = self.ros_bridge
+        resync = getattr(bridge, 'resynchronize_ball_clock', None)
+        status_reader = getattr(bridge, 'ball_clock_status', None)
+        if source != previous:
+            self.selected_ball_clock_source = source
+            self.selected_ball_clock_epoch = None
+            self._clear_ball_clock_history()
+            if callable(resync):
+                resync(source)
+            if bool(getattr(self, 'command_stream_active', False)):
+                self._require_publish_rearm('ball_source_changed')
+                self._publish_hold_on_command_disable()
+                options = replace(options, publish_commands=False)
+        sync = status_reader(source) if callable(status_reader) else {}
+        resetting = bool(getattr(getattr(self, 'slow_reset_trajectory', None), 'active', False))
+        if options.publish_commands and sync.get('required') and not sync.get('ready') and not resetting:
+            self._require_publish_rearm('ball_clock_not_ready', details=dict(sync))
+            options = replace(options, publish_commands=False)
+        return options
+
     def _select_ball_source(
         self,
         drag_pos: np.ndarray,
@@ -20219,7 +21012,7 @@ class PolicySafetyProbe:
             )
             policy_cmd = cmd
         policy_racket = (
-            np.asarray(policy_obs[26:29], dtype=np.float32)
+            np.asarray(policy_obs[52:55] if policy_obs.shape[0] in (72, 156) else policy_obs[26:29], dtype=np.float32)
             if policy_obs.shape[0] >= 29 else None
         )
         estimator_payload = (
@@ -20308,6 +21101,7 @@ class PolicySafetyProbe:
             "cameraStampS": camera_stamp_s,
             "cameraMeasurement": _camera_measurement_payload(
                 camera_measurement),
+            "ballClockSync": dict((camera_measurement or {}).get('clockSync') or {}),
             "wallTimeS": round(float(time.time()), 6),
             "time": round(float(self.now_s), 6),
             "tick": int(self.control_loop_tick),
@@ -20331,9 +21125,12 @@ class PolicySafetyProbe:
             "measuredVelocity": _rounded_vector(measured_ball_vel),
             "observedBall": _rounded_vector(observed_ball_pos),
             "observedVelocity": _rounded_vector(observed_ball_vel),
-            # Exact six-dimensional ball slice consumed by the policy:
-            # [x, y, z, vx, vy, vz].
-            "ballState6D": _float32_vector(policy_obs[20:26]),
+            "ballState6D": _float32_vector(
+                np.concatenate((observed_ball_pos, observed_ball_vel))
+                if policy_obs.size in (72, 156) else policy_obs[20:26]),
+            "ballStateSource": (
+                "runtime_context_state_not_actor_velocity"
+                if policy_obs.size in (72, 156) else "actor_ball_state_slice"),
             "predictedBall": _point_or_none(prediction_payload.get("positionM")),
             "predictedVelocity": _point_or_none(
                 prediction_payload.get("velocityMps")),
@@ -20364,7 +21161,8 @@ class PolicySafetyProbe:
                 None if getattr(self, "current_policy_joint_sample", None) is None
                 else self.current_policy_joint_sample.payload()),
             "policyBallObservation": _float32_vector(
-                policy_obs[20:26]),
+                policy_obs[28:52] if policy_obs.size in (72, 156) else policy_obs[20:26]),
+            "fplcProjection": dict(getattr(self.controller, "last_projection", {})),
             "policyAction": _rounded_vector(policy_action),
             "policyExecutedAction": _rounded_vector(
                 policy_executed_action),
@@ -20439,6 +21237,7 @@ class PolicySafetyProbe:
                 "policyGeneration": int(self.policy_generation),
                 "enablePolicyDqAdapter": bool(
                     options.enable_policy_dq_adapter),
+                "enableBallDropoutReferenceHold": bool(getattr(options, "enable_ball_dropout_reference_hold", True)),
                 "policyDqMode": str(self.cfg.policy_dq_mode),
                 "observationCoherence": (
                     "coherent"
@@ -20522,6 +21321,29 @@ class PolicySafetyProbe:
         ) = self._select_ball_source(
             drag_ball_pos, drag_ball_vel, drag_valid, options,
             include_feedback=make_snapshot)
+        sync = (camera_measurement or {}).get('clockSync', {})
+        if sync:
+            epoch = (ball_source, sync.get('generation'), sync.get('epoch'))
+            if epoch != getattr(self, 'selected_ball_clock_epoch', None):
+                self.selected_ball_clock_epoch = epoch
+                self._clear_ball_clock_history()
+            if not sync.get('ready') and not bool(getattr(
+                    getattr(self, 'slow_reset_trajectory', None), 'active', False)):
+                # Synchronization warm-up is idle, not a detector dropout.
+                # No old-source hold or prediction can bypass this clock gate.
+                if options.publish_commands or self.command_stream_active:
+                    self._require_publish_rearm('ball_clock_not_ready', details=dict(sync))
+                    self._publish_hold_on_command_disable()
+                self.control_loop_tick += 1
+                self.now_s += self.cfg.control_dt
+                self.policy_tick_active = False
+                if not make_snapshot:
+                    return None
+                return self.snapshot('ball_clock_sync', str(sync.get('status', 'warming_up')),
+                    {}, ball_pos, ball_pos, ball_vel, False, .6, noise_std_m,
+                    measured_ball_pos=ball_pos, measured_ball_vel=ball_vel,
+                    raw_valid=False, use_ros_state=options.use_ros_state,
+                    ball_source=ball_source, camera_feedback=camera_feedback)
         inferred_impact = bool(
             isinstance(camera_measurement, dict)
             and camera_measurement.get("velocity_impact_detected", False))
@@ -20564,8 +21386,17 @@ class PolicySafetyProbe:
                     OBSERVATION_PROFILE_SIMCODE6_QVEL67,
                     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                     OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-                }):
+                *FPLC_PROFILES}):
             self._reset_policy_ball_sampling_contract()
+        self.fplc_direct_ball_input = {
+            "direct_ball_position_m": measured_p.copy(),
+            "direct_ball_age_s": self._raw_measurement_age_s(valid, ball_stamp_s, options),
+            "direct_ball_stamp_s": ball_stamp_s,
+            "ball_observed": bool(valid),
+            "ball_state_already_propagated": bool(
+                high_ball_occlusion_info.get("predicted", False)
+                or estimator_info.get("predicted", False)),
+        }
         obs_p, obs_v, control_valid, age_override_s = (
             self._apply_policy_ball_sampling_contract(
                 obs_p, obs_v, control_valid, age_override_s, options,
@@ -20697,7 +21528,14 @@ class PolicySafetyProbe:
                     self.runtime_options = replace(
                         self.runtime_options, publish_commands=False)
         self.control_loop_tick += 1
+        self.policy_tick_active = bool(
+            policy_executed and mode == 'policy' and command_published
+            and options.publish_commands)
         if not make_snapshot:
+            return None
+        if (mode == 'policy' and policy_executed and command_published
+                and not bool(getattr(self, 'publish_rearm_required', False))
+                and self._defer_snapshot_for_control_budget()):
             return None
         if camera_feedback is None:
             camera_feedback = self.camera_feedback()
@@ -20760,6 +21598,7 @@ class PolicySafetyProbe:
         if self.cfg.backend_control_loop:
             recording_view = payload.get("recordingView")
             with self.lock:
+                options = self._select_ball_clock(options)
                 if (self.recorder.active and getattr(
                         self, "recording_policy_step_limit_reached", False)):
                     options = replace(options, publish_commands=False)
@@ -20797,6 +21636,7 @@ class PolicySafetyProbe:
             return snapshot
 
         with self.lock:
+            options = self._select_ball_clock(options)
             recording_view = payload.get("recordingView")
             if isinstance(recording_view, dict):
                 self.record_browser_view(recording_view)
@@ -20849,6 +21689,23 @@ class PolicySafetyProbe:
                         policy_measured_p, policy_measured_v,
                         policy_measured_valid, options,
                         measurement_stamp_s=policy_measurement_stamp_s))
+                self.fplc_direct_ball_input = {
+                    "direct_ball_position_m": measured_p.copy(),
+                    "direct_ball_age_s": self._raw_measurement_age_s(
+                        valid, ball_stamp_s, options),
+                    "direct_ball_stamp_s": ball_stamp_s,
+                    "ball_observed": bool(valid),
+                    "ball_state_already_propagated": bool(
+                        high_ball_occlusion_info.get("predicted", False)
+                        or estimator_info.get("predicted", False)),
+                }
+                if options.policy_profile in FPLC_PROFILES and options.control_mode == "policy":
+                    if bool(getattr(self, "policy_needs_reentry_reset", False)):
+                        self._reset_policy_ball_sampling_contract()
+                    obs_p, obs_v, control_valid, age_override_s = (
+                        self._apply_policy_ball_sampling_contract(
+                            obs_p, obs_v, control_valid, age_override_s, options,
+                            source_timestamp_s=ball_stamp_s))
                 release_kwargs = {}
                 if not options.ball_release_use_estimator_state:
                     release_kwargs = {
@@ -21001,8 +21858,14 @@ class PolicySafetyProbe:
         if use_ros_state is None:
             use_ros_state = bool(self.cfg.ros_bridge and self.ros_bridge is not None)
         if publish_commands is None:
+            applied_options = runtime_options or getattr(self, "runtime_options", None)
             publish_commands = bool(
-                self.cfg.ros_publish_commands and self.ros_bridge is not None)
+                applied_options is not None and applied_options.publish_commands
+                and self.cfg.ros_publish_commands and self.ros_bridge is not None)
+        if bool(getattr(self, "publish_rearm_required", False)):
+            # A just-triggered stop may have replaced self.runtime_options
+            # after this tick captured its immutable options.
+            publish_commands = False
         if runtime_options is None:
             runtime_payload = {
                 "controlMode": str(self.cfg.default_control_mode),
@@ -21021,6 +21884,7 @@ class PolicySafetyProbe:
                     )),
                 "enablePolicyDqAdapter": bool(
                     self.cfg.enable_policy_dq_adapter),
+                "enableBallDropoutReferenceHold": bool(getattr(self.cfg, "enable_ball_dropout_reference_hold", True)),
                 "policyDqAdapter": dict(
                     self.last_policy_dq_adapter_info),
                 "resetInitialPose": str(self.reset_initial_pose_id),
@@ -21122,6 +21986,7 @@ class PolicySafetyProbe:
                     if abs(float(value) - 1.0) > 1e-7],
                 "enablePolicyDqAdapter": bool(
                     runtime_options.enable_policy_dq_adapter),
+                "enableBallDropoutReferenceHold": bool(getattr(runtime_options, "enable_ball_dropout_reference_hold", True)),
                 "policyDqAdapter": dict(
                     self.last_policy_dq_adapter_info),
                 "resetInitialPose": str(self.reset_initial_pose_id),
@@ -21273,6 +22138,7 @@ class PolicySafetyProbe:
                 self, "command_publish_lease_deadline_wall", 0.0))
              - time.monotonic()) * 1000.0,
         )
+        runtime_payload["publishCommands"] = bool(publish_commands)
         runtime_payload["commandLeaseRemainingMs"] = round(
             lease_remaining_ms, 3)
         runtime_payload["commandLeaseExpired"] = bool(getattr(
@@ -21402,6 +22268,13 @@ class PolicySafetyProbe:
                 "overruns": int(self.control_loop_overrun_count),
                 "error": self.control_loop_last_error,
                 "tick": int(self.control_loop_tick),
+                "policyTiming": self.policy_deadline_monitor.payload(),
+                "cyclicGC": (
+                    self.control_gc.payload()
+                    if getattr(self, "control_gc", None) is not None else {}),
+                "runtimeEnvironment": getattr(self, "control_runtime_environment", {}),
+                "threadScheduling": getattr(self, 'control_thread_runtime', {}),
+                "snapshotsDeferredForControlBudget": int(getattr(self, 'control_snapshots_deferred', 0)),
             },
             "conditions": {k: bool(v) for k, v in conditions.items()},
             "ball": [round(float(x), 6) for x in observed_ball_pos],
@@ -21416,6 +22289,9 @@ class PolicySafetyProbe:
             "noiseStdM": round(float(noise_std_m), 6),
             "ballSource": str(ball_source),
             "runtime": runtime_payload,
+            "ballClockSync": (self.ros_bridge.ball_clock_status(ball_source)
+                if callable(getattr(self.ros_bridge, 'ball_clock_status', None)) else
+                dict(source=ball_source, required=False, ready=True, status='not_required')),
             "policyDqAdapter": dict(
                 self.last_policy_dq_adapter_info),
             "tracking": dict(self.last_tracking_info),
@@ -21460,6 +22336,7 @@ class PolicySafetyProbe:
                     self, "publish_rearm_off_seen", False)),
                 "reason": str(getattr(
                     self, "publish_rearm_reason", "")),
+                "details": dict(getattr(self, "publish_rearm_details", {})),
             },
             "hardWorkspaceStop": self._hard_workspace_stop_payload(),
             "softWorkspaceReset": self._soft_workspace_reset_payload(),
@@ -21483,6 +22360,7 @@ class PolicySafetyProbe:
             "fkOk": fk_ok,
             "anchor": [round(float(x), 6) for x in anchor],
             "ballBox": ball_box,
+            "eeBox": ee_box,
             "limits": limits,
             "jointPosition": [round(float(x), 6) for x in cmd["position"]],
             "jointVelocity": [round(float(x), 6) for x in cmd["velocity"]],
@@ -21589,6 +22467,8 @@ class PolicySafetyProbe:
                 self.cfg.simcode8_sim_xml_path,
             ),
         }
+        active_paths.update({profile: (fplc_assets(profile)[0], fplc_assets(profile)[1], fplc_assets(profile)[1])
+                             for profile in FPLC_PROFILES})
         (
             active_model_path,
             active_policy_xml_path,
@@ -21787,7 +22667,8 @@ class PolicySafetyProbe:
             },
             "lostTimeoutS": self.cfg.ball_lost_timeout_s,
             "resetInitialPoses": {
-                **_reset_initial_pose_presets_payload(),
+                **_reset_initial_pose_presets_payload(
+                    self.controller if self.active_policy_profile in FPLC_PROFILES else None),
                 "selected": str(self.reset_initial_pose_id),
             },
             "control": {
@@ -21863,8 +22744,8 @@ class PolicySafetyProbe:
                 "generation": int(self.policy_generation),
                 "modelPath": str(active_model_path),
                 "policyXmlPath": str(active_policy_xml_path),
-                "observationDim": int(self.cfg.policy_obs_dim),
-                "observationNames": _obs_names(int(self.cfg.policy_obs_dim)),
+                "observationDim": self._policy_observation_dim_for_profile(self.active_policy_profile),
+                "observationNames": _obs_names(self._policy_observation_dim_for_profile(self.active_policy_profile)),
                 "profileContracts": policy_profile_contracts,
                 "observationScale": {
                     "scales": list(_default_policy_observation_scales(
@@ -21874,6 +22755,7 @@ class PolicySafetyProbe:
                 },
                 "dqAdapter": self.policy_dq_adapter.config.payload(),
                 "useValidBallObsAge": bool(self.cfg.rl_use_valid_ball_obs_age),
+                "ballDropoutReferenceHoldEnabled": bool(getattr(self.cfg, "enable_ball_dropout_reference_hold", True)),
                 "resetBall": dict(getattr(
                     self, "reset_ball_contract", {}) or {}),
             },
@@ -22077,6 +22959,8 @@ class PolicySafetyProbe:
             "jointStateTopic": self.cfg.joint_state_topic,
             "cartStateTopic": self.cfg.cart_state_topic,
             "cameraBall": {
+                "processingSubprocess": bool(
+                    self.cfg.camera_subprocess and self.cfg.camera_source_mode == 'direct_realsense'),
                 "enabled": bool(self.cfg.enable_camera_ball),
                 "available": bool(_CAMERA_BALL_AVAILABLE),
                 "sourceMode": self.cfg.camera_source_mode,
@@ -22165,16 +23049,23 @@ class PolicySafetyProbe:
             },
             "mocapBall": {
                 "enabled": bool(self.cfg.enable_mocap_ball),
+                "processingSubprocess": bool(self.cfg.mocap_subprocess),
                 "available": bool(_MOCAP_BALL_AVAILABLE),
                 "udpHost": self.cfg.mocap_udp_host,
                 "udpPort": int(self.cfg.mocap_udp_port),
                 "markerId": int(self.cfg.mocap_marker_id),
+                "markerXLimitsM": getattr(self.cfg, 'mocap_marker_x_limits_m', None),
+                "markerSelectionFrame": "mocap_raw_m",
                 "rigidBodySlot": int(self.cfg.mocap_rigid_body_slot),
                 "rigidBodyId": int(self.cfg.mocap_rigid_body_id),
                 "rigidBodyName": self.cfg.mocap_rigid_body_name,
                 "calibrationPath": self.cfg.mocap_calibration_path,
                 "positionUnit": self.cfg.mocap_position_unit,
                 "timestampUnit": self.cfg.mocap_timestamp_unit,
+                "clockSyncRequired": True,
+                "clockSyncMinSamples": self.cfg.mocap_clock_sync_min_samples,
+                "clockSyncMinSpanS": self.cfg.mocap_clock_sync_min_span_s,
+                "clockSyncWindowS": self.cfg.mocap_clock_sync_window_s,
                 "controlFrame": "sim_frame",
                 "detectorFrame": "waist03_cartesian",
                 "importError": (
@@ -22859,6 +23750,11 @@ HTML_TEMPLATE = r"""<!doctype html>
           <option value="simcode6_qvel67">simcode6 qvel (direct real command)</option>
           <option value="gpu0_qvel_real_rmp_v85">GPU0-QVEL/REAL-RMP</option>
           <option value="gpu1_qacc_ft_v153">GPU1-QACC-FT (V153)</option>
+          <option value="fplc_gpu0_v152">FPLC GPU0 V152 (156D)</option>
+          <option value="fplc_gpu1_v151">FPLC GPU1 V151 (72D)</option>
+          <option value="fplc_gpu0_v161">FPLC GPU0 V161 (156D)</option>
+          <option value="fplc_gpu1_v172">FPLC GPU1 V172 (72D)</option>
+          <option value="fplc_v220_s17_u839_20261013_r1">FPLC GPU1 V220 S17 u839 (72D)</option>
         </select>
       </div>
       <div class="row" id="policyModelRow">
@@ -22884,6 +23780,7 @@ HTML_TEMPLATE = r"""<!doctype html>
         <label for="publishCommands">Send command</label>
         <input id="publishCommands" type="checkbox">
       </div>
+      <div id="ballClockSyncStatus" class="hint">Ball clock: waiting</div>
       <div class="row">
         <label for="workspaceSafetyMode">workspace</label>
         <select id="workspaceSafetyMode">
@@ -22910,6 +23807,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       <div class="section-title">Node Flow</div>
       <div class="checks">
         <label class="checkrow"><input id="rlUseValidBallObsAge" type="checkbox"><span>policy age</span></label>
+        <label class="checkrow" title="FPLC：开启时漏检保持最后q_ref；关闭时用有效的持有／预测球状态继续推理并更新q_ref。均保留350 ms状态持有上限和原有预测到期保护。"><input id="enableBallDropoutReferenceHold" type="checkbox"><span>漏检保持 q_ref</span></label>
         <label class="checkrow" title="Real simcode5 policy obs[7:14] only: gain × delayed EMA of measured joint dq; safety keeps raw dq"><input id="enablePolicyDqAdapter" type="checkbox"><span>policy dq adapter</span></label>
         <label class="checkrow"><input id="enableCompensation" type="checkbox"><span>compensation</span></label>
         <label class="checkrow"><input id="enableSimMirror" type="checkbox"><span>sim mirror</span></label>
@@ -23194,6 +24092,7 @@ const curveEls = {
 };
 const flowEls = {
   rlUseValidBallObsAge: document.getElementById('rlUseValidBallObsAge'),
+  enableBallDropoutReferenceHold: document.getElementById('enableBallDropoutReferenceHold'),
   enablePolicyDqAdapter: document.getElementById('enablePolicyDqAdapter'),
   enableCompensation: document.getElementById('enableCompensation'),
   enableSimMirror: document.getElementById('enableSimMirror'),
@@ -23401,7 +24300,8 @@ function applyCompensationProfileDefaults(profile) {
   setNumberValue(inputs.compMpcNominalWeight, defaults.mpcNominalWeight, 2);
   setNumberValue(inputs.compMpcDeltaWeight, defaults.mpcDeltaWeight, 2);
   setNumberValue(inputs.compMpcMaxDeltaRad, defaults.mpcMaxDeltaRad, 3);
-  if (['simcode5_pure_actuator67', 'simcode6_qvel67',
+  if (profile.startsWith('fplc_') ||
+      ['simcode5_pure_actuator67', 'simcode6_qvel67',
        'gpu0_qvel_real_rmp_v85', 'gpu1_qacc_ft_v153'].includes(profile)) {
     flowEls.enableCompensation.checked = false;
   }
@@ -23413,6 +24313,15 @@ function setControlDisabled(el, disabled) {
   if (row) row.classList.toggle('disabled', disabled);
 }
 function syncPolicyModelControl() {
+  const fplc = policyProfileEl.value.startsWith('fplc_');
+  if (fplc) inputs.workspaceSafetyMode.value = 'position';
+  setControlDisabled(inputs.workspaceSafetyMode, fplc);
+  for (const option of resetInitialPoseEl.options) {
+    option.disabled = fplc ? option.value !== 'simcode9_native' : option.value === 'simcode9_native';
+  }
+  if (fplc) resetInitialPoseEl.value = 'simcode9_native';
+  else if (resetInitialPoseEl.value === 'simcode9_native') resetInitialPoseEl.value = 'default_2_horizontal';
+  setControlDisabled(resetInitialPoseEl, fplc);
   const enabled = policyProfileEl.value === 'gpu0_qvel_real_rmp_v85';
   policyModelEl.disabled = !enabled;
   policyModelRowEl.classList.toggle('disabled', !enabled);
@@ -23448,6 +24357,50 @@ function applyResetInitialPoseFromSnapshot(snapshot) {
   if (!Array.from(resetInitialPoseEl.options).some(opt => opt.value === preset)) return;
   resetInitialPoseEl.value = preset;
 }
+function commandStopDescription(rearm, resetRecovery) {
+  if (rearm.required) {
+    const explanations = {
+      reset_arm_fresh_joint_feedback_required: '复位发送被关闭：关节反馈不够新鲜',
+      reset_joint_feedback_stale: '复位发送被关闭：关节反馈过期',
+      policy_joint_feedback_fault: '策略发送被关闭：关节反馈过期或采样异常',
+      policy_ball_state_fault: '策略发送被关闭：球状态无效或过期',
+      fplc_workspace_or_command_boundary_fault: '策略发送被关闭：位姿越界或命令被改写',
+      fplc_inference_fault: '策略发送被关闭：模型推理异常',
+      fplc_episode_done: '策略发送被关闭：回合已终止，需要复位后重新使能',
+      command_lease_expired: '发送被关闭：网页控制请求超时',
+      policy_control_timing_fault: '发送被关闭：策略控制周期持续超时，需要重新复位并授权发送',
+      control_realtime_unavailable: '发送被关闭：策略实时线程调度未生效，请检查实时优先级权限',
+      policy_profile_changed: '模型已切换，请显式重新开启 Send command',
+      policy_model_changed: '模型已切换，请显式重新开启 Send command'
+    };
+    const details = rearm.details || {};
+    let message = explanations[rearm.reason] || `发送被关闭：${rearm.reason || 'safety_transition'}`;
+    if (Number.isFinite(details.maximumJointFeedbackAgeS)) {
+      const age = Number.isFinite(details.jointFeedbackAgeS)
+        ? `${(details.jointFeedbackAgeS * 1000).toFixed(1)} ms` : '无有效反馈';
+      message += `；触发时反馈年龄 ${age}，上限 ${(details.maximumJointFeedbackAgeS * 1000).toFixed(1)} ms`;
+    }
+    const faultNames = {
+      joint_feedback_not_fresh: '反馈过期或缺失',
+      measured_pose_outside_envelope: '实测位姿越界',
+      target_pose_outside_envelope: '目标位姿越界',
+      actor_target_missing: '策略目标缺失',
+      actor_target_rewritten: '策略目标被改写'
+    };
+    if (Array.isArray(details.faults)) {
+      message += `；${details.faults.map(name => faultNames[name] || name).join('、')}`;
+    }
+    const measuredRpy = (details.measuredPose || {}).relativeRpyDeg;
+    if (Array.isArray(measuredRpy) && measuredRpy.slice(0, 2).every(Number.isFinite)) {
+      const limits = details.relativeRollPitchLimitDeg;
+      const limitText = Array.isArray(limits) && limits.length >= 2 && limits.slice(0, 2).every(Number.isFinite)
+        ? `±${limits[0].toFixed(1)}/±${limits[1].toFixed(1)}°` : '未知';
+      message += `；实测 roll/pitch ${measuredRpy.slice(0, 2).map(v => v.toFixed(3)).join('/')}°（上限 ${limitText}）`;
+    }
+    return message;
+  }
+  return resetRecovery.policyArmRequired ? '复位已完成，请显式重新开启 Send command' : '';
+}
 function updateConfigGeometryFromSnapshot(snapshot) {
   if (!snapshot) return;
   if (Array.isArray(snapshot.anchor) && snapshot.anchor.length >= 3) {
@@ -23455,6 +24408,9 @@ function updateConfigGeometryFromSnapshot(snapshot) {
   }
   if (snapshot.ballBox && typeof snapshot.ballBox === 'object') {
     CONFIG.ballBox = {...snapshot.ballBox};
+  }
+  if (Object.prototype.hasOwnProperty.call(snapshot, 'eeBox')) {
+    CONFIG.eeBox = snapshot.eeBox ? {...snapshot.eeBox} : null;
   }
   if (snapshot.limits && typeof snapshot.limits === 'object') {
     CONFIG.limits = {...snapshot.limits};
@@ -23488,7 +24444,7 @@ function syncEstimatorModeControl() {
   ]) {
     setControlDisabled(el, impactResetOff);
   }
-  const ageLockedTrueProfile = [
+  const ageLockedTrueProfile = policyProfileEl.value.startsWith('fplc_') || [
     'simcode2_idealpd67', 'simcode3_actuator67',
     'gpu0_qvel_real_rmp_v85', 'gpu1_qacc_ft_v153'
   ].includes(policyProfileEl.value);
@@ -23496,11 +24452,16 @@ function syncEstimatorModeControl() {
     'simcode4_servo67', 'simcode5_pure_actuator67', 'simcode6_qvel67'
   ].includes(policyProfileEl.value);
   const directPhysicalActuatorProfile = (
+    policyProfileEl.value.startsWith('fplc_') ||
     ['simcode5_pure_actuator67', 'simcode6_qvel67',
      'gpu0_qvel_real_rmp_v85', 'gpu1_qacc_ft_v153'].includes(
       policyProfileEl.value));
   const simcode5DqAdapterProfile = (
     policyProfileEl.value === 'simcode5_pure_actuator67');
+  if (flowEls.enableBallDropoutReferenceHold) {
+    setControlDisabled(flowEls.enableBallDropoutReferenceHold,
+      !policyProfileEl.value.startsWith('fplc_'));
+  }
   setControlDisabled(
     flowEls.enablePolicyDqAdapter,
     !simcode5DqAdapterProfile);
@@ -23577,6 +24538,7 @@ function syncEstimatorModeControl() {
     flowEls.enableCompensation.disabled || !flowEls.enableCompensation.checked);
   const contactShieldUnavailable = (
     controlModeEl.value !== 'policy'
+    || policyProfileEl.value.startsWith('fplc_')
     || ['gpu0_qvel_real_rmp_v85', 'gpu1_qacc_ft_v153'].includes(
       policyProfileEl.value));
   setControlDisabled(
@@ -23975,6 +24937,7 @@ function setRuntimeDefaults() {
   const donePredictionDefaults = CONFIG.donePrediction || {};
   const contactShieldDefaults = CONFIG.contactActionShield || {};
   flowEls.rlUseValidBallObsAge.checked = policyDefaults.useValidBallObsAge !== false;
+  flowEls.enableBallDropoutReferenceHold.checked = policyDefaults.ballDropoutReferenceHoldEnabled !== false;
   flowEls.enablePolicyDqAdapter.checked =
     !!dqAdapterDefaults.configuredEnabled;
   flowEls.enableCompensation.checked = compensationDefaults.enabled !== false;
@@ -25839,6 +26802,7 @@ async function step() {
       controlMode: controlModeEl.value || 'policy',
       policyProfile: policyProfileEl.value || 'legacy_bug_compatible',
       policyModel: policyModelEl.value || 'v85',
+      enableBallDropoutReferenceHold: flowEls.enableBallDropoutReferenceHold.checked,
       enablePolicyDqAdapter: (
         flowEls.enablePolicyDqAdapter.checked
         && !flowEls.enablePolicyDqAdapter.disabled),
@@ -26091,7 +27055,7 @@ async function step() {
       payload.recordingView = buildRecordingView('sample', false);
     }
     latest = await postJson('/step', payload);
-    if (geometrySyncPending) {
+    if (geometrySyncPending || Object.prototype.hasOwnProperty.call(latest, 'eeBox')) {
       updateConfigGeometryFromSnapshot(latest);
       geometrySyncPending = false;
     }
@@ -26194,6 +27158,15 @@ async function step() {
     const workspaceSafetyEe = workspaceSafety.eePosition || [NaN, NaN, NaN];
     const resetRecovery = latest.resetRecovery || {};
     const commandRearm = latest.commandRearm || {};
+    const ballClock = latest.ballClockSync || {};
+    const sensorClockRequired = ['camera', 'mocap'].includes(ballSourceEl.value);
+    const clockReady = !sensorClockRequired || (ballClock.source === ballSourceEl.value && ballClock.ready === true);
+    const resetIndependentOfBallClock = resetRecovery.active === true && resetRecovery.settled !== true;
+    publishCommandsEl.disabled = !CONFIG.rosBridge || !CONFIG.rosPublishAllowed || (!clockReady && !resetIndependentOfBallClock);
+    publishCommandsEl.parentElement.classList.toggle('disabled', publishCommandsEl.disabled);
+    document.getElementById('ballClockSyncStatus').textContent = sensorClockRequired
+      ? `Ball clock (${ballSourceEl.value}): ${clockReady ? 'synchronized' : (ballClock.status || 'warming up')} — wait for synchronized before Send`
+      : 'Ball clock: not required for drag ball';
     const appliedPublishArmToken = String(
       runtime.publishArmToken ?? latest.commandPublishArmTokenApplied ?? '');
     const currentPublishArmAcknowledged = !!publishArmToken
@@ -26245,6 +27218,7 @@ async function step() {
 	      `runtime: ${ros.enabled ? `${ros.useState ? 'ros-state' : 'local-state'} / ${ros.publishCommands ? 'publish' : 'dry-run'}` : 'local only'} proc=${CONFIG.controlSubprocess ? 'subproc' : 'inline'} ui=${fmt(STEP_RATE_HZ, 0)}Hz display=${fmt(DISPLAY_RATE_HZ, 0)}Hz`,
 	      `controller: selected=${controlModeEl.value || 'policy'} applied=${runtime.controlMode || 'waiting'}${latest.controlModePending ? ' (PENDING)' : ''}`,
 	      `RL profile: selected=${policyProfileEl.value || 'legacy_bug_compatible'} active=${runtime.activePolicyProfile || 'waiting'} model=${policyModelEl.value || 'v85'}/${runtime.activePolicyModel || 'waiting'} generation=${runtime.policyGeneration ?? 0}`,
+          runtime.policyContract?.fplc ? `FPLC: ${runtime.policyContract.observationDim}D real roll/pitch≤${runtime.policyContract.fplc.realRelativeRollPitchLimitDeg?.map(v => fmt(v, 1)).join('/')}° training roll/pitch≤${runtime.policyContract.fplc.relativeRollPitchLimitDeg?.map(v => fmt(v, 1)).join('/')}° yaw=free projection=${runtime.policyContract.fplc.projection?.accepted === true ? 'accepted' : (runtime.policyContract.fplc.projection?.fallbackToHold ? 'hold' : 'waiting')} linear_violation=${fmt(runtime.policyContract.fplc.projection?.maxLinearViolation, 6)} dropout=${runtime.enableBallDropoutReferenceHold ? 'hold q_ref' : 'update q_ref'} safety_limiter=disabled` : null,
 	      `obs scale: editing=obs[${selectedScaleIndex}] × ${selectedScaleIndex >= 0 ? fmt(policyObservationScales[selectedScaleIndex], 3) : 'none'} configured={${configuredScaleBits.join(', ') || 'all 1'}} applied={${appliedScaleValues.length ? (appliedScaleBits.join(', ') || 'all 1') : 'waiting'}}`,
 	      `policy dq adapter: selected=${flowEls.enablePolicyDqAdapter.checked && !flowEls.enablePolicyDqAdapter.disabled ? 'on' : 'off'} applied=${dqAdapterBits}`,
 	      `reset pose: selected=${resetInitialPoseEl.value || 'default_1'} applied=${resetPose}`,
@@ -26254,10 +27228,12 @@ async function step() {
 	      `compensation: ${comp.enabled ? `${comp.active ? 'active' : 'inactive'} mode=${comp.mode || 'unknown'} delay=${Number.isFinite(comp.delayMs) ? fmt(comp.delayMs, 1) : 'none'}ms tau=${Number.isFinite(comp.tauS) ? fmt(comp.tauS, 3) : 'none'}s beta=${Number.isFinite(comp.mpcBeta) ? fmt(comp.mpcBeta, 2) : 'none'} maxd=${Number.isFinite(comp.mpcMaxDeltaRad) ? fmt(comp.mpcMaxDeltaRad, 3) : 'none'}${comp.error ? ` error=${comp.error}` : ''}` : 'off'}`,
 	      `backend loop: ${backendLoop.enabled ? `on ${backendLoop.source || 'thread'} target=${fmt(backendLoop.targetHz, 0)}Hz measured=${fmt(backendLoop.measuredHz, 1)}Hz snap=${fmt(backendLoop.snapshotHz, 0)}Hz work=${fmt(backendLoop.workMs, 2)}ms over=${backendLoop.overruns || 0} tick=${backendLoop.tick || 0}` : 'off'}`,
       `send command: selected=${publishCommandsEl.checked && !publishCommandsEl.disabled ? 'on' : 'off'} applied=${runtime.publishCommands === true ? 'on' : 'off'}${latest.commandPublishPending ? ' (PENDING)' : ''}`,
+      commandStopDescription(commandRearm, resetRecovery),
       `command rearm: ${commandRearm.required ? `REQUIRED reason=${commandRearm.reason || 'safety_transition'} off_seen=${commandRearm.offSeen ? 'yes; enable manually when safe' : 'pending'}` : 'not-required'}`,
       `hard stop: ${hardStop.active ? `ACTIVE reason=${hardStop.reason || latest.reason || 'done'} hold=${hardStop.holdSent ? 'sent' : 'pending'} reset-required` : 'off'}`,
       `soft reset: ${softReset.active ? `ACTIVE reason=${softReset.reason || latest.reason || 'done'} target=${(softReset.targetJointPositionDeg || []).join(',')}deg operator-reset-required` : 'off'}`,
       `reset recovery: ${resetRecovery.active ? `ACTIVE reason=${resetRecovery.reason || 'reset'} trajectory=${resetRecovery.commandTrajectoryComplete ? 'complete' : (resetRecovery.trackingPaused ? 'paused-for-feedback' : 'moving')} settled=${resetRecovery.settled ? 'yes' : 'no'} policy_arm=${resetRecovery.policyArmRequired ? 'fresh-send-required' : (resetRecovery.rearmRequired ? 'fault-rearm-required' : 'not-required')}` : 'off'}`,
+      backendLoop.enabled ? `active policy: ${fmt((backendLoop.policyTiming || {}).activePolicyHz, 1)}Hz; projection=${(((latest.runtime || {}).policyContract || {}).fplc || {}).projectionRuntime?.backend || 'n/a'}; cyclic GC=${(backendLoop.cyclicGC || {}).automaticDeferred ? 'deferred until Send off' : 'default'}` : null,
       backendLoop.error ? `backend error: ${backendLoop.error}` : null,
       `recording: ${recording.active ? `on ctrl=${recordingCounts.control || 0} snap=${recordingCounts.snapshots || 0} view=${recordingCounts.views || 0} img=${recordingCounts.frames || 0} simimg=${recordingCounts.simFrames || 0} drop=${recording.dropped || 0}` : 'off'}${recording.runDir ? ` dir=${recording.runDir}` : ''}`,
       recording.error ? `recording error: ${recording.error}` : null,
@@ -26265,7 +27241,7 @@ async function step() {
       `workspace monitor: source=${workspaceSafety.poseSource || 'unavailable'} fk=${workspaceSafety.fkOk ? 'ok' : 'invalid'} joint_age=${Number.isFinite(workspaceSafety.jointAgeS) ? `${fmt(workspaceSafety.jointAgeS)}s` : 'none'} ee=(${fmt(workspaceSafetyEe[0])}, ${fmt(workspaceSafetyEe[1])}, ${fmt(workspaceSafetyEe[2])})`,
       `predictive: horizon=${Number.isFinite(runtime.donePredictionHorizonS) ? fmt(runtime.donePredictionHorizonS, 3) : fmt(readNumber(inputs.donePredictionHorizonS, 0.12, 0, 0.5), 3)}s dt=${Number.isFinite(runtime.donePredictionDtS) ? fmt(runtime.donePredictionDtS, 3) : fmt(readNumber(inputs.donePredictionDtS, 0.01, 0.001, 0.1), 3)}s margin=${Number.isFinite(runtime.donePredictionMarginM) ? fmt(runtime.donePredictionMarginM, 3) : fmt(readNumber(inputs.donePredictionMarginM, 0.02, 0, 0.15), 3)}m ori=${Number.isFinite(runtime.donePredictionOrientationMarginRad) ? fmt(runtime.donePredictionOrientationMarginRad, 3) : fmt(readNumber(inputs.donePredictionOrientationMarginRad, 0.035, 0, 0.5), 3)}rad`,
       `ball source: ${latest.ballSource || ballSourceEl.value}`,
-      mocap.enabled ? `mocap: marker_YY=${Number.isFinite(mocap.markerId) ? mocap.markerId : readInt(inputs.mocapMarkerId, (CONFIG.mocapBall && CONFIG.mocapBall.markerId) ?? 1, 0, 999)} / ${mocap.detected ? 'detected' : (mocap.ready === false ? 'not-ready' : 'lost')} age=${Number.isFinite(mocap.ageS) ? fmt(mocap.ageS) : 'none'}s udp=${mocap.udpHost || '?'}:${mocap.udpPort || '?'}` : null,
+      mocap.enabled ? `mocap: marker_YY=${Number.isFinite(mocap.markerId) ? mocap.markerId : readInt(inputs.mocapMarkerId, (CONFIG.mocapBall && CONFIG.mocapBall.markerId) ?? 1, 0, 999)} / ${mocap.detected ? 'detected' : (mocap.ready === false ? 'not-ready' : 'lost')} clock=${mocap.clockSync && mocap.clockSync.ready ? 'synced' : ((mocap.clockSync && mocap.clockSync.status) || 'waiting')} age=${Number.isFinite(mocap.measurementAgeS) ? fmt(mocap.measurementAgeS) : 'none'}s udp=${mocap.udpHost || '?'}:${mocap.udpPort || '?'}` : null,
       `camera: ${camera.enabled ? `${cameraSource} / ${camera.cameraInfoReceived ? 'info' : 'no-info'} / ${camera.detectorReady ? 'detector' : 'no-detector'} / ${camera.detected ? 'detected' : 'lost'} age=${Number.isFinite(camera.ageS) ? fmt(camera.ageS) : 'none'}s hz=${Number.isFinite(camera.callbackHz) ? fmt(camera.callbackHz, 1) : '0.0'} frame=${camera.frame || 'none'}` : 'off'}`,
       camera.enabled ? `camera path: ${cameraPath}` : null,
       camera.enabled ? `camera flow: detect=${camRt.detect ? 'on' : 'off'} overlay=${camRt.visualize ? 'on' : 'off'} yolo=${camRt.yolo ? 'on' : 'off'} sensorDepth=${sensorDepthOn ? 'on' : 'off'} centerDepth=${camRt.sensorSurfaceToCenterDepth ? 'on' : 'off'} depthMode=${camRt.depthMode || 'sensor'} velocity=${camRt.physicsConstrainedVelocity ? 'physics' : (camRt.velocityLeastSquares ? 'LS' : 'endpoint')}N${camRt.velocityWindowFrames ?? 3} clearLoss=${camRt.clearBuffersOnDetectionLoss ? 'on' : 'off'} motionGate=${camRt.motionConsistencyGate ? 'on' : 'off'} impactReset=${camRt.impactVelocityReset ? 'on' : 'off'} undistort=${camRt.undistort ? 'on' : 'off'} rgbKF=${camRt.kalman ? 'on' : 'off'} pixelKF=${camRt.pixelKalman ? 'on' : 'off'} candidate=${camRt.candidateFilter ? 'on' : 'off'} ellipse=${camRt.ellipseFit ? 'on' : 'off'} tracker=${camRt.temporalTracker ? 'on' : 'off'} color=${camRt.colorFilter ? 'on' : 'off'} frames=${camera.frameCount || 0} det=${camera.detectionCount || 0} vizHz=${Number.isFinite(camera.visualizationRateHz) ? fmt(camera.visualizationRateHz, 0) : '30'} web=${camera.webMaxWidth || 'full'}px/q${camera.webJpegQuality || 62}` : null,
@@ -26428,6 +27404,12 @@ analysisReplay3dEl.addEventListener('pointercancel', () => {
 
 visibleEl.addEventListener('change', drawAll);
 ballSourceEl.addEventListener('change', () => {
+  publishCommandsEl.checked = false;
+  publishArmToken = '';
+  if (['camera', 'mocap'].includes(ballSourceEl.value)) {
+    publishCommandsEl.disabled = true;
+    document.getElementById('ballClockSyncStatus').textContent = 'Ball clock: warming up';
+  }
   syncEstimatorModeControl();
   drawAll();
 });
@@ -26495,6 +27477,15 @@ def _control_subprocess_main(
     parent_pid: int | None = None,
 ) -> None:
     probe: PolicySafetyProbe | None = None
+    stage_timings = None
+    control_gc = None
+    if cfg.policy_profile in {*FPLC_PROFILES, OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85}:
+        # The default 5 ms GIL timeslice is an entire policy period.  ROS,
+        # telemetry and queue feeder threads must yield sooner; this changes
+        # Python scheduling only, never the checkpoint's 5 ms integration.
+        sys.setswitchinterval(0.00005)
+        from pingpong_controller.control_gc import DeferredControlGC
+        control_gc = DeferredControlGC()
     shutdown_requested = threading.Event()
     hard_exit_timer: threading.Timer | None = None
 
@@ -26532,7 +27523,26 @@ def _control_subprocess_main(
         if _parent_is_gone():
             return
         _prewarm_jax_cuda_for_mjx(cfg)
+        if control_gc is not None:
+            control_gc.start()
         probe = PolicySafetyProbe(cfg)
+        probe.control_gc = control_gc
+        probe.control_runtime_environment = {
+            "pythonExecutable": sys.executable,
+            "pythonVersion": sys.version.split()[0],
+            "gilSwitchIntervalMs": sys.getswitchinterval() * 1000,
+            "blasThreadEnvironment": {
+                name: os.environ.get(name)
+                for name in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")},
+            "projectionRuntime": dict(getattr(probe.controller, "projection_runtime", {})),
+        }
+        print("[ControlTiming][INFO] " + json.dumps(probe.control_runtime_environment), flush=True)
+        if control_gc is not None:
+            control_gc.collect_if_idle(probe)
+        if os.environ.get("PROBE_STAGE_TIMINGS_PATH"):
+            from pingpong_controller.probe_timing import ProbeStageTimings
+            stage_timings = ProbeStageTimings(
+                probe, os.environ["PROBE_STAGE_TIMINGS_PATH"])
         _queue_replace_latest(status_q, {
             "kind": "config",
             "config": probe.browser_config(),
@@ -26551,6 +27561,8 @@ def _control_subprocess_main(
                     "reason": "parent process exited",
                 })
                 return
+            if control_gc is not None:
+                control_gc.collect_if_idle(probe)
             recording_cmds: list[dict[str, Any]] = []
             while True:
                 try:
@@ -26622,7 +27634,7 @@ def _control_subprocess_main(
                     if not isinstance(payload, dict):
                         payload = {}
                     snapshot = probe.step(payload)
-                    if snapshot is not None:
+                    if snapshot is not None and not cfg.backend_control_loop:
                         _queue_replace_latest(status_q, {
                             "kind": "snapshot",
                             "snapshot": snapshot,
@@ -26671,8 +27683,14 @@ def _control_subprocess_main(
             })
     finally:
         shutdown_requested.set()
+        if stage_timings is not None and probe is not None:
+            probe.control_loop_stop.set()
+            with probe.lock:
+                stage_timings.write()
         if probe is not None:
             probe.shutdown()
+        if control_gc is not None:
+            control_gc.close()
         if hard_exit_timer is not None:
             try:
                 hard_exit_timer.cancel()
@@ -27046,6 +28064,8 @@ class ControlSubprocessProxy:
         if value is None:
             return None
         text = str(value).strip().lower()
+        if text in FPLC_PROFILES:
+            return text
         if text in {
                 GPU1_QACC_FT_MODEL_V153,
                 OBSERVATION_PROFILE_GPU1_QACC_FT_V153}:
@@ -27804,13 +28824,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SIMCODE8_POLICY_XML)
     p.add_argument("--robot-xml-path", type=Path, default=DEFAULT_ROBOT_XML)
     p.add_argument(
-        "--policy-obs-dim", type=int, choices=(50, 57, 67), default=67)
+        "--policy-obs-dim", type=int, choices=(50, 57, 67, 72, 156), default=67)
     p.add_argument(
         "--reset-initial-pose",
         default=RESET_INITIAL_POSE_DEFAULT,
         help=(
             "Startup/reset pose preset. Accepts default_1 or "
-            "default_2_horizontal."
+            "default_2_horizontal; FPLC always uses simcode9_native."
         ),
     )
     p.add_argument(
@@ -28089,6 +29109,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--vertical-contact-max-racket-upward-speed-m-s",
         type=finite_float, default=0.90)
     p.add_argument("--disable-ball-capture-gate", action="store_true")
+    p.add_argument("--disable-ball-dropout-reference-hold", action="store_true",
+                   help="FPLC: continue actor/QVEL updates on a held valid ball state; retain 350 ms timeout")
     p.add_argument("--disable-ball-release-gate", action="store_true")
     p.add_argument("--disable-ball-lost-failsafe", action="store_true")
     p.add_argument("--disable-done-monitoring", action="store_true")
@@ -28627,9 +29649,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Enable mocap UDP ball source mapped to the same sim frame as camera.",
     )
     p.add_argument("--mocap-udp-host", default="0.0.0.0")
-    p.add_argument("--mocap-udp-port", type=int, default=9870)
+    p.add_argument('--disable-mocap-subprocess', action='store_true',
+                   help='Run mocap UDP processing in the control process for diagnostics.')
+    p.add_argument("--mocap-udp-port", type=int, default=65501)
     p.add_argument("--mocap-calibration-path", default="")
     p.add_argument("--mocap-marker-id", type=int, default=1)
+    p.add_argument(
+        "--mocap-marker-x-limits-m", default=None,
+        help="Select the unique UDP marker with raw mocap X in MIN,MAX meters; empty disables selection.")
     p.add_argument(
         "--mocap-rigid-body-slot",
         type=int,
@@ -28649,6 +29676,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="s",
     )
     p.add_argument("--mocap-timeout-s", type=finite_float, default=0.5)
+    p.add_argument("--mocap-clock-sync-min-samples", type=int, default=8,
+                   help="Unique mocap frames required before clock-aligned control observations.")
+    p.add_argument("--mocap-clock-sync-min-span-s", type=finite_float, default=0.05,
+                   help="Minimum source/receipt time span for mocap clock alignment.")
+    p.add_argument("--mocap-clock-sync-window-s", type=finite_float, default=10.0,
+                   help="Rolling window for the continuous mocap-to-ROS clock offset estimate.")
     p.add_argument(
         "--mocap-velocity-alpha",
         type=finite_float,
@@ -28674,6 +29707,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="direct_realsense",
         help="Camera source path. direct_realsense matches use_direct_realsense:=true.",
     )
+    p.add_argument(
+        "--disable-camera-subprocess", action="store_true",
+        help="Run direct RealSense processing in the control process for diagnostics.")
     p.add_argument(
         "--disable-hybrid-detector",
         action="store_true",
@@ -28932,6 +29968,8 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
     # here turned one missing asset into many identical FileNotFound errors.
     profile = normalize_observation_profile(args.policy_profile)
     selected_assets = {
+        **{name: (("FPLC checkpoint", fplc_assets(name)[0]),
+                  ("FPLC policy XML", fplc_assets(name)[1])) for name in FPLC_PROFILES},
         OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: (
             ("legacy checkpoint", model_path),
             ("legacy policy XML", robot_xml),
@@ -28986,6 +30024,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
     simcode7_sim_xml = args.simcode7_sim_xml_path.expanduser().resolve()
     simcode8_sim_xml = args.simcode8_sim_xml_path.expanduser().resolve()
     selected_sim_xml = {
+        **{name: fplc_assets(name)[1] for name in FPLC_PROFILES},
         OBSERVATION_PROFILE_LEGACY_BUG_COMPAT: sim_xml,
         OBSERVATION_PROFILE_SIMCODE2_IDEALPD67: simcode2_sim_xml,
         OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67: simcode3_sim_xml,
@@ -29021,6 +30060,11 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         int(args.mocap_rigid_body_slot)
         if args.mocap_rigid_body_slot is not None
         else int(args.mocap_rigid_body_id))
+    if args.mocap_ball:
+        from pingpong_controller.mocap_clock_sync import MocapClockSynchronizer
+        MocapClockSynchronizer(min_samples=args.mocap_clock_sync_min_samples,
+                              min_span_s=args.mocap_clock_sync_min_span_s,
+                              window_s=args.mocap_clock_sync_window_s)
     dq_mode = PolicyDqMode.parse(args.policy_dq_mode)
     if (dq_mode is PolicyDqMode.RAW_COHERENT
             and not math.isclose(
@@ -29058,11 +30102,10 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         robot_xml_path=robot_xml,
         policy_obs_dim=int(args.policy_obs_dim),
         reset_initial_pose_id=(
-            RESET_INITIAL_POSE_HORIZONTAL
-            if profile in {
+            RESET_INITIAL_POSE_FPLC if profile in FPLC_PROFILES
+            else RESET_INITIAL_POSE_HORIZONTAL if profile in {
                 OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
-                OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
-            }
+                OBSERVATION_PROFILE_GPU1_QACC_FT_V153}
             else _reset_initial_pose_id(args.reset_initial_pose)),
         reset_velocity_limit_deg_s=max(
             1.0, float(args.reset_velocity_limit_deg_s)),
@@ -29266,6 +30309,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         comp_mpc_delta_weight=float(args.comp_mpc_delta_weight),
         comp_mpc_max_delta_rad=float(args.comp_mpc_max_delta_rad),
         enable_ball_capture_gate=not bool(args.disable_ball_capture_gate),
+        enable_ball_dropout_reference_hold=not bool(args.disable_ball_dropout_reference_hold),
         enable_ball_release_gate=not bool(args.disable_ball_release_gate),
         enable_ball_lost_failsafe=not bool(args.disable_ball_lost_failsafe),
         enable_done_monitoring=not bool(args.disable_done_monitoring),
@@ -29439,15 +30483,20 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         right_arm_mu_idx=int(args.right_arm_mu_idx),
         enable_camera_ball=bool(args.camera_ball),
         enable_mocap_ball=bool(args.mocap_ball),
+        mocap_subprocess=not bool(args.disable_mocap_subprocess),
         mocap_udp_host=str(args.mocap_udp_host),
         mocap_udp_port=int(args.mocap_udp_port),
         mocap_calibration_path=str(args.mocap_calibration_path),
         mocap_marker_id=int(args.mocap_marker_id),
+        mocap_marker_x_limits_m=parse_limits(args.mocap_marker_x_limits_m),
         mocap_rigid_body_slot=int(mocap_rigid_body_slot),
         mocap_rigid_body_id=int(args.mocap_rigid_body_id),
         mocap_rigid_body_name=str(args.mocap_rigid_body_name),
         mocap_position_unit=str(args.mocap_position_unit),
         mocap_timestamp_unit=str(args.mocap_timestamp_unit),
+        mocap_clock_sync_min_samples=int(args.mocap_clock_sync_min_samples),
+        mocap_clock_sync_min_span_s=float(args.mocap_clock_sync_min_span_s),
+        mocap_clock_sync_window_s=float(args.mocap_clock_sync_window_s),
         mocap_timeout_s=float(args.mocap_timeout_s),
         mocap_velocity_alpha=float(args.mocap_velocity_alpha),
         mocap_max_velocity_m_s=float(args.mocap_max_velocity_m_s),
@@ -29456,6 +30505,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         mocap_velocity_window_max_span_s=max(
             1e-4, float(args.mocap_velocity_window_max_span_s)),
         camera_source_mode=str(args.camera_source_mode),
+        camera_subprocess=not bool(args.disable_camera_subprocess),
         use_hybrid_detector=not bool(args.disable_hybrid_detector),
         use_depth_sensor=not bool(args.disable_depth_sensor),
         image_width=max(1, int(args.image_width)),
@@ -29638,7 +30688,9 @@ def _prewarm_jax_cuda_for_mjx(cfg: ProbeConfig) -> None:
 def _validate_release_before_runtime(args: argparse.Namespace) -> dict[str, Any]:
     """Verify selected bytes before constructing anything that can publish."""
     profile = normalize_observation_profile(args.policy_profile)
-    if profile == OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67:
+    if profile in FPLC_PROFILES:
+        checkpoint_path, xml_path = fplc_assets(profile)
+    elif profile == OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67:
         checkpoint_path = args.simcode5_model_path
         xml_path = args.simcode5_policy_xml_path
     elif profile == OBSERVATION_PROFILE_SIMCODE6_QVEL67:

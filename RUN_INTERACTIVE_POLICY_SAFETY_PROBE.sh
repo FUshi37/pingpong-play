@@ -4,11 +4,18 @@
 
 set -euo pipefail
 
+# Config-only must be unambiguous before any ROS or camera initialization.
+case "${PROBE_CONFIG_ONLY:-false}" in
+    true|TRUE|1|yes|YES) PROBE_CONFIG_ONLY=true ;;
+    false|FALSE|0|no|NO) PROBE_CONFIG_ONLY=false ;;
+    *) echo "ERROR: PROBE_CONFIG_ONLY must be true/false or 1/0" >&2; exit 2 ;;
+esac
+
 WORKSPACE_DIR="${WORKSPACE_DIR:-/home/spirit-ai/pingpong_moz1}"
 PROBE_SCRIPT="$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/tools/interactive_policy_safety_probe.py"
 POLICY_RELEASE_VALIDATOR="$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/policy_release_manifest.py"
 POLICY_RELEASE_MANIFEST="${POLICY_RELEASE_MANIFEST:-$WORKSPACE_DIR/config/policy_release_manifest.json}"
-POLICY_RELEASE_ID="${POLICY_RELEASE_ID:-gpu0_qvel_real_rmp_v91}"
+POLICY_RELEASE_ID="${POLICY_RELEASE_ID:-fplc_gpu1_v172}"
 SETUP_FILE="${SETUP_FILE:-$WORKSPACE_DIR/install/setup.bash}"
 CONFIG_DONE_MONITORING_YAML="${CONFIG_DONE_MONITORING_YAML:-$WORKSPACE_DIR/config_done_monitoring.yaml}"
 LOAD_CONFIG_DONE_MONITORING="${LOAD_CONFIG_DONE_MONITORING:-true}"
@@ -79,6 +86,7 @@ fi
 MODEL_PATH="${MODEL_PATH:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/outputs/rl_sim/inverse_compensation/18_stage4g_strong_contact_dr_inverse_mpc.pkl}"
 if [ -z "${POLICY_PROFILE:-}" ]; then
     case "${POLICY_RELEASE_ID,,}" in
+        fplc_*) POLICY_PROFILE="${POLICY_RELEASE_ID,,}" ;;
         gpu1_qacc_ft_v153) POLICY_PROFILE="gpu1_qacc_ft_v153" ;;
         simcode5_v5_recovery) POLICY_PROFILE="simcode5_pure_actuator67" ;;
         simcode6_v14_record_new3_rework) POLICY_PROFILE="simcode6_qvel67" ;;
@@ -147,6 +155,12 @@ DONE_RACKET_Z_LOW_OFFSET_M="${DONE_RACKET_Z_LOW_OFFSET_M:--0.12}"
 DONE_EE_X_LIMITS_M="${DONE_EE_X_LIMITS_M--0.298,0.163}"
 DONE_EE_Y_LIMITS_M="${DONE_EE_Y_LIMITS_M--0.502,-0.290}"
 DONE_EE_Z_LIMITS_M="${DONE_EE_Z_LIMITS_M-0.692,1.462}"
+# Preserve the configured envelope for runtime switches out of FPLC. The
+# FPLC preset below narrows DONE_EE_* for validation and launch diagnostics;
+# the backend receives the original limits and selects the active envelope.
+_PROBE_BASE_EE_X_LIMITS_M="$DONE_EE_X_LIMITS_M"
+_PROBE_BASE_EE_Y_LIMITS_M="$DONE_EE_Y_LIMITS_M"
+_PROBE_BASE_EE_Z_LIMITS_M="$DONE_EE_Z_LIMITS_M"
 DONE_EE_PSI_LIMITS_RAD="${DONE_EE_PSI_LIMITS_RAD:-}"
 DONE_EE_B_LIMITS_RAD="${DONE_EE_B_LIMITS_RAD:-}"
 DONE_EE_B_MIN_RAD="${DONE_EE_B_MIN_RAD:-}"
@@ -254,6 +268,9 @@ COMP_MPC_DELTA_WEIGHT="${COMP_MPC_DELTA_WEIGHT:-0.05}"
 COMP_MPC_MAX_DELTA_RAD="${COMP_MPC_MAX_DELTA_RAD:-0.5235987755982988}"
 if [ -z "${COMPENSATION_PRESET:-}" ]; then
     case "${POLICY_PROFILE,,}" in
+        fplc_*)
+            COMPENSATION_PRESET="fplc_direct"
+            ;;
         simcode2_idealpd67)
             COMPENSATION_PRESET="simcode2_live_v2"
             ;;
@@ -279,6 +296,10 @@ if [ -z "${COMPENSATION_PRESET:-}" ]; then
             COMPENSATION_PRESET="current"
             ;;
     esac
+fi
+if [[ "$POLICY_PROFILE" == fplc_* && "$COMPENSATION_PRESET" != "fplc_direct" ]]; then
+    echo "ERROR: FPLC requires COMPENSATION_PRESET=fplc_direct" >&2
+    exit 2
 fi
 case "$COMPENSATION_PRESET" in
     current)
@@ -400,9 +421,56 @@ case "$COMPENSATION_PRESET" in
             ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD="false"
         fi
         ;;
+    fplc_direct)
+        # Small actor/FK matrices run in the 5 ms control budget. A default
+        # 32-thread BLAS pool adds scheduling jitter instead of useful work.
+        # This preset fixes the physical policy clock at 5 ms. Inherited BLAS
+        # thread pools must not change its scheduling cost between terminals.
+        export OPENBLAS_NUM_THREADS=1
+        export OMP_NUM_THREADS=1
+        export MKL_NUM_THREADS=1
+        echo "[ProbeConfig] FPLC CPU threads openblas=$OPENBLAS_NUM_THREADS omp=$OMP_NUM_THREADS mkl=$MKL_NUM_THREADS"
+        RESET_INITIAL_POSE="simcode9_native"
+        _FPLC_HELPER="$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/fplc_deployment.py"
+        if ! _FPLC_ROWS="$(python3 "$_FPLC_HELPER" "$POLICY_PROFILE" --repo-root "$WORKSPACE_DIR" \
+                --x-limits="$DONE_EE_X_LIMITS_M" --y-limits="$DONE_EE_Y_LIMITS_M" --z-limits="$DONE_EE_Z_LIMITS_M")"; then
+            exit 2
+        fi
+        while IFS=$'\t' read -r _FPLC_KEY _FPLC_VALUE; do
+            case "$_FPLC_KEY" in
+                FPLC_MODEL_PATH) FPLC_MODEL_PATH="$_FPLC_VALUE" ;;
+                FPLC_POLICY_XML_PATH) FPLC_POLICY_XML_PATH="$_FPLC_VALUE" ;;
+                FPLC_OBS_DIM) FPLC_OBS_DIM="$_FPLC_VALUE" ;;
+                FPLC_REAL_ROLL_PITCH_LIMITS_DEG) FPLC_REAL_ROLL_PITCH_LIMITS_DEG="$_FPLC_VALUE" ;;
+                DONE_EE_X_LIMITS_M) DONE_EE_X_LIMITS_M="$_FPLC_VALUE" ;;
+                DONE_EE_Y_LIMITS_M) DONE_EE_Y_LIMITS_M="$_FPLC_VALUE" ;;
+                DONE_EE_Z_LIMITS_M) DONE_EE_Z_LIMITS_M="$_FPLC_VALUE" ;;
+                *) echo "ERROR: unexpected FPLC contract key: $_FPLC_KEY" >&2; exit 2 ;;
+            esac
+        done <<< "$_FPLC_ROWS"
+        # Explicit actor dimension/rate overrides remain subject to release
+        # validation. Defaults come from this model's independent schema.
+        if [[ ! " ${_POLICY_RELEASE_EXPLICIT_OVERRIDE_KEYS[*]} " =~ " POLICY_OBS_DIM " ]]; then
+            POLICY_OBS_DIM="$FPLC_OBS_DIM"
+        fi
+        ENABLE_COMPENSATION="false"
+        COMPENSATION_MODE="none"
+        COMP_DELAY_MS="0.0"
+        COMP_DELAY_CONDITIONING="false"
+        POLICY_PLANT_MATCHER_MODE="off"
+        ENABLE_POLICY_DQ_ADAPTER="false"
+        POLICY_DQ_OBSERVATION_SCALE="1.0"
+        ENABLE_CONTACT_ACTION_SHIELD="false"
+        ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD="false"
+        RL_USE_VALID_BALL_OBS_AGE="true"
+        WORKSPACE_SAFETY_MODE="position"
+        ;;
     gpu0_real_rmp_direct)
         # The robot controller already owns the physical RMP.  The actor
         # integrates measured-feedback qvel once and publishes bounded q_ref.
+        export OPENBLAS_NUM_THREADS=1
+        export OMP_NUM_THREADS=1
+        export MKL_NUM_THREADS=1
         ENABLE_COMPENSATION="false"
         COMPENSATION_MODE="none"
         CONTROL_RATE_HZ="200.0"
@@ -441,6 +509,10 @@ if [ ! -f "$POLICY_RELEASE_VALIDATOR" ]; then
     exit 2
 fi
 case "${POLICY_PROFILE,,}" in
+    fplc_*)
+        _RELEASE_CHECKPOINT_CANDIDATE="$FPLC_MODEL_PATH"
+        _RELEASE_XML_CANDIDATE="$FPLC_POLICY_XML_PATH"
+        ;;
     simcode5|simcode5_pure_actuator67|pure_actuator67|pure_actuator_67)
         _RELEASE_CHECKPOINT_CANDIDATE="$SIMCODE5_MODEL_PATH"
         _RELEASE_XML_CANDIDATE="$SIMCODE5_POLICY_XML_PATH"
@@ -521,8 +593,20 @@ export POLICY_RELEASE_CONTRACT_JSON
 PROBE_BACKEND_CONTROL_LOOP="${PROBE_BACKEND_CONTROL_LOOP:-true}"
 PROBE_CONTROL_SUBPROCESS="${PROBE_CONTROL_SUBPROCESS:-$PROBE_BACKEND_CONTROL_LOOP}"
 PROBE_CONTROL_SUBPROCESS_STARTUP_TIMEOUT_S="${PROBE_CONTROL_SUBPROCESS_STARTUP_TIMEOUT_S:-300.0}"
-PROBE_BACKEND_SNAPSHOT_RATE_HZ="${PROBE_BACKEND_SNAPSHOT_RATE_HZ:-60.0}"
+case "$POLICY_PROFILE" in
+    fplc_*|gpu0_qvel_real_rmp_v85) _PROBE_SNAPSHOT_DEFAULT_HZ=30.0 ;;
+    *) _PROBE_SNAPSHOT_DEFAULT_HZ=60.0 ;;
+esac
+# Full policy/control recordings remain at 200 Hz; only browser diagnostics
+# run at 30 Hz for the fixed-clock CPU actors, leaving headroom for ROS jitter.
+PROBE_BACKEND_SNAPSHOT_RATE_HZ="${PROBE_BACKEND_SNAPSHOT_RATE_HZ:-$_PROBE_SNAPSHOT_DEFAULT_HZ}"
 PROBE_STEP_RATE_HZ="${PROBE_STEP_RATE_HZ:-60.0}"
+PROBE_CONTROL_RT_PRIORITY="${PROBE_CONTROL_RT_PRIORITY:-1}"
+if [[ ! "$PROBE_CONTROL_RT_PRIORITY" =~ ^[0-9]+$ ]] || (( 10#$PROBE_CONTROL_RT_PRIORITY > 20 )); then
+    echo "ERROR: PROBE_CONTROL_RT_PRIORITY must be an integer from 0 to 20" >&2
+    exit 2
+fi
+export PROBE_CONTROL_RT_PRIORITY
 PROBE_DISPLAY_RATE_HZ="${PROBE_DISPLAY_RATE_HZ:-60.0}"
 PROBE_RECORDING_OUTPUT_ROOT="${PROBE_RECORDING_OUTPUT_ROOT:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/outputs/interactive_recordings}"
 ANALYSIS="${ANALYSIS:-false}"
@@ -640,6 +724,14 @@ ENABLE_CAMERA_TRAJECTORY_POSITION_SMOOTHING="${ENABLE_CAMERA_TRAJECTORY_POSITION
 ENABLE_CAMERA_CONTROL_TIME_COMPENSATION="${ENABLE_CAMERA_CONTROL_TIME_COMPENSATION:-false}"
 ENABLE_CAMERA_REACQUISITION_SMOOTHING="${ENABLE_CAMERA_REACQUISITION_SMOOTHING:-true}"
 ENABLE_OPTIMIZED_BALL_PREDICTION_INITIAL_STATE="${ENABLE_OPTIMIZED_BALL_PREDICTION_INITIAL_STATE:-true}"
+# FPLC dropout mode: true holds the last q_ref; false continues actor updates.
+# Both modes retain the authenticated ball age and 350 ms validity timeout.
+ENABLE_BALL_DROPOUT_REFERENCE_HOLD="${ENABLE_BALL_DROPOUT_REFERENCE_HOLD:-true}"
+case "${ENABLE_BALL_DROPOUT_REFERENCE_HOLD,,}" in
+    true|1) ENABLE_BALL_DROPOUT_REFERENCE_HOLD=true ;;
+    false|0) ENABLE_BALL_DROPOUT_REFERENCE_HOLD=false ;;
+    *) echo "ERROR: ENABLE_BALL_DROPOUT_REFERENCE_HOLD must be true/false or 1/0" >&2; exit 2 ;;
+esac
 ENABLE_ROS_BRIDGE="${ENABLE_ROS_BRIDGE:-true}"
 ROS_PUBLISH_COMMANDS="${ROS_PUBLISH_COMMANDS:-true}"
 COMMAND_TOPIC="${COMMAND_TOPIC:-/mx_mix_command}"
@@ -648,21 +740,60 @@ CART_STATE_TOPIC="${CART_STATE_TOPIC:-/cart_states}"
 RIGHT_ARM_MU_IDX="${RIGHT_ARM_MU_IDX:-3}"
 ENABLE_CAMERA_BALL="${ENABLE_CAMERA_BALL:-true}"
 ENABLE_MOCAP_BALL="${ENABLE_MOCAP_BALL:-true}"
+MOCAP_SUBPROCESS="${MOCAP_SUBPROCESS:-true}"
+case "${MOCAP_SUBPROCESS,,}" in
+    true|1) MOCAP_SUBPROCESS=true ;;
+    false|0) MOCAP_SUBPROCESS=false ;;
+    *) echo "ERROR: MOCAP_SUBPROCESS must be true/false or 1/0" >&2; exit 2 ;;
+esac
+case "${ENABLE_MOCAP_BALL,,}" in
+    true|1|yes) ENABLE_MOCAP_BALL=true ;;
+    false|0|no) ENABLE_MOCAP_BALL=false ;;
+    *) echo "ERROR: ENABLE_MOCAP_BALL must be true/false or 1/0" >&2; exit 2 ;;
+esac
 MOCAP_UDP_HOST="${MOCAP_UDP_HOST:-0.0.0.0}"
-MOCAP_UDP_PORT="${MOCAP_UDP_PORT:-9870}"
+MOCAP_UDP_PORT="${MOCAP_UDP_PORT:-65501}"
 MOCAP_CALIBRATION_PATH="${MOCAP_CALIBRATION_PATH:-$WORKSPACE_DIR/mocap_calibration.txt}"
-MOCAP_MARKER_ID="${MOCAP_MARKER_ID:-2}"
+MOCAP_MARKER_ID="${MOCAP_MARKER_ID:-1}"
+# Filter all scatter points in the original mocap frame before calibration.
+MOCAP_MARKER_X_LIMITS_M="${MOCAP_MARKER_X_LIMITS_M:--2.0,2.0}"
 MOCAP_RIGID_BODY_ID="${MOCAP_RIGID_BODY_ID:-1}"
 MOCAP_RIGID_BODY_SLOT="${MOCAP_RIGID_BODY_SLOT:-$MOCAP_RIGID_BODY_ID}"
 MOCAP_RIGID_BODY_NAME="${MOCAP_RIGID_BODY_NAME:-}"
 MOCAP_POSITION_UNIT="${MOCAP_POSITION_UNIT:-auto}"
 MOCAP_TIMESTAMP_UNIT="${MOCAP_TIMESTAMP_UNIT:-s}"
+# Synchronization runs continuously in the actual UDP receiver. Control gets
+# valid observations only after these source/ROS clock alignment criteria pass.
+MOCAP_CLOCK_SYNC_MIN_SAMPLES="${MOCAP_CLOCK_SYNC_MIN_SAMPLES:-8}"
+MOCAP_CLOCK_SYNC_MIN_SPAN_S="${MOCAP_CLOCK_SYNC_MIN_SPAN_S:-0.05}"
+MOCAP_CLOCK_SYNC_WINDOW_S="${MOCAP_CLOCK_SYNC_WINDOW_S:-10.0}"
+if [ "$ENABLE_MOCAP_BALL" = "true" ]; then
+    python3 - "$WORKSPACE_DIR/src/pingpong_moz1" \
+        "$MOCAP_CLOCK_SYNC_MIN_SAMPLES" "$MOCAP_CLOCK_SYNC_MIN_SPAN_S" \
+        "$MOCAP_CLOCK_SYNC_WINDOW_S" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from pingpong_controller.mocap_clock_sync import MocapClockSynchronizer
+try:
+    MocapClockSynchronizer(min_samples=int(sys.argv[2]),
+                          min_span_s=float(sys.argv[3]), window_s=float(sys.argv[4]))
+except (ValueError, OverflowError) as exc:
+    print(f"ERROR: invalid mocap clock synchronization settings: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+fi
 MOCAP_TIMEOUT_S="${MOCAP_TIMEOUT_S:-0.5}"
 MOCAP_VELOCITY_ALPHA="${MOCAP_VELOCITY_ALPHA:-1.0}"
 MOCAP_MAX_VELOCITY_M_S="${MOCAP_MAX_VELOCITY_M_S:-20.0}"
 MOCAP_VELOCITY_WINDOW_FRAMES="${MOCAP_VELOCITY_WINDOW_FRAMES:-3}"
 MOCAP_VELOCITY_WINDOW_MAX_SPAN_S="${MOCAP_VELOCITY_WINDOW_MAX_SPAN_S:-0.05}"
 CAMERA_SOURCE_MODE="${CAMERA_SOURCE_MODE:-direct_realsense}"
+CAMERA_SUBPROCESS="${CAMERA_SUBPROCESS:-true}"
+case "${CAMERA_SUBPROCESS,,}" in
+    true|1) CAMERA_SUBPROCESS=true ;;
+    false|0) CAMERA_SUBPROCESS=false ;;
+    *) echo "ERROR: CAMERA_SUBPROCESS must be true/false or 1/0" >&2; exit 2 ;;
+esac
 USE_HYBRID_DETECTOR="${USE_HYBRID_DETECTOR:-true}"
 USE_DEPTH_SENSOR="${USE_DEPTH_SENSOR:-true}"
 IMAGE_WIDTH="${IMAGE_WIDTH:-848}"
@@ -761,6 +892,8 @@ else
     echo "[ProbeConfig] YAML loading disabled; using environment/script defaults"
 fi
 echo "[ProbeConfig] workspace mode=$WORKSPACE_SAFETY_MODE ee_x=$DONE_EE_X_LIMITS_M ee_y=$DONE_EE_Y_LIMITS_M ee_z=$DONE_EE_Z_LIMITS_M"
+echo "[ProbeConfig] non-FPLC workspace ee_x=$_PROBE_BASE_EE_X_LIMITS_M ee_y=$_PROBE_BASE_EE_Y_LIMITS_M ee_z=$_PROBE_BASE_EE_Z_LIMITS_M"
+echo "[ProbeConfig] policy_thread_realtime_priority=$PROBE_CONTROL_RT_PRIORITY (SCHED_RR with child inheritance reset; only policy thread; 0=benchmark opt-out)"
 case "$WORKSPACE_SAFETY_MODE" in
     *_soft)
         echo "[ProbeConfig] workspace safety=hard_envelope terminal_action=reset_joint_pose_on_any_done pose_source=joint_state_fk reset_initial_pose=$RESET_INITIAL_POSE"
@@ -780,6 +913,7 @@ if [ "$ENABLE_HYBRID_BALL_TRACKER" = "true" ]; then
 fi
 echo "[ProbeConfig] reset_initial_pose=$RESET_INITIAL_POSE slow_reset_velocity=${RESET_VELOCITY_LIMIT_DEG_S}deg/s slow_reset_acceleration=${RESET_ACCELERATION_LIMIT_DEG_S2}deg/s2 synchronized=true minimum_duration=2.0s"
 echo "[ProbeConfig] release_id=$POLICY_RELEASE_ID profile=$POLICY_PROFILE repo_head=$POLICY_RELEASE_REPO_HEAD dirty=$POLICY_RELEASE_REPO_DIRTY"
+echo "[ProbeConfig] ball_dropout_reference_hold=$ENABLE_BALL_DROPOUT_REFERENCE_HOLD (FPLC; timeout=350ms)"
 echo "[ProbeConfig] release_manifest=$POLICY_RELEASE_MANIFEST sha256=$POLICY_RELEASE_MANIFEST_SHA256"
 echo "[ProbeConfig] checkpoint=$POLICY_RELEASE_CHECKPOINT_PATH sha256=$POLICY_RELEASE_CHECKPOINT_SHA256"
 echo "[ProbeConfig] policy_xml=$POLICY_RELEASE_XML_PATH sha256=$POLICY_RELEASE_XML_SHA256"
@@ -788,14 +922,26 @@ echo "[ProbeConfig] sim compensation_preset=$COMPENSATION_PRESET mode=$COMPENSAT
 echo "[ProbeConfig] real-only compensation delay=${REAL_COMP_DELAY_MS}ms tau=${REAL_COMP_ACTUATOR_TAU_S}s gain=$REAL_COMP_ACTUATOR_GAIN beta=$REAL_COMP_MPC_BETA delay_scale=$REAL_COMP_MPC_DELAY_SCALE tau_scale=$REAL_COMP_MPC_TAU_SCALE horizon=$REAL_COMP_MPC_HORIZON_STEPS weights=${REAL_COMP_MPC_TRACKING_WEIGHT}/${REAL_COMP_MPC_NOMINAL_WEIGHT}/${REAL_COMP_MPC_DELTA_WEIGHT} max_delta=$REAL_COMP_MPC_MAX_DELTA_RAD parameter_target=real"
 echo "[ProbeConfig] policy observation=${POLICY_OBS_DIM}D ball_refresh=${BALL_OBSERVATION_RATE_HZ}Hz release_verified=true valid_frame_age=$RL_USE_VALID_BALL_OBS_AGE joint_feedback=atomic_measured_q_dq"
 echo "[ProbeConfig] policy dq_mode=$POLICY_DQ_MODE coherence=$([ "$POLICY_DQ_MODE" = raw_coherent ] && echo coherent || echo incoherent_legacy_ablation) adapter=$ENABLE_POLICY_DQ_ADAPTER allow_incoherent=$ALLOW_INCOHERENT_DQ_ABLATION impact_limit=$INCOHERENT_DQ_ABLATION_MAX_IMPACTS dq_obs_scale=$POLICY_DQ_OBSERVATION_SCALE"
+if [[ "$POLICY_PROFILE" == fplc_* ]]; then
+    echo "[ProbeConfig] FPLC persistent_qref=true horizon=10s projection=training_24_sweeps training_roll_pitch=2deg real_roll_pitch=${FPLC_REAL_ROLL_PITCH_LIMITS_DEG}deg yaw=free reset=simcode9_native_XY_surface_Z_follow_IK safety_intervention=measured_hold_disarm_history_reset"
+fi
 echo "[ProbeConfig] command safety limiter=hard-disabled all_paths=true independent_slow_reset=true"
 echo "[ProbeConfig] plant_matcher mode=$POLICY_PLANT_MATCHER_MODE apply_allowed=$ALLOW_POLICY_PLANT_MATCHER_APPLY real_config=$POLICY_PLANT_MATCHER_REAL_CONFIG"
 echo "[ProbeConfig] ball_handover mode=$POLICY_BALL_HANDOVER_MODE"
 echo "[ProbeConfig] camera=${CAMERA_SOURCE_MODE} ${IMAGE_WIDTH}x${IMAGE_HEIGHT}@${REALSENSE_FPS}Hz yolo=${ENABLE_YOLO} candidate_filter=${ENABLE_HYBRID_CANDIDATE_FILTER} visualization=${ENABLE_CAMERA_VISUALIZATION}@${CAMERA_VISUALIZATION_RATE_HZ}Hz"
 echo "[ProbeConfig] camera depth_mode=$CAMERA_DEPTH_MODE surface_to_center=$ENABLE_SENSOR_SURFACE_TO_CENTER_DEPTH depth_sync=$USE_SYNCHRONIZED_IR_DEPTH median_frames=$DEPTH_TEMPORAL_WINDOW_FRAMES velocity_ls=$CAMERA_VELOCITY_LEAST_SQUARES velocity_frames=$CAMERA_VELOCITY_WINDOW_FRAMES impact_reset=$CAMERA_IMPACT_VELOCITY_RESET"
+if [ "$ENABLE_CAMERA_BALL" = "true" ]; then
+    echo "[ProbeConfig] camera timestamp_sync=required capture_clock=RealSense_or_ROS_header receiver_clock=ROS min_samples=8 min_span=0.05s switch_resync=required unsynchronized_observation=invalid"
+fi
 echo "[ProbeConfig] contact_action_shield=$ENABLE_CONTACT_ACTION_SHIELD window=${CONTACT_SHIELD_PRE_CONTACT_WINDOW_S}/${CONTACT_SHIELD_POST_CONTACT_WINDOW_S}s normal_xy=$CONTACT_SHIELD_MAX_NORMAL_LATERAL lateral_speed=${CONTACT_SHIELD_MAX_LATERAL_SPEED_M_S}m/s workspace_margin=${CONTACT_SHIELD_WORKSPACE_MARGIN_M}m"
 echo "[ProbeConfig] vertical_contact_energy_shield=$ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD pre=${VERTICAL_CONTACT_PRE_CONTACT_WINDOW_S}s target_apex_delta=${VERTICAL_CONTACT_TARGET_APEX_HEIGHT_M}m restitution=$VERTICAL_CONTACT_RESTITUTION hard_racket_vz=${VERTICAL_CONTACT_MAX_RACKET_UPWARD_SPEED_M_S}m/s"
 echo "[ProbeConfig] mocap=${ENABLE_MOCAP_BALL} udp=${MOCAP_UDP_HOST}:${MOCAP_UDP_PORT} ball_marker=${MOCAP_MARKER_ID} rb_slot=${MOCAP_RIGID_BODY_SLOT} rb_id=${MOCAP_RIGID_BODY_ID} calibration=${MOCAP_CALIBRATION_PATH}"
+echo "[ProbeConfig] mocap ball_selection=unique_raw_X_in_range x_limits_m=${MOCAP_MARKER_X_LIMITS_M} frame=mocap_raw_m"
+if [ "$ENABLE_MOCAP_BALL" = "true" ]; then
+    echo "[ProbeConfig] mocap timestamp_sync=required receiver_clock=ROS min_samples=$MOCAP_CLOCK_SYNC_MIN_SAMPLES min_span=${MOCAP_CLOCK_SYNC_MIN_SPAN_S}s window=${MOCAP_CLOCK_SYNC_WINDOW_S}s unsynchronized_observation=invalid"
+else
+    echo "[ProbeConfig] mocap timestamp_sync=inactive"
+fi
 echo "[ProbeConfig] controller=$DEFAULT_CONTROL_MODE tracking_gap=${RACKET_TRACKING_HEIGHT_OFFSET_M}m tracking_mpc=$RACKET_TRACKING_USE_MPC tracking_ball_age=${RACKET_TRACKING_MAX_BALL_AGE_S}s"
 echo "[ProbeConfig] shared_racket_mpc=N${RACKET_TRACKING_MPC_HORIZON_STEPS} vmax=${RACKET_TRACKING_MAX_CARTESIAN_SPEED_M_S}m/s amax=${RACKET_TRACKING_MAX_CARTESIAN_ACCELERATION_M_S2}m/s2 joint_scale=${RACKET_TRACKING_JOINT_VELOCITY_SCALE}/${RACKET_TRACKING_JOINT_ACCELERATION_SCALE}"
 echo "[ProbeConfig] mpc_juggle=start_off countdown=${JUGGLE_COUNTDOWN_S}s seed_apex=${JUGGLE_SEED_APEX_HEIGHT_M}m target_apex=${JUGGLE_TARGET_APEX_HEIGHT_M}m restitution=${JUGGLE_RESTITUTION} contact_grace=${JUGGLE_CONTACT_GRACE_S}s"
@@ -806,6 +952,9 @@ fi
 ROS_BRIDGE_ARGS=()
 CAMERA_ARGS=()
 MOCAP_ARGS=()
+if [ "$MOCAP_SUBPROCESS" = "false" ]; then
+    MOCAP_ARGS+=(--disable-mocap-subprocess)
+fi
 FLOW_ARGS=()
 export PROBE_CONTROL_SUBPROCESS_STARTUP_TIMEOUT_S
 if [ "$ENABLE_SIM_MIRROR" = "prompt" ] && [ -t 0 ]; then
@@ -888,6 +1037,9 @@ if [ "$ENABLE_SIM_MIRROR" = "true" ] && [ "$SIM_BACKEND" = "mjx" ]; then
 fi
 if [ "$ENABLE_BALL_CAPTURE_GATE" != "true" ]; then
     FLOW_ARGS+=(--disable-ball-capture-gate)
+fi
+if [ "$ENABLE_BALL_DROPOUT_REFERENCE_HOLD" != "true" ]; then
+    FLOW_ARGS+=(--disable-ball-dropout-reference-hold)
 fi
 FLOW_ARGS+=(--workspace-safety-mode "$WORKSPACE_SAFETY_MODE")
 if [ "$ENABLE_BALL_RELEASE_GATE" != "true" ]; then
@@ -992,6 +1144,9 @@ fi
 if [ "$PROBE_BACKEND_CONTROL_LOOP" = "true" ]; then
     FLOW_ARGS+=(--backend-control-loop)
 fi
+if [ "$CAMERA_SUBPROCESS" = "false" ]; then
+    FLOW_ARGS+=(--disable-camera-subprocess)
+fi
 if [ "$PROBE_CONTROL_SUBPROCESS" = "true" ]; then
     FLOW_ARGS+=(--control-subprocess --backend-control-loop)
 fi
@@ -1016,7 +1171,10 @@ if [ "$ENABLE_CAMERA_BALL" = "true" ]; then
     CAMERA_ARGS+=(--camera-ball)
 fi
 if [ "$ENABLE_MOCAP_BALL" = "true" ]; then
-    MOCAP_ARGS+=(--mocap-ball)
+    MOCAP_ARGS+=(--mocap-ball \
+        --mocap-clock-sync-min-samples "$MOCAP_CLOCK_SYNC_MIN_SAMPLES" \
+        --mocap-clock-sync-min-span-s "$MOCAP_CLOCK_SYNC_MIN_SPAN_S" \
+        --mocap-clock-sync-window-s "$MOCAP_CLOCK_SYNC_WINDOW_S")
 fi
 if [ "$USE_HYBRID_DETECTOR" != "true" ]; then
     CAMERA_ARGS+=(--disable-hybrid-detector)
@@ -1209,9 +1367,9 @@ exec python3 "$PROBE_SCRIPT" \
     --done-racket-anchor-distance-m "$DONE_RACKET_ANCHOR_DISTANCE_M" \
     --done-racket-z-high-offset-m "$DONE_RACKET_Z_HIGH_OFFSET_M" \
     --done-racket-z-low-offset-m "$DONE_RACKET_Z_LOW_OFFSET_M" \
-    --ee-x-limits-m="$DONE_EE_X_LIMITS_M" \
-    --ee-y-limits-m="$DONE_EE_Y_LIMITS_M" \
-    --ee-z-limits-m="$DONE_EE_Z_LIMITS_M" \
+    --ee-x-limits-m="$_PROBE_BASE_EE_X_LIMITS_M" \
+    --ee-y-limits-m="$_PROBE_BASE_EE_Y_LIMITS_M" \
+    --ee-z-limits-m="$_PROBE_BASE_EE_Z_LIMITS_M" \
     --ee-psi-limits-rad="$DONE_EE_PSI_LIMITS_RAD" \
     --ee-b-limits-rad="$DONE_EE_B_LIMITS_RAD" \
     --ee-b-min-rad="$DONE_EE_B_MIN_RAD" \
@@ -1425,6 +1583,7 @@ exec python3 "$PROBE_SCRIPT" \
     --mocap-udp-port "$MOCAP_UDP_PORT" \
     --mocap-calibration-path "$MOCAP_CALIBRATION_PATH" \
     --mocap-marker-id "$MOCAP_MARKER_ID" \
+    --mocap-marker-x-limits-m="$MOCAP_MARKER_X_LIMITS_M" \
     --mocap-rigid-body-slot "$MOCAP_RIGID_BODY_SLOT" \
     --mocap-rigid-body-id "$MOCAP_RIGID_BODY_ID" \
     --mocap-rigid-body-name "$MOCAP_RIGID_BODY_NAME" \

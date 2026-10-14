@@ -1,0 +1,426 @@
+{
+  "schema_version": 1,
+  "description": "simcode9 每次部署前检查目录；未实施/未覆盖项不得冒充通过。门槛为本流程验收门槛，不能证明所有实物危险均被覆盖。",
+  "thresholds": {
+    "minimum_feedback_samples": 40,
+    "minimum_feedback_hz": 190,
+    "maximum_feedback_gap_s": 0.02,
+    "minimum_command_update_hz": 190,
+    "maximum_command_update_gap_s": 0.02,
+    "baseline_duration_s": 2,
+    "minimum_motion_span_deg": 0.5,
+    "minimum_stop_entry_speed_deg_s": 5,
+    "joint_velocity_limit_deg_s": [
+      210,
+      210,
+      240,
+      240,
+      300,
+      300,
+      300
+    ],
+    "joint_acceleration_limit_deg_s2": [
+      1300,
+      1300,
+      1800,
+      3000,
+      3000,
+      3000,
+      3000
+    ],
+    "maximum_stop_displacement_m": 0.02,
+    "maximum_stop_latency_s": 0.7,
+    "stop_observation_s": 1.5,
+    "settled_speed_deg_s": 2,
+    "settled_quiet_s": 0.3,
+    "monitor_feedback_timeout_s": 0.02,
+    "reset_joint_corridor_margin_deg": 1.0,
+    "reset_maximum_measured_speed_deg_s": 20.0,
+    "reset_maximum_measured_acceleration_deg_s2": 80.0,
+    "reset_final_joint_error_deg": 0.5
+  },
+  "cases": [
+    {
+      "id": "asset_contract",
+      "stage": "offline",
+      "title": "模型、XML、训练观测和发布合约一致",
+      "critical": true,
+      "tests": [
+        "test_authenticated_actor_and_manifest*",
+        "test_profile_identity_and_xml_fail_before_loading*"
+      ]
+    },
+    {
+      "id": "native_reset",
+      "stage": "offline",
+      "title": "原生复位点、冻结参考及禁止旧复位种子",
+      "critical": true,
+      "tests": [
+        "test_frozen_fk_and_warm_posture_match_original_cpu_xml_pipeline*",
+        "test_fplc_reset_cannot_select_the_old_warm_seed*"
+      ]
+    },
+    {
+      "id": "projection_equivalence",
+      "stage": "offline",
+      "title": "笛卡尔映射和24次投影保持训练算术",
+      "critical": true,
+      "tests": [
+        "test_original_24_sweep_weighted_projection_pairing*",
+        "test_compiled_single_lane_projection_matches_original_arithmetic*",
+        "test_non_linear_backstop_and_reference_integration*"
+      ]
+    },
+    {
+      "id": "no_limiter",
+      "stage": "offline",
+      "title": "正常/复位/停发/硬停止均不得访问 safety_limiter",
+      "critical": true,
+      "tests": [
+        "test_safe_publish_and_supervised_reset_never_enter_limiter*",
+        "test_publish_boundary_latches_and_never_enters_limiter*"
+      ]
+    },
+    {
+      "id": "physical_envelope",
+      "stage": "offline",
+      "title": "独立实物 XYZ 与 RP±4° 逐边界拦截",
+      "critical": true,
+      "tests": [
+        "test_real_attitude_envelope_at_publish_boundary*",
+        "test_real_z_envelope_is_independent_at_publish_boundary*",
+        "test_workspace_malformed_and_empty_intersections_fail_closed*"
+      ]
+    },
+    {
+      "id": "feedback_faults",
+      "stage": "offline",
+      "title": "过期/缺失/非法 q、dq、年龄与关节形状",
+      "critical": true,
+      "tests": [
+        "test_predeploy_bad_feedback_never_arms_or_publishes*",
+        "test_predeploy_invalid_atomic_age_never_reaches_actor*",
+        "test_stale_atomic_actor_feedback_is_rejected_even_if_later_feedback_is_fresh*",
+        "test_20hz_feedback_arm_failure_preserves_trigger_details*"
+      ]
+    },
+    {
+      "id": "bad_actor",
+      "stage": "offline",
+      "title": "策略 NaN/Inf/错误长度/推理异常撤销并丢弃历史",
+      "critical": true,
+      "tests": [
+        "test_predeploy_bad_actor_output_disarms*",
+        "test_predeploy_inference_exception_disarms*",
+        "test_predeploy_invalid_web_ball_is_invalid_not_a_valid_default*",
+        "test_invalid_inputs_and_direct_observed_flag*"
+      ]
+    },
+    {
+      "id": "backend_exception",
+      "stage": "offline",
+      "title": "控制循环意外异常不得继续旧指令流",
+      "critical": true,
+      "tests": [
+        "test_predeploy_backend_exception_disarms*"
+      ]
+    },
+    {
+      "id": "ball_done_latch",
+      "stage": "offline",
+      "title": "低球 done、恢复输入与旧 Send 请求不自动恢复",
+      "critical": true,
+      "tests": [
+        "test_fplc_ball_done_disarms_and_latches_until_reset*",
+        "test_stale_publish_request_cannot_rearm_after_inference_failure*",
+        "test_predeploy_observer_request_does_not_refresh_owner_lease*"
+      ]
+    },
+    {
+      "id": "stale_stop",
+      "stage": "offline",
+      "title": "停止不得伪造反馈或发布过期保持位置",
+      "critical": true,
+      "tests": [
+        "test_fplc_stop_hold_never_publishes_stale_feedback*"
+      ]
+    },
+    {
+      "id": "forbidden_options",
+      "stage": "offline",
+      "title": "网页篡改关闭工作区/修改尺度/补偿无法绕过 FPLC",
+      "critical": true,
+      "tests": [
+        "test_web_switch_and_forbidden_controls*",
+        "test_launcher_rejects_invalid_contract_overrides*"
+      ]
+    },
+    {
+      "id": "history_clock",
+      "stage": "offline",
+      "title": "200Hz/90Hz 历史、重入和数值优化等价",
+      "critical": true,
+      "tests": [
+        "test_observation_history_reset_and_fractional_camera_clock*",
+        "test_optimized_fk_preserves_closed_loop_policy_outputs*",
+        "test_fplc_control_scheduler_is_independent_of_ros_executor*"
+      ]
+    },
+    {
+      "id": "launcher_build",
+      "stage": "offline",
+      "title": "四模型启动配置、前端语法和仿真 COLCON_IGNORE",
+      "critical": true,
+      "tests": [
+        "test_launcher_config_only*",
+        "test_frontend_javascript_and_colcon_ignore*"
+      ]
+    },
+    {
+      "id": "recording_pairing",
+      "stage": "offline",
+      "title": "镜像观测、记录时序与输入配对",
+      "critical": true,
+      "tests": [
+        "test_cpu_mirror_carries_direct_observation_separately*",
+        "test_recorded_actor_features_and_input_alignment*"
+      ]
+    },
+    {
+      "id": "workflow_verdict",
+      "stage": "offline",
+      "title": "静止控制器/非法反馈/尾段超限/缺项不能得到通过",
+      "critical": true,
+      "tests": [
+        "test_assessor_*",
+        "test_aggregate_*",
+        "test_heartbeat_*",
+        "test_manifest_*"
+      ]
+    },
+    {
+      "id": "live_preflight",
+      "stage": "builtin",
+      "title": "空闲会话、独立原始 ROS 反馈和监视器",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "基于独立 q/dq/FK 判定，关键失败立即中止"
+    },
+    {
+      "id": "live_native_reset",
+      "stage": "builtin",
+      "title": "Send/Reset 原生慢复位的实际速度、加速度、目标及停稳",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "明确的受监督准备阶段，起始越界记录在案；复位完成必须回到不变的策略运行边界"
+    },
+    {
+      "id": "live_baseline",
+      "stage": "builtin",
+      "title": "真实运动及指令值更新频率达到门槛",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "基于独立 q/dq/FK 判定，关键失败立即中止"
+    },
+    {
+      "id": "live_manual_off",
+      "stage": "builtin",
+      "title": "运动中关闭 Send 的实际停稳和无反弹",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "基于独立 q/dq/FK 判定，关键失败立即中止"
+    },
+    {
+      "id": "live_hidden_ball",
+      "stage": "builtin",
+      "title": "球丢失/valid=false 动态停止与恢复锁存",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "基于独立 q/dq/FK 判定，关键失败立即中止"
+    },
+    {
+      "id": "live_low_ball_done",
+      "stage": "builtin",
+      "title": "球低于范围触发 done 的实际停止",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "基于独立 q/dq/FK 判定，关键失败立即中止"
+    },
+    {
+      "id": "live_high_ball_done",
+      "stage": "builtin",
+      "title": "球高于范围触发 done 的实际停止",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "基于独立 q/dq/FK 判定，关键失败立即中止"
+    },
+    {
+      "id": "live_outside_ball_done",
+      "stage": "builtin",
+      "title": "球越过横向范围的实际停止",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "基于独立 q/dq/FK 判定，关键失败立即中止"
+    },
+    {
+      "id": "live_lease_loss",
+      "stage": "builtin",
+      "title": "网页/HTTP 心跳断开、500ms租约失效的实际停止",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "基于独立 q/dq/FK 判定，关键失败立即中止"
+    },
+    {
+      "id": "live_stop_regression",
+      "stage": "builtin",
+      "title": "全部自动运动停止用例独立反馈通过",
+      "critical": true,
+      "implementation": "runner",
+      "acceptance": "基于独立 q/dq/FK 判定，关键失败立即中止"
+    },
+    {
+      "id": "live_feedback_outage",
+      "stage": "builtin",
+      "title": "反馈断流/延迟/重复/乱序/时钟跳变的动态停稳",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_actor_hang",
+      "stage": "builtin",
+      "title": "推理卡住、CPU 饥饿、单步超时的实际停稳",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_backend_crash",
+      "stage": "builtin",
+      "title": "控制进程 SIGTERM/SIGKILL/SIGSTOP 与父进程退出",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_monitor_failure",
+      "stage": "builtin",
+      "title": "监视器自身失效时的独立底层保护",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_command_bus_loss",
+      "stage": "builtin",
+      "title": "命令丢包、延迟、重复和重连旧包重放",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_ball_freeze_jump",
+      "stage": "builtin",
+      "title": "球冻结、时间回退、瞬移和不合理速度",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_reset_during_motion",
+      "stage": "builtin",
+      "title": "运动中 Reset、重入首次目标、慢复位速度及加速度",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_model_source_switch",
+      "stage": "builtin",
+      "title": "运行中四模型/球源切换、双客户端争抢和旧 token",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_recorder_mirror_failure",
+      "stage": "builtin",
+      "title": "录制磁盘满/镜像挂起/网页故障不拖住停止链路",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_native_stop_protocol",
+      "stage": "builtin",
+      "title": "底层停止确认、已接受目标/队列清理及恢复随动协议",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "live_repeated_rearm",
+      "stage": "builtin",
+      "title": "反复故障与恢复，不累积目标、延迟队列和历史误差",
+      "critical": true,
+      "implementation": "pending",
+      "acceptance": "需专用隔离故障注入；当前不自动执行，也不计为通过"
+    },
+    {
+      "id": "hw_mode_identity",
+      "stage": "hardware",
+      "title": "控制器仿真/实物身份与版本确认证据",
+      "critical": true,
+      "acceptance": "必须在硬件侧按监督验收步骤留证；内置仿真不能覆盖"
+    },
+    {
+      "id": "hw_emergency_stop",
+      "stage": "hardware",
+      "title": "实体急停、制动、驱动使能和停止距离",
+      "critical": true,
+      "acceptance": "必须在硬件侧按监督验收步骤留证；内置仿真不能覆盖"
+    },
+    {
+      "id": "hw_power_servo_bus",
+      "stage": "hardware",
+      "title": "断电/欠压/驱动故障/总线中断与重连状态",
+      "critical": true,
+      "acceptance": "必须在硬件侧按监督验收步骤留证；内置仿真不能覆盖"
+    },
+    {
+      "id": "hw_geometry_collision",
+      "stage": "hardware",
+      "title": "实体球拍、相机/人员/环境碰撞和实际机械限位",
+      "critical": true,
+      "acceptance": "必须在硬件侧按监督验收步骤留证；内置仿真不能覆盖"
+    },
+    {
+      "id": "hw_payload_calibration",
+      "stage": "hardware",
+      "title": "球拍负载、动力学参数与实物 FK/姿态标定",
+      "critical": true,
+      "acceptance": "必须在硬件侧按监督验收步骤留证；内置仿真不能覆盖"
+    },
+    {
+      "id": "hw_camera_quality",
+      "stage": "hardware",
+      "title": "真实曝光/遮挡/反光/错误球、帧冻结和延迟",
+      "critical": true,
+      "acceptance": "必须在硬件侧按监督验收步骤留证；内置仿真不能覆盖"
+    },
+    {
+      "id": "hw_real_tracking",
+      "stage": "hardware",
+      "title": "低速实物跟踪时延、加速度和制动距离复核",
+      "critical": true,
+      "acceptance": "必须在硬件侧按监督验收步骤留证；内置仿真不能覆盖"
+    },
+    {
+      "id": "hw_operator_release",
+      "stage": "hardware",
+      "title": "操作者复核全部关键项、监督区域及急停可达性",
+      "critical": true,
+      "acceptance": "必须在硬件侧按监督验收步骤留证；内置仿真不能覆盖"
+    }
+  ]
+}

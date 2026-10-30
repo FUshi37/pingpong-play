@@ -4,6 +4,18 @@ from pathlib import Path
 import threading
 
 
+def cadence_summary(intervals):
+    """Summarize actual callback/publication intervals outside the fast path."""
+    ordered = sorted(intervals)
+    if not ordered:
+        return dict(samples=0, measuredHz=None, intervalP99Ms=None, maximumIntervalMs=None)
+    mean = sum(ordered) / len(ordered)
+    p99_index = max(0, (99 * len(ordered) + 99) // 100 - 1)
+    return dict(samples=len(ordered), measuredHz=1.0 / mean if mean > 0 else None,
+                intervalP99Ms=1000.0 * ordered[p99_index],
+                maximumIntervalMs=1000.0 * ordered[-1])
+
+
 def performance_cpus(allowed, root=Path('/sys/devices/system/cpu')):
     frequencies = {}
     for cpu in allowed:
@@ -38,11 +50,20 @@ def performance_cpus(allowed, root=Path('/sys/devices/system/cpu')):
 
 
 def configure_control_thread(rt_priority=None):
+    return _configure_thread(rt_priority, 'PROBE_CONTROL_RT_PRIORITY', 'controlCpus')
+
+
+def configure_joint_feedback_thread(rt_priority=None):
+    """Give the dedicated JointState receiver the same scheduling opportunity."""
+    return _configure_thread(rt_priority, 'PROBE_JOINT_RT_PRIORITY', 'feedbackCpus')
+
+
+def _configure_thread(rt_priority, environment_key, cpu_key):
     info = dict(status='unsupported', threadId=threading.get_native_id())
     if rt_priority is None:
-        rt_priority = int(os.environ.get('PROBE_CONTROL_RT_PRIORITY', '1'))
+        rt_priority = int(os.environ.get(environment_key, '1'))
     if not 0 <= rt_priority <= 20:
-        raise ValueError('PROBE_CONTROL_RT_PRIORITY must be between 0 and 20')
+        raise ValueError(f'{environment_key} must be between 0 and 20')
     info.update(requestedRealtimePriority=rt_priority, realtimeApplied=False)
     if not hasattr(os, 'sched_getaffinity'):
         return info
@@ -50,16 +71,17 @@ def configure_control_thread(rt_priority=None):
         allowed = set(os.sched_getaffinity(0))
         selected = performance_cpus(allowed)
         if selected != allowed:
-            os.sched_setaffinity(0, selected)  # This calling control thread only.
+            os.sched_setaffinity(0, selected)  # This calling thread only.
         info.update(status='applied' if selected != allowed else 'unchanged',
-                    allowedCpus=sorted(allowed), controlCpus=sorted(os.sched_getaffinity(0)))
+                    allowedCpus=sorted(allowed))
+        info[cpu_key] = sorted(os.sched_getaffinity(0))
     except OSError as exc:
         info.update(status='unavailable', error=str(exc))
     if hasattr(os, 'sched_setscheduler'):
         try:
             if rt_priority:
-                # Lowest RT round-robin priority: only this control thread,
-                # never ROS/sensor workers or the native robot controller.
+                # Only this calling control/feedback thread; never the general
+                # ROS/sensor workers or the native robot controller.
                 # Linux RLIMIT_RTPRIO permits this without running as root.
                 reset_flag = getattr(os, 'SCHED_RESET_ON_FORK', 0)
                 os.sched_setscheduler(0, os.SCHED_RR | reset_flag, os.sched_param(rt_priority))

@@ -26,6 +26,7 @@ import traceback
 import urllib.parse
 import webbrowser
 from collections import deque
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,7 +42,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 try:
     import rclpy
     from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-    from rclpy.executors import MultiThreadedExecutor
+    from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
     from rclpy.node import Node
     from sensor_msgs.msg import CameraInfo, CompressedImage, Image, JointState
     from mc_core_interface.msg import (
@@ -55,6 +56,7 @@ except Exception as exc:  # noqa: BLE001 - ROS bridge is optional.
     rclpy = None
     MutuallyExclusiveCallbackGroup = None
     MultiThreadedExecutor = None
+    SingleThreadedExecutor = None
     Node = object
     CameraInfo = None
     CompressedImage = None
@@ -101,9 +103,19 @@ from pingpong_controller.done_condition_monitor import (
 )
 from pingpong_controller.fplc_deployment import (
     FPLC_CONTRACTS, FPLC_PROFILES, fplc_assets, fplc_workspace_intersection,
+    FPLC_JOINT_FEEDBACK_MAX_AGE_S, FPLC_JOINT_FEEDBACK_WAIT_S,
+    FPLC_JOINT_FEEDBACK_MAX_GAP_S,
 )
 from pingpong_controller.fplc_policy import FPLCPolicyController
+from pingpong_controller.ball_trajectory_recording import (
+    compact_trajectory_sample, export_ball_trajectory, preview_jsonl,
+)
+from pingpong_controller.control_runtime import cadence_summary
 from pingpong_controller.observation_clock import CameraTimestampAligner, sample_clock_valid
+from pingpong_controller.probe_ball_recording import (
+    make_sensor_recording_sample, complete_ball_sensor_recording_snapshot,
+)
+from pingpong_controller.juggle_recording import RecordingJuggleCounter
 from pingpong_controller.mjx_rl_policy import (
     Gpu1QaccFtV153PolicyController,
     Gpu0QvelRealRmpV85PolicyController,
@@ -137,6 +149,7 @@ from pingpong_controller.policy_plant_model_reference import (
     PolicyPlantModelReference,
     load_real_plant_fit,
 )
+from pingpong_controller.camera_observation_continuity import CameraObservationContinuity
 from pingpong_controller.policy_ball_handover import (
     BoundedHandoverBlend,
     PolicyBallHandoverMode,
@@ -459,8 +472,8 @@ SIMCODE2_RACKET_LAUNCH_VXY_MAX_M_S = 0.003
 SIMCODE2_RACKET_LAUNCH_VNORMAL_MAX_M_S = 0.003
 SIMCODE2_RACKET_LAUNCH_EDGE_MARGIN_M = 0.005
 SIMCODE2_BALL_RADIUS_M = 0.020
-ANALYSIS_SCHEMA_VERSION = 8
-RECORDING_SCHEMA_VERSION = 11
+ANALYSIS_SCHEMA_VERSION = 9
+RECORDING_SCHEMA_VERSION = 12
 # Full browser snapshots are useful for reconstructing the UI, but they are
 # roughly an order of magnitude larger than the control essentials.  The
 # exact 200 Hz policy/sim streams remain available below; recording the full
@@ -947,6 +960,9 @@ class ProbeConfig:
     mocap_velocity_window_max_span_s: float
     camera_source_mode: str
     camera_subprocess: bool
+    enable_raw_camera_recording: bool
+    raw_camera_max_duration_s: float
+    raw_camera_max_gb: float
     use_hybrid_detector: bool
     use_depth_sensor: bool
     image_width: int
@@ -1023,6 +1039,8 @@ class ProbeConfig:
     enable_camera_color_filter: bool
     recording_output_root: Path
     recording_control_rate_hz: float
+    recording_save_camera_images: bool
+    recording_trajectory_only: bool
     recording_image_rate_hz: float
     recording_analysis_video_fps: float
     recording_queue_size: int
@@ -1077,6 +1095,8 @@ class ProbeConfig:
     mocap_clock_sync_min_samples: int = 8
     mocap_clock_sync_min_span_s: float = 0.05
     mocap_clock_sync_window_s: float = 10.0
+    mocap_marker_z_limits_m: tuple[float, float] | None = (-1.0, 1.0)
+    enable_depth_assisted_ir: bool = False
 
     @property
     def control_dt(self) -> float:
@@ -1154,6 +1174,17 @@ _CAMERA_MEASUREMENT_SCALAR_KEYS = (
     "depth_near_field_upward_pixel_speed_px_s",
     "depth_prediction_residual_mm", "depth_prediction_horizon_s",
     "depth_sensor_recovery_count",
+    "depth_recovery_prediction_consistent", "depth_raw_jump_overridden",
+    "ir_contours_examined", "ir_candidates_accepted",
+    "ir_reject_area", "ir_reject_roi_edge", "ir_reject_radius",
+    "ir_reject_aspect", "ir_reject_fill", "ir_reject_image_edge",
+    "ir_reject_fit_error", "ir_reject_contour_points", "ir_reject_selection",
+    "depth_assisted_used", "depth_assisted_candidates", "depth_assisted_mode",
+    "depth_assisted_threshold", "depth_assisted_replaced_bad_depth",
+    "depth_support_fraction", "depth_support_pixels", "depth_spread_mm",
+    "ir_config_threshold", "ir_config_use_adaptive", "ir_config_dilate_iterations",
+    "ir_config_close_kernel_size", "ir_config_denoise_kernel_size",
+    "ir_config_min_radius", "ir_config_max_radius", "ir_config_circularity_min",
     "depth_temporal_window_frames",
     "synchronized_depth_enabled",
     "velocity_least_squares_enabled", "velocity_window_frames",
@@ -1194,8 +1225,44 @@ _CAMERA_MEASUREMENT_SCALAR_KEYS = (
 )
 
 
+_CAMERA_MEASUREMENT_SCALAR_KEYS += (
+    'depth_pair_valid', 'depth_pair_delta_ms', 'partial_surface_fit_rms_mm',
+    'primary_rejection_reason',
+    'ball_observation_release', 'local_surface_fit_rms_mm', 'local_surface_curvature',
+    'monocular_range_m', 'monocular_range_sigma_m',
+    'ball_calibration_applied', 'ball_calibration_time_shift_s',
+    'ball_contact_height_m', 'ball_contact_restitution',
+    'ball_observation_version', 'bearing_valid', 'range_valid', 'velocity_valid',
+    'range_quality_valid', 'range_quality_strong', 'range_support_fraction',
+    'range_support_pixels', 'range_spread_mm', 'range_sigma_mm', 'range_quality_reason',
+    'flight_segment_reset', 'flight_segment_age_s', 'contact_pending', 'bearing_sigma_rad',
+) + tuple('bearing_origin_'+k+'_m' for k in 'xyz') + tuple('bearing_direction_'+k for k in 'xyz')
+_CAMERA_MEASUREMENT_SCALAR_KEYS += (
+    'observation_processed', 'observation_position_valid', 'observation_velocity_valid',
+    'observation_source', 'observation_model_reason', 'observation_range_age_s',
+    'observation_uncertainty_m', 'observation_fit_rmse_m', 'observation_history_samples',
+    'observation_fit_history_samples', 'observation_fit_span_s',
+    'observation_filter_update', 'observation_horizontal_noise_scale',
+    'ball_axis_refinement', 'observation_horizontal_edge_accepted',
+    'observation_segment', 'observation_bearing_accepted', 'observation_range_rejected',
+    'observation_supported', 'observation_position_variance', 'observation_velocity_variance',
+    'observation_cross_covariance',
+    'observation_contact_horizon_s',
+    'observation_time_shift_s', 'observation_prediction_budget_s',
+    'observation_prediction_floor_m', 'observation_radius_range_accepted', 'observation_radius_age_s',
+    'observation_bounce_horizon_s', 'observation_contact_confirm_deadline_s',
+    'observation_contact_model_active',
+    'observation_contact_model_until_s',
+    'observation_algorithm_version', 'observation_racket_context_clock',
+    'observation_racket_context_age_s', 'observation_contact_refined',
+    'observation_contact_time_correction_s', 'observation_contact_real_samples',
+    'observation_compute_ms',
+) + tuple('observation_position_'+k+'_m' for k in 'xyz') + tuple('observation_velocity_'+k+'_m_s' for k in 'xyz')
+_CAMERA_MEASUREMENT_SCALAR_KEYS += tuple('observation_bounce_position_'+k+'_m' for k in 'xyz') + tuple('observation_bounce_velocity_'+k+'_m_s' for k in 'xyz')
+
+
 def _camera_measurement_payload(raw_measurement: Any) -> dict[str, Any] | None:
-    """Copy JSON-safe scalar detector diagnostics for recording/analysis."""
+    """Copy scalar camera data shared by the online consumer and recordings."""
     if not isinstance(raw_measurement, dict):
         return None
     measurement: dict[str, Any] = {}
@@ -1205,7 +1272,12 @@ def _camera_measurement_payload(raw_measurement: Any) -> dict[str, Any] | None:
             measurement[key] = value
         elif isinstance(value, (int, float, np.number)):
             number = float(value)
-            measurement[key] = round(number, 6) if np.isfinite(number) else None
+            # These are covariance entries in m^2 / (m/s)^2. Six decimal
+            # places can erase a small variance or change its uncertainty
+            # gate. Preserve their numerical precision across camera IPC.
+            precision_sensitive = key in ('observation_position_variance',
+                'observation_velocity_variance', 'observation_cross_covariance')
+            measurement[key] = (number if precision_sensitive else round(number, 6)) if np.isfinite(number) else None
     return measurement or None
 
 
@@ -1297,7 +1369,7 @@ def _reset_initial_pose_presets_payload(fplc_controller=None) -> dict[str, Any]:
             "rightArmJointPositionRad": _rounded_vector(q_rad),
             "rightArmJointPositionDeg": _rounded_vector(np.rad2deg(q_rad), 3),
         })
-    native = {"id": RESET_INITIAL_POSE_FPLC, "label": "simcode9 native racket-launch"}
+    native = {"id": RESET_INITIAL_POSE_FPLC, "label": "FPLC native racket-launch (simcode9/10)"}
     if fplc_controller is not None:
         native.update({
             "rightArmJointPositionRad": _rounded_vector(fplc_controller.native_reset_arm_q),
@@ -1384,6 +1456,7 @@ def _recording_writer_main(
     sim_frames_dir = run_dir / "sim_frames"
     counts = {
         "control": 0,
+        "ballSensors": 0,
         "simControl": 0,
         "snapshots": 0,
         "views": 0,
@@ -1393,6 +1466,9 @@ def _recording_writer_main(
     }
     started_wall = time.time()
     parent_dropped = 0
+    juggle_counter = RecordingJuggleCounter()
+    save_camera_images = bool(metadata.get("recording", {}).get("saveCameraImages", True))
+    trajectory_only = bool(metadata.get("recording", {}).get("trajectoryOnly", False))
 
     def publish_status(active: bool, error: str | None = None) -> None:
         _queue_replace_latest(status_q, {
@@ -1400,13 +1476,18 @@ def _recording_writer_main(
             "runDir": str(run_dir),
             "counts": dict(counts),
             "elapsedS": round(float(time.time() - started_wall), 3),
+            "saveCameraImages": save_camera_images,
+            "trajectoryOnly": trajectory_only,
+            "juggle": juggle_counter.summary(complete=not active, dropped=parent_dropped),
             "error": error,
         })
 
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
-        frames_dir.mkdir(parents=True, exist_ok=True)
-        sim_frames_dir.mkdir(parents=True, exist_ok=True)
+        if save_camera_images:
+            frames_dir.mkdir(parents=True, exist_ok=True)
+        if not trajectory_only:
+            sim_frames_dir.mkdir(parents=True, exist_ok=True)
         metadata = dict(metadata)
         metadata["runDir"] = str(run_dir)
         metadata["startedWallTimeS"] = started_wall
@@ -1416,15 +1497,18 @@ def _recording_writer_main(
             json.dumps(metadata, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        with (
-            (run_dir / "control_samples.jsonl").open("a", buffering=1, encoding="utf-8") as control_f,
-            (run_dir / "sim_control_samples.jsonl").open("a", buffering=1, encoding="utf-8") as sim_control_f,
-            (run_dir / "snapshots.jsonl").open("a", buffering=1, encoding="utf-8") as snapshots_f,
-            (run_dir / "browser_view.jsonl").open("a", buffering=1, encoding="utf-8") as views_f,
-            (run_dir / "frames.jsonl").open("a", buffering=1, encoding="utf-8") as frames_f,
-            (run_dir / "sim_frames.jsonl").open("a", buffering=1, encoding="utf-8") as sim_frames_f,
-            (run_dir / "events.jsonl").open("a", buffering=1, encoding="utf-8") as events_f,
-        ):
+        with ExitStack() as files:
+            def open_log(name, enabled=True):
+                return (files.enter_context((run_dir / name).open("a", buffering=1, encoding="utf-8"))
+                        if enabled else None)
+            control_f = open_log("control_samples.jsonl")
+            ball_sensors_f = open_log("ball_sensor_samples.jsonl", not trajectory_only)
+            sim_control_f = open_log("sim_control_samples.jsonl", not trajectory_only)
+            snapshots_f = open_log("snapshots.jsonl", not trajectory_only)
+            views_f = open_log("browser_view.jsonl", not trajectory_only)
+            frames_f = open_log("frames.jsonl", not trajectory_only or save_camera_images)
+            sim_frames_f = open_log("sim_frames.jsonl", not trajectory_only)
+            events_f = open_log("events.jsonl")
             publish_status(True)
             next_status_wall = time.time() + 0.5
             running = True
@@ -1440,22 +1524,41 @@ def _recording_writer_main(
                             0, int(item.get("dropped", 0) or 0))
                         running = False
                     elif kind == "control":
-                        _write_jsonl(control_f, item.get("sample", {}))
+                        sample = dict(item.get("sample", {}))
+                        sensor_snapshot = sample.pop("_ballSensorSnapshot", None)
+                        if sensor_snapshot is not None:
+                            sample["ballSensors"] = complete_ball_sensor_recording_snapshot(sensor_snapshot)
+                        if trajectory_only:
+                            sample = compact_trajectory_sample(sample)
+                        _write_jsonl(control_f, sample)
                         counts["control"] += 1
-                    elif kind == "sim_control_batch":
+                        bounce = juggle_counter.consume(sample)
+                        if bounce is not None:
+                            _write_jsonl(events_f, bounce)
+                            counts["events"] += 1
+                        sensors = sample.get("ballSensors")
+                        if isinstance(sensors, dict) and not trajectory_only:
+                            _write_jsonl(ball_sensors_f, {
+                                key: sample.get(key) for key in (
+                                    "schemaVersion", "sourceSeq", "sourceTimeS",
+                                    "wallTimeS", "time", "tick", "ballSource",
+                                )
+                            } | sensors)
+                            counts["ballSensors"] += 1
+                    elif kind == "sim_control_batch" and not trajectory_only:
                         samples = item.get("samples", [])
                         if isinstance(samples, list):
                             for sample in samples:
                                 if isinstance(sample, dict):
                                     _write_jsonl(sim_control_f, sample)
                                     counts["simControl"] += 1
-                    elif kind == "snapshot":
+                    elif kind == "snapshot" and not trajectory_only:
                         _write_jsonl(snapshots_f, item.get("snapshot", {}))
                         counts["snapshots"] += 1
-                    elif kind == "view":
+                    elif kind == "view" and not trajectory_only:
                         _write_jsonl(views_f, item.get("view", {}))
                         counts["views"] += 1
-                    elif kind == "frame":
+                    elif kind == "frame" and save_camera_images:
                         frame = item.get("frame")
                         info = item.get("info", {})
                         if isinstance(frame, (bytes, bytearray)):
@@ -1477,7 +1580,7 @@ def _recording_writer_main(
                                 "info": dict(info) if isinstance(info, dict) else {},
                             }
                             _write_jsonl(frames_f, row)
-                    elif kind == "sim_frame":
+                    elif kind == "sim_frame" and not trajectory_only:
                         frame = item.get("frame")
                         info = item.get("info", {})
                         if isinstance(frame, (bytes, bytearray)):
@@ -1511,6 +1614,9 @@ def _recording_writer_main(
                 "runDir": str(run_dir),
                 "counts": dict(counts),
                 "dropped": int(parent_dropped),
+                "saveCameraImages": save_camera_images,
+                "trajectoryOnly": trajectory_only,
+                "juggle": juggle_counter.summary(complete=True, dropped=parent_dropped),
                 "elapsedS": round(float(time.time() - started_wall), 3),
                 "stoppedWallTimeS": time.time(),
             }
@@ -1624,6 +1730,7 @@ def _analysis_outputs_from_dir(analysis_dir: Path) -> dict[str, str]:
         "analysisData": "analysis_data.json",
         "trajectoryPlayer": "trajectory_player.html",
         "policyTraceCsv": "policy_trace.csv",
+        "ballTrajectoryCsv": "ball_trajectory.csv",
         "alignmentManifest": "alignment_manifest.json",
         "cameraVideo": "camera_video.mp4",
         "simVideo": "sim_video.mp4",
@@ -2277,7 +2384,7 @@ def _write_policy_trace_csv(samples: list[dict[str, Any]], analysis_dir: Path) -
                 row.get("predictedVelocity") or estimator.get("velocityMps"))
             real_ee = row.get("racket") or ros.get("jointEe")
             if real_ee is None and isinstance(obs, list) and len(obs) >= 29:
-                real_ee = obs[52:55] if len(obs) in (72, 156) else obs[26:29]
+                real_ee = obs[52:55] if len(obs) in (72, 117, 156) else obs[26:29]
             put_point(out_row, "real_ee", real_ee)
             put_point(out_row, "command_ee", row.get("commandRacket"))
             put_point(out_row, "ros_cart", ros.get("cartPosition"))
@@ -2426,7 +2533,7 @@ def _sample_ball_state_6d(sample: dict[str, Any]) -> np.ndarray | None:
         sample.get("observedBall"), sample.get("observedVelocity")))
     policy_obs = sample.get("policyObs")
     if (isinstance(policy_obs, (list, tuple)) and len(policy_obs) >= 26
-            and len(policy_obs) not in (72, 156)):
+            and len(policy_obs) not in (72, 117, 156)):
         candidates.append(policy_obs[20:26])
 
     for candidate in candidates:
@@ -3318,13 +3425,13 @@ def _analyze_sim_real_gap(
          _numeric_array(sim_rows, "sim.policyCommand"),
          list(RIGHT_ARM_JOINTS), "rad"),
     ]
-    fplc_observation = len(obs_names) in (72, 156)
+    fplc_observation = len(obs_names) in (72, 117, 156)
     if fplc_observation:
         # Keep only fields actually present in these independent actor schemas.
         group_specs = [spec for spec in group_specs if spec[0] in {
             "policy_obs", "joint_position", "joint_velocity", "joint_acceleration",
             "policy_action", "executed_action", "command_position"}]
-        age_start = 61 if len(obs_names) == 72 else 124
+        age_start = 61 if len(obs_names) in (72, 117) else 124
         for name, start, stop, unit in (
                 ("ball_observation", 28, 31, "m"),
                 ("ball_position_history", 28, 52, "m"),
@@ -4153,16 +4260,23 @@ window.addEventListener('resize', draw); draw();
 
 
 def _obs_names(width: int) -> list[str]:
-    if width in (72, 156):
+    if width in (72, 117, 156):
         prefix = [*(f"arm_q[{i}]" for i in range(7)),
                   *(f"arm_dq[{i}]" for i in range(7)),
                   *(f"q_ref_error[{i}]" for i in range(7)),
                   *(f"projected_previous_action[{i}]" for i in range(7)),
                   *(f"held_ball_history[{tick}].{axis}" for tick in range(8) for axis in "xyz")]
-        if width == 72:
-            return prefix + [*(f"racket_pose[{i}]" for i in range(9)),
+        if width in (72, 117):
+            names = prefix + [*(f"racket_pose[{i}]" for i in range(9)),
                              *(f"ball_age_history[{i}]/0.25" for i in range(8)),
                              "episode_target_x", "episode_target_y", "ball_observed"]
+            if width == 117:
+                for lag_ms in (50, 100, 200):
+                    names += [*(f"history_{lag_ms}ms.local_ball_delta_{axis}" for axis in "xyz"),
+                              *(f"history_{lag_ms}ms.local_normal_delta_{axis}" for axis in "xyz"),
+                              *(f"history_{lag_ms}ms.q_ref_error[{i}]" for i in range(7)),
+                              f"history_{lag_ms}ms.ball_age/0.25", f"history_{lag_ms}ms.valid"]
+            return names
         return prefix + [*(f"racket_pose_history[{tick}][{i}]" for tick in range(8) for i in range(9)),
                          *(f"ball_age_history[{i}]/0.25" for i in range(8)),
                          "desired_apex_z", "episode_target_x", "episode_target_y", "ball_valid", "hit_count/4",
@@ -4461,10 +4575,49 @@ def _make_analysis_data(
     }
 
 
+def _analyze_trajectory_recording(run_dir, analysis_dir, metadata, status_q):
+    """Stream all records to CSV and bound every in-memory plot/replay list."""
+    _analysis_write_status(status_q, active=True, phase="ball_trajectory", analysis_dir=analysis_dir)
+    samples, report = export_ball_trajectory(run_dir, analysis_dir)
+    outputs = {"ballTrajectoryCsv": report["fullResolutionFile"]}
+    for path in _plot_ball_state_curves(samples, analysis_dir):
+        outputs[path.stem] = path.name
+    summary_path = run_dir / "summary.json"
+    summary = json.loads(summary_path.read_text()) if summary_path.is_file() else {}
+    config = metadata.get("config") or {}
+    point_stride = max(1, math.ceil(max(0, len(samples) - 1) / 2999))
+    points = [{"time": row.get("time"), "mode": row.get("mode"), "valid": row.get("valid"),
+               "raw": row.get("rawBall"), "measured": row.get("measuredBall"),
+               "obs": row.get("observedBall"), "predictedBall": row.get("predictedBall"),
+               "racket": row.get("racket")} for index, row in enumerate(samples)
+              if index % point_stride == 0 or index == len(samples) - 1]
+    frames = [{"filename": Path(row.get("path", "")).name,
+               "wallTimeS": row.get("wallTimeS"), "info": row.get("info", {})}
+              for row in preview_jsonl(run_dir / "frames.jsonl")]
+    outputs["analysisData"] = "analysis_data.json"
+    data = {
+        "metadata": {"analysisSchemaVersion": ANALYSIS_SCHEMA_VERSION,
+                     "runDir": str(run_dir), "trajectoryOnly": True, **report},
+        **{key: config.get(key) for key in ("limits", "anchor", "ballBox", "eeBox")},
+        "frames": frames, "simFrames": [], "points": points, "samples": samples,
+        "obsNames": [], "actionNames": [], "simObsNames": [], "simActionNames": [],
+        "juggle": summary.get("juggle", {}), "outputs": outputs,
+    }
+    (analysis_dir / "analysis_data.json").write_text(_strict_json_dumps(data) + "\n", encoding="utf-8")
+    (analysis_dir / "analysis_summary.json").write_text(json.dumps({
+        "analysisSchemaVersion": ANALYSIS_SCHEMA_VERSION, "runDir": str(run_dir),
+        "trajectoryOnly": True, "samples": report["sampleCount"], "trajectory": report,
+        "juggle": summary.get("juggle", {}), "outputs": outputs,
+        "completedWallTimeS": time.time(),
+    }, indent=2) + "\n", encoding="utf-8")
+    _analysis_write_status(status_q, active=False, phase="done", analysis_dir=analysis_dir, outputs=outputs)
+
+
 def _recording_analysis_main(
     run_dir_text: str,
     status_q,
     video_fps: float,
+    ball_sensors_only: bool = False,
 ) -> None:
     try:
         os.nice(10)
@@ -4476,6 +4629,28 @@ def _recording_analysis_main(
     outputs: dict[str, str] = {}
     try:
         analysis_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path = run_dir / "metadata.json"
+        metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
+        if (metadata.get("recording") or {}).get("trajectoryOnly", False):
+            _analyze_trajectory_recording(run_dir, analysis_dir, metadata, status_q)
+            return
+        from pingpong_controller.ball_sensor_comparison import analyze_ball_sensor_comparison
+        if ball_sensors_only:
+            _analysis_write_status(status_q, active=True, phase="ball_sensor_comparison", analysis_dir=analysis_dir)
+            sensor_report = analyze_ball_sensor_comparison(run_dir, analysis_dir)
+            summary_path = analysis_dir / "analysis_summary.json"
+            previous = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.is_file() else {}
+            outputs.update(previous.get("outputs") or {})
+            outputs.update(sensor_report["outputs"])
+            # A comparison-only directory must still be re-analyzed when
+            # the operator later requests the full trajectory/video report.
+            previous.update(
+                analysisSchemaVersion=(ANALYSIS_SCHEMA_VERSION if previous.get("analysisSchemaVersion", 0) >= 8 else 0),
+                runDir=str(run_dir), analysisDir=str(analysis_dir), outputs=outputs,
+                ballSensorComparison=sensor_report, completedWallTimeS=time.time())
+            summary_path.write_text(json.dumps(previous, indent=2) + "\n", encoding="utf-8")
+            _analysis_write_status(status_q, active=False, phase="done", analysis_dir=analysis_dir, outputs=outputs)
+            return
         _analysis_write_status(
             status_q, active=True, phase="loading", analysis_dir=analysis_dir)
         metadata_path = run_dir / "metadata.json"
@@ -4549,6 +4724,10 @@ def _recording_analysis_main(
         )
         outputs["alignmentManifest"] = "alignment_manifest.json"
         snapshots = _read_jsonl(run_dir / "snapshots.jsonl")
+
+        _analysis_write_status(status_q, active=True, phase="ball_sensor_comparison", analysis_dir=analysis_dir, outputs=outputs)
+        sensor_report = analyze_ball_sensor_comparison(run_dir, analysis_dir, control_samples=raw_samples)
+        outputs.update(sensor_report["outputs"])
 
         _analysis_write_status(
             status_q, active=True, phase="camera_video",
@@ -4642,6 +4821,7 @@ def _recording_analysis_main(
                 (sim_report.get("diagnostics") or {}).get(
                     "primaryGapHint")),
             "ballRacketContactDiagnostics": contact_gap_report,
+            "ballSensorComparison": sensor_report,
             "snapshots": len(snapshots),
             "outputs": outputs,
             "completedWallTimeS": time.time(),
@@ -4748,6 +4928,7 @@ class AsyncProbeRecorder:
         self.process: mp.Process | None = None
         self.analysis_status_q = None
         self.analysis_process: mp.Process | None = None
+        self.retired_analysis_workers: list[tuple[Any, Any]] = []
         self.run_dir: Path | None = None
         self.active = False
         self.last_status: dict[str, Any] = {
@@ -4772,6 +4953,8 @@ class AsyncProbeRecorder:
         self.next_sim_frame_record_wall = 0.0
         self.last_frame_seq = -1
         self.last_sim_frame_seq = -1
+        self.save_camera_images = bool(cfg.recording_save_camera_images)
+        self.trajectory_only = bool(cfg.recording_trajectory_only)
         self.frozen_source_seq: int | None = None
         self._spawn_standby_writer()
 
@@ -4791,20 +4974,39 @@ class AsyncProbeRecorder:
         self,
         config: dict[str, Any],
         initial_view: dict[str, Any] | None = None,
+        save_camera_images: bool | None = None,
+        trajectory_only: bool | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             if self.active:
                 return self.status_locked()
+            self.save_camera_images = (
+                self.cfg.recording_save_camera_images
+                if save_camera_images is None else save_camera_images)
+            self.trajectory_only = (self.cfg.recording_trajectory_only
+                                    if trajectory_only is None else trajectory_only)
             stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
             self.run_dir = self.cfg.recording_output_root / f"probe_recording_{stamp}"
             metadata = {
-                "config": config,
+                "config": ({key: config[key] for key in (
+                    "controlRateHz", "limits", "anchor", "ballBox", "eeBox", "policyRelease") if key in config}
+                           if self.trajectory_only else config),
                 "recording": {
                     "controlRateHz": float(self.cfg.recording_control_rate_hz),
                     "snapshotRateHz": float(RECORDING_SNAPSHOT_RATE_HZ),
                     "imageRateHz": float(self.cfg.recording_image_rate_hz),
+                    "saveCameraImages": bool(self.save_camera_images),
+                    "trajectoryOnly": bool(self.trajectory_only),
                     "queueSize": int(self.cfg.recording_queue_size),
                     "schemaVersion": int(RECORDING_SCHEMA_VERSION),
+                    "ballSensorFile": ("control_samples.jsonl" if self.trajectory_only else "ball_sensor_samples.jsonl"),
+                    "ballSensorSources": ["camera", "mocap"],
+                    "ballSensorSampling": "latest_cache_per_recorded_control_tick",
+                    "ballSensorFormatting": "sensor_producer_and_writer_process",
+                    "ballSensorControlRead": "immutable_cache_references_without_sensor_locks",
+                    "ballSensorPositionUnit": "m",
+                    "ballSensorVelocityUnit": "m/s",
+                    "ballSensorTimestampDomain": "ROS",
                     "priority": "control_first",
                     "writerStartMethod": str(self.start_method),
                     "writerPrestarted": True,
@@ -4854,6 +5056,9 @@ class AsyncProbeRecorder:
                 "counts": {},
                 "elapsedS": 0.0,
                 "dropped": 0,
+                "saveCameraImages": bool(self.save_camera_images),
+                "trajectoryOnly": bool(self.trajectory_only),
+                "juggle": RecordingJuggleCounter().summary(),
                 "error": None,
             }
         self.record_event({"event": "start", "wallTimeS": time.time()})
@@ -4937,6 +5142,12 @@ class AsyncProbeRecorder:
             process.join(timeout=1.0)
             if process.is_alive():
                 _terminate_process_tree(process, "analysis process")
+        for old_process, old_q in self.retired_analysis_workers:
+            old_process.join(timeout=1.0)
+            if old_process.is_alive():
+                _terminate_process_tree(old_process, "previous recording analysis process")
+            _close_mp_queue(old_q)
+        self.retired_analysis_workers.clear()
 
     def _drain_status_locked(self) -> None:
         q = self.status_q
@@ -5070,12 +5281,9 @@ class AsyncProbeRecorder:
         with self.lock:
             return self.status_locked()
 
-    def start_analysis(self, run_dir_text: str | None = None) -> dict[str, Any]:
+    def start_analysis(self, run_dir_text: str | None = None, *, ball_sensors_only: bool = False) -> dict[str, Any]:
         with self.lock:
             self._drain_status_locked()
-            if (self.analysis_process is not None
-                    and self.analysis_process.is_alive()):
-                return self.status_locked()
             run_dir = Path(run_dir_text) if run_dir_text else self.run_dir
             if run_dir is not None and run_dir.name == "analysis":
                 run_dir = run_dir.parent
@@ -5088,6 +5296,20 @@ class AsyncProbeRecorder:
                     "error": "no recording directory available",
                 }
                 return self.status_locked()
+            if self.analysis_process is not None and self.analysis_process.is_alive():
+                if self.analysis_status.get("analysisDir") == str(run_dir / "analysis"):
+                    return self.status_locked()
+                # A previous recording's video analysis must not suppress
+                # the newly stopped recording's required comparison plots.
+                self.retired_analysis_workers.append((self.analysis_process, self.analysis_status_q))
+            remaining = []
+            for old_process, old_q in self.retired_analysis_workers:
+                if old_process.is_alive():
+                    remaining.append((old_process, old_q))
+                else:
+                    old_process.join(timeout=0.)
+                    _close_mp_queue(old_q)
+            self.retired_analysis_workers = remaining
             self.run_dir = run_dir
             self.analysis_status_q = self.ctx.Queue(maxsize=1)
             analysis_dir = run_dir / "analysis"
@@ -5104,6 +5326,7 @@ class AsyncProbeRecorder:
                     str(run_dir),
                     self.analysis_status_q,
                     float(self.cfg.recording_analysis_video_fps),
+                    bool(ball_sensors_only),
                 ),
                 name="policy_probe_recording_analysis",
                 daemon=False,
@@ -5127,9 +5350,13 @@ class AsyncProbeRecorder:
     def record_event(self, event: dict[str, Any]) -> None:
         if not event:
             return
+        if getattr(self, "trajectory_only", False) and event.get("event") not in ("start", "stop"):
+            return
         self._put({"kind": "event", "event": dict(event)})
 
     def record_view(self, view: dict[str, Any] | None) -> None:
+        if getattr(self, "trajectory_only", False):
+            return
         if not isinstance(view, dict):
             return
         payload = dict(view)
@@ -5137,6 +5364,8 @@ class AsyncProbeRecorder:
         self._put({"kind": "view", "view": payload})
 
     def record_snapshot(self, snapshot: dict[str, Any] | None) -> None:
+        if getattr(self, "trajectory_only", False):
+            return
         if not isinstance(snapshot, dict):
             return
         now = time.perf_counter()
@@ -5166,12 +5395,16 @@ class AsyncProbeRecorder:
                 if now < self.next_control_record_wall:
                     return
                 self.next_control_record_wall = now + 1.0 / max(rate, 1e-6)
+        if getattr(self, "trajectory_only", False):
+            sample = compact_trajectory_sample(sample)
         self._put({"kind": "control", "sample": sample})
 
     def record_sim_control_samples(
         self,
         samples: list[dict[str, Any]] | None,
     ) -> None:
+        if getattr(self, "trajectory_only", False):
+            return
         if not samples or float(self.cfg.recording_control_rate_hz) <= 0.0:
             return
         with self.lock:
@@ -5202,7 +5435,7 @@ class AsyncProbeRecorder:
         frame: bytes | None,
         info: dict[str, Any] | None,
     ) -> None:
-        if frame is None:
+        if frame is None or not self.save_camera_images:
             return
         rate = float(self.cfg.recording_image_rate_hz)
         if rate <= 0.0:
@@ -5239,6 +5472,8 @@ class AsyncProbeRecorder:
         frame: bytes | None,
         info: dict[str, Any] | None,
     ) -> None:
+        if getattr(self, "trajectory_only", False):
+            return
         if frame is None:
             return
         rate = float(self.cfg.recording_image_rate_hz)
@@ -6835,7 +7070,7 @@ def _policy_observation_feature(obs, feature):
         "TrackingErrorObs": (42, 49), "NominalVelocityObs": (51, 58),
         "DelayedTrackingErrorObs": (58, 65), "ContactPhaseObs": (65, 67),
     }
-    if len(obs) in (72, 156):
+    if len(obs) in (72, 117, 156):
         slices = {"BallObservationObs": (28, 31), "RacketPositionObs": (52, 55),
                   "TrackingErrorObs": (14, 21)}
     bounds = slices.get(feature)
@@ -6899,19 +7134,24 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             {"name": "contact_time_margin", "start": 66, "stop": 67,
              "unit": "s"},
         ])
-    if expected_obs_dim in (72, 156):
+    if expected_obs_dim in (72, 117, 156):
         segments = [("joint_position", 0, 7, "rad"), ("joint_velocity", 7, 14, "rad/s"),
                     ("persistent_qref_error", 14, 21, "rad"), ("projected_previous_action", 21, 28, "normalized"),
                     ("held_ball_history", 28, 52, "m")]
         segments += ([("current_racket_pose", 52, 61, "m,rotation6d"),
                       ("ball_age_history", 61, 69, "age/0.25"), ("episode_target_xy", 69, 71, "m"),
-                      ("ball_observed", 71, 72, "bool")] if expected_obs_dim == 72 else
+                      ("ball_observed", 71, 72, "bool")] if expected_obs_dim in (72, 117) else
                      [("racket_pose_history", 52, 124, "m,rotation6d"), ("ball_age_history", 124, 132, "age/0.25"),
                       ("desired_apex", 132, 133, "m"), ("episode_target_xy", 133, 135, "m"),
                       ("ball_valid", 135, 136, "bool"), ("confirmed_hits", 136, 137, "hits/4"),
                       ("predicted_contact_context", 137, 156, "m,s,rotation6d")])
         observation_segments = [dict(name=name, start=start, stop=stop, unit=unit)
                                 for name, start, stop, unit in segments]
+        if expected_obs_dim == 117:
+            observation_segments += [
+                dict(name=f"observed_local_history_{lag_ms}ms", start=start, stop=start + 15,
+                     unit="m,normal_delta,rad,age/0.25,bool")
+                for lag_ms, start in ((50, 72), (100, 87), (200, 102))]
     contract = {
         "observationDim": expected_obs_dim,
         "actionDim": action_dim,
@@ -6937,7 +7177,7 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             controller, "action_jerk_limit", 0.0)),
         "actionClipAbs": float(getattr(
             controller, "action_acc_limit", 1.0)),
-        "armActionLimiter": bool(expected_obs_dim not in (72, 156) and getattr(
+        "armActionLimiter": bool(expected_obs_dim not in (72, 117, 156) and getattr(
             controller, "arm_action_limiter", False)),
         "controlDtS": float(getattr(controller, "dt", 0.0)),
         "delayConditioning": bool(getattr(
@@ -6949,10 +7189,13 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
         "positionIntegrationCount": 1 if action_mode == "velocity" else 2,
         "observationSegments": observation_segments,
     }
-    if expected_obs_dim in (72, 156):
+    if expected_obs_dim in (72, 117, 156):
         contract["fplc"] = {
+            "runningJointFeedbackMaxAgeS": FPLC_JOINT_FEEDBACK_MAX_AGE_S,
+            "armHoldJointFeedbackMaxAgeS": 0.010,
             "projectionRuntime": dict(getattr(controller, "projection_runtime", {})),
-            "actorSchema": controller.contract['saved_nominal_domain']['fixed_contact_actor_observation_schema'],
+            "actorSchema": controller.contract.get(
+                'actor_schema', controller.contract['saved_nominal_domain']['fixed_contact_actor_observation_schema']),
             "commandPath": "actor_QVEL -> training_Cartesian_projection -> persistent_qref -> robot_RMP",
             "projection": dict(controller.last_projection),
             "positionLowerM": controller.position_lower.tolist(),
@@ -7345,6 +7588,8 @@ class CameraSource:
 
     def _initialize_camera_state(self, cfg):
         self.camera_process = None
+        self.raw_camera_recorder = None
+        self.raw_camera_metadata = None
         self.camera_clock = CameraTimestampAligner()
         self.camera_clock_lock = threading.Lock()
         self.latest_camera_clock_sync = self.camera_clock.diagnostics()
@@ -7436,6 +7681,7 @@ class CameraSource:
         self.latest_camera_stamp_sec: float | None = None
         self.latest_camera_wall: float | None = None
         self.latest_camera_raw_measurement: Any = None
+        self.camera_recording_packet = None
         self.mocap_input = None
         self.mocap_lock = threading.Lock()
         self.latest_mocap_ball_pos_m: np.ndarray | None = None
@@ -7545,6 +7791,8 @@ class CameraSource:
             output_frame = "camera"
 
         detector = HybridBallDetectorAdapter(
+            depth_assisted_detection_enabled=bool(
+                getattr(self.cfg, "enable_depth_assisted_ir", False)),
             yolo_model_path=str(self.cfg.yolo_model_path),
             ball_diameter_mm=40.0,
             width=width,
@@ -7647,6 +7895,25 @@ class CameraSource:
             self.camera_output_frame = output_frame
             self.camera_active_transport = "direct_realsense/hybrid"
             self.camera_error = None
+
+        # Allocate the bounded sidecar before acquisition starts. It is only
+        # available in the camera-only subprocess; control/receiver loops are
+        # never producers of images or recording I/O.
+        if bool(getattr(self.cfg, 'enable_raw_camera_recording', False)):
+            from pingpong_controller.raw_camera_recording import RawCameraRecorder
+            from pingpong_controller.camera_replay import snapshot_detector
+            try:
+                core = detector.detector
+                self.raw_camera_metadata = snapshot_detector(core, self.cfg)
+                self.raw_camera_recorder = RawCameraRecorder(
+                    slot_bytes=(int(core.image_width)*int(core.image_height)*3
+                                + int(core.color_stream_width)*int(core.color_stream_height)*3),
+                    slots=4,
+                    max_duration_s=self.cfg.raw_camera_max_duration_s,
+                    max_bytes=int(self.cfg.raw_camera_max_gb*1024**3))
+            except Exception as exc:
+                self.get_logger().error(f'Raw recording unavailable (camera continues): {exc}')
+                self.raw_camera_metadata = {'error': str(exc)}
 
         self.camera_direct_running = True
         self.camera_capture_thread = threading.Thread(
@@ -7926,7 +8193,7 @@ class CameraSource:
             }
             detector = self.camera_detector
             core = getattr(detector, "detector", detector)
-            if core is not None:
+            if core is not None and not getattr(self, 'camera_racket_context_authoritative', False):
                 detector_racket_position = (
                     self._sim_position_to_camera_detector_frame(
                         racket_position))
@@ -7937,6 +8204,11 @@ class CameraSource:
                         detector_racket_position, stamp_ros)
                 elif hasattr(core, "clear_racket_state"):
                     core.clear_racket_state()
+
+    def set_camera_racket_context(self, state, context):
+        """Install worker FK independent of UI; one immutable context envelope."""
+        self.camera_racket_context_authoritative = True
+        self.camera_racket_observation = (state, context)
 
 
     def _sim_position_to_camera_detector_frame(
@@ -8314,6 +8586,13 @@ class CameraSource:
                     self.camera_active_transport = "direct_realsense/hybrid"
 
                 core = getattr(detector, "detector", None)
+                racket_observation = getattr(self, 'camera_racket_observation', None)
+                if racket_observation is not None and core is not None:
+                    # Freeze one envelope for detection, fitting and recording.
+                    # The management worker only replaces the source reference.
+                    if getattr(core,'output_frame','camera') != 'base_link':
+                        racket_observation = (None,None)
+                    core.latest_racket_state = racket_observation[0]
                 if core is not None and hasattr(
                         core, "color_image_for_frames"):
                     rgb_image = core.color_image_for_frames(
@@ -8370,8 +8649,22 @@ class CameraSource:
                         3)
 
                 observation['_captureClockSync'] = clock_info
+                if racket_observation is not None:
+                    observation['_racketObservation'] = racket_observation
                 self._handle_direct_hybrid_observation(
                     rgb_image, ir_image, observation, stamp_sec)
+                raw_recorder = self.raw_camera_recorder
+                if raw_recorder is not None and raw_recorder.accepting:
+                    # Reference-only handoff AFTER publishing the observation.
+                    # The acquisition loop above and the 200 Hz policy path
+                    # do not execute any raw-recording code.
+                    recorded_rgb = getattr(core, 'latest_color_image', None)
+                    raw_recorder.offer((
+                        frames, ((recorded_rgb if recorded_rgb is not None else rgb_image)
+                                 if options.yolo_enabled else None),
+                        stamp_sec, clock_info, options, self.camera_frames_acquired,
+                        getattr(core, 'latest_racket_state', None),
+                        None if racket_observation is None else racket_observation[1]))
             except Exception as exc:  # noqa: BLE001 - keep reader alive.
                 with self.camera_lock:
                     self.camera_error = str(exc)
@@ -8463,6 +8756,32 @@ class CameraSource:
 
 
     def _store_camera_observation(self, observation: dict[str, Any], stamp_sec: float) -> None:
+        # Producer-only observation math. The independent frame receiver and
+        # 200 Hz control reader never execute the fit or bearing update.
+        raw = observation.get('raw_measurement') or {}
+        if raw.get('ball_observation_version') == 1:
+            from pingpong_controller.ball_observation_model import BallObservationProcessor
+            clock = observation.get('_captureClockSync') or {}
+            offset = tuple(float(getattr(self.cfg, key, 0.)) for key in (
+                'sim_cartesian_x_offset_m', 'sim_cartesian_y_offset_m', 'sim_base_height_m'))
+            floor = float(getattr(self.cfg, 'high_ball_prediction_stop_z_m', 1.24))
+            key = (id(getattr(self, 'camera_detector', None)), clock.get('generation'), clock.get('epoch'),
+                   getattr(self, 'camera_options', None), offset, floor)
+            if key != getattr(self, '_ball_observation_processor_key', None):
+                self._ball_observation_processor = BallObservationProcessor(offset, floor)
+                self._ball_observation_processor_key = key
+            core = getattr(getattr(self, 'camera_detector', None), 'detector', None)
+            racket_observation = observation.get('_racketObservation')
+            context_kwargs = {}
+            if getattr(self._ball_observation_processor, 'SUPPORTS_RACKET_CONTEXT', False):
+                context_kwargs['racket_context'] = None if racket_observation is None else racket_observation[1]
+            self._ball_observation_processor.process(observation, float(stamp_sec),
+                racket_state=(getattr(core, 'latest_racket_state', None)
+                    if racket_observation is None else racket_observation[0]),
+                **context_kwargs)
+            for timing_key in ('processing_ms', 'capture_to_result_ms'):
+                if raw.get(timing_key) is not None:
+                    raw[timing_key] += raw.get('observation_compute_ms', 0.)
         now_wall = time.time()
         detected = bool(observation.get("detected", False))
         pos_m = None
@@ -8521,6 +8840,18 @@ class CameraSource:
             self.latest_camera_wall = now_wall
             self.latest_camera_raw_measurement = observation.get("raw_measurement")
             self.camera_error = None
+            # This producer owns formatting. The control loop only reads the
+            # immutable result reference and never acquires camera_lock.
+            sync = self.latest_camera_clock_sync
+            self.camera_recording_packet = (
+                make_sensor_recording_sample(
+                    "camera", pos_m, vel_m_s, detected, stamp_sec,
+                    dict(_camera_measurement_payload(self.latest_camera_raw_measurement) or {}, clockSync=sync),
+                    frame_aligned=detector_frame in {"base_link", "sim_frame"},
+                    detector_frame=detector_frame),
+                (sync.get("generation", 0), sync.get("epoch"), bool(sync.get("ready"))),
+                sync.get("receiptMonotonicS", time.monotonic()),
+            )
 
 
     def _viz_done_thresholds(self) -> dict[str, float]:
@@ -9031,6 +9362,10 @@ class CameraSource:
             self.camera_process = None
             return
         self.camera_direct_running = False
+        raw_recorder = getattr(self, 'raw_camera_recorder', None)
+        if raw_recorder is not None:
+            raw_recorder.close()
+            self.raw_camera_recorder = None
         self.camera_frame_event.set()
         with self.camera_lock:
             detector = self.camera_detector
@@ -9061,6 +9396,20 @@ class RosBridgeNode(CameraSource, Node):
         super().__init__("interactive_policy_safety_probe")
         self.cfg = cfg
         self.lock = threading.Lock()
+        self.joint_feedback_condition = threading.Condition(self.lock)
+        self.joint_feedback_diagnostics = {
+            "callbackCount": 0,
+            "lastReceiptIntervalS": None,
+            "maximumReceiptIntervalS": 0.0,
+            "receiptIntervalsOver10ms": 0,
+            "receiptIntervalsOverLimit": 0,
+            "maximumFeedbackAgeS": FPLC_JOINT_FEEDBACK_MAX_AGE_S,
+            "waitCount": 0,
+            "waitRecoveries": 0,
+            "waitTimeouts": 0,
+        }
+        self.joint_receiver_runtime = {"status": "starting" if cfg.ros_bridge else "disabled"}
+        self.joint_receipt_intervals: deque[float] = deque(maxlen=200)
         self.camera_lock = threading.Lock()
         self.camera_rebuild_lock = threading.Lock()
         self.latest_joint_q: np.ndarray | None = None
@@ -9100,9 +9449,8 @@ class RosBridgeNode(CameraSource, Node):
             if cfg.ros_publish_commands:
                 self.cmd_pub = self.create_publisher(
                     MechUnitCmdArray, cfg.command_topic, 10)
-            self.create_subscription(
-                JointState, cfg.joint_state_topic, self._joint_state_callback, 10,
-                callback_group=self.state_callback_group)
+            # JointState is subscribed by RosBridge's dedicated node/executor.
+            # Cartesian callbacks must never occupy its callback group/thread.
             self.create_subscription(
                 MechUnitStateArray, cfg.cart_state_topic, self._cart_state_callback, 10,
                 callback_group=self.state_callback_group)
@@ -9135,6 +9483,8 @@ class RosBridgeNode(CameraSource, Node):
             calibration_path=calibration_path or None,
             marker_id=int(self.cfg.mocap_marker_id),
             marker_x_limits_m=getattr(self.cfg, 'mocap_marker_x_limits_m', None),
+            marker_z_limits_m=getattr(self.cfg, 'mocap_marker_z_limits_m', (-1.0, 1.0)),
+            enable_recording_cache=not bool(getattr(self.cfg, 'mocap_subprocess', False)),
             position_unit=str(self.cfg.mocap_position_unit),
             timestamp_unit=str(self.cfg.mocap_timestamp_unit),
             velocity_alpha=float(self.cfg.mocap_velocity_alpha),
@@ -9202,20 +9552,24 @@ class RosBridgeNode(CameraSource, Node):
         return dict(info, source=source, required=True)
 
     def _joint_state_callback(self, msg) -> None:
-        name_to_pos: dict[str, float] = {}
-        name_to_vel: dict[str, float] = {}
-        for i, name in enumerate(msg.name):
-            if i < len(msg.position):
-                value = float(msg.position[i])
-                if np.isfinite(value):
-                    name_to_pos[str(name)] = value
-            if i < len(msg.velocity):
-                value = float(msg.velocity[i])
-                if np.isfinite(value):
-                    name_to_vel[str(name)] = value
+        # JointState may contain the whole robot. Cache its name mapping and
+        # parse only the seven controlled joints, shortening the GIL-held path.
+        names = tuple(msg.name)
+        if names != getattr(self, "_joint_message_names", None):
+            indices = {str(name): i for i, name in enumerate(names)}
+            self._right_arm_message_indices = tuple(indices.get(name) for name in RIGHT_ARM_JOINTS)
+            self._joint_message_names = names
+        indices = self._right_arm_message_indices
+        if any(index is None for index in indices):
+            return
         try:
-            q = np.asarray([name_to_pos[n] for n in RIGHT_ARM_JOINTS], dtype=np.float32)
-        except KeyError:
+            q = np.asarray([msg.position[index] for index in indices], dtype=np.float32)
+            dq = np.asarray([
+                msg.velocity[index] if index < len(msg.velocity) else np.nan
+                for index in indices], dtype=np.float32)
+        except (IndexError, TypeError, ValueError, OverflowError):
+            return
+        if not np.all(np.isfinite(q)):
             return
         stamp_wall = time.time()
         stamp_monotonic_s = time.monotonic()
@@ -9229,8 +9583,6 @@ class RosBridgeNode(CameraSource, Node):
                 header_stamp_s = candidate_stamp_s
         except Exception:
             header_stamp_s = None
-        dq_vals = [name_to_vel.get(n, np.nan) for n in RIGHT_ARM_JOINTS]
-        dq = np.asarray(dq_vals, dtype=np.float32)
         dq_source = "joint_state"
         with self.lock:
             previous_sample_stamp = self.latest_joint_sample_stamp_s
@@ -9382,6 +9734,77 @@ class RosBridgeNode(CameraSource, Node):
             self.latest_joint_source_fault = source_fault
             self.latest_joint_dq_source = dq_source
             self.latest_joint_ddq_source = ddq_source
+            diagnostics = getattr(self, "joint_feedback_diagnostics", None)
+            if diagnostics is not None:
+                interval_s = (
+                    None if previous_receipt_monotonic_s is None
+                    else stamp_monotonic_s - previous_receipt_monotonic_s)
+                diagnostics["callbackCount"] += 1
+                diagnostics["lastReceiptIntervalS"] = interval_s
+                if interval_s is not None:
+                    intervals = getattr(self, "joint_receipt_intervals", None)
+                    if intervals is not None:
+                        intervals.append(interval_s)
+                    diagnostics["maximumReceiptIntervalS"] = max(
+                        diagnostics["maximumReceiptIntervalS"], interval_s)
+                    diagnostics["receiptIntervalsOver10ms"] += int(
+                        interval_s > 0.010)
+                    diagnostics["receiptIntervalsOverLimit"] = diagnostics.get(
+                        "receiptIntervalsOverLimit", 0) + int(
+                            interval_s > FPLC_JOINT_FEEDBACK_MAX_AGE_S)
+            condition = getattr(self, "joint_feedback_condition", None)
+            if condition is not None:
+                condition.notify_all()
+
+    def wait_for_joint_feedback(self, *, timeout_s: float = FPLC_JOINT_FEEDBACK_WAIT_S) -> bool:
+        """Yield to the receiver for a bounded delay, never freshen old data.
+
+        Data within the configured running age limit returns immediately.
+        Beyond it, only the current tick's spare budget may wait for a real
+        callback; the absolute gap is capped at that age limit plus 5 ms.
+        Condition.wait releases both the cache lock and the Python GIL.
+        """
+        with self.joint_feedback_condition:
+            stamp = self.latest_joint_stamp_monotonic_s
+            if stamp is None or self.latest_joint_q is None:
+                return False
+            now = time.monotonic()
+            age_s = now - stamp
+            if 0.0 <= age_s <= FPLC_JOINT_FEEDBACK_MAX_AGE_S:
+                return True
+            if not FPLC_JOINT_FEEDBACK_MAX_AGE_S < age_s < FPLC_JOINT_FEEDBACK_MAX_GAP_S:
+                return False
+            deadline = min(
+                now + max(0.0, min(timeout_s, FPLC_JOINT_FEEDBACK_WAIT_S)),
+                stamp + FPLC_JOINT_FEEDBACK_MAX_GAP_S)
+            diagnostics = self.joint_feedback_diagnostics
+            diagnostics["waitCount"] += 1
+            wait_start = now
+            diagnostics["lastWait"] = dict(
+                startAgeS=age_s, budgetS=max(0.0, deadline-now),
+                elapsedS=0.0, endAgeS=age_s, recovered=False)
+            while True:
+                remaining_s = deadline - time.monotonic()
+                if remaining_s <= 0.0:
+                    diagnostics["waitTimeouts"] += 1
+                    end = time.monotonic()
+                    diagnostics["lastWait"].update(
+                        elapsedS=end-wait_start,
+                        endAgeS=end-self.latest_joint_stamp_monotonic_s)
+                    return False
+                self.joint_feedback_condition.wait(timeout=remaining_s)
+                now = time.monotonic()
+                # A late wakeup cannot extend the grace interval indefinitely.
+                if (now <= deadline
+                        and self.latest_joint_stamp_monotonic_s != stamp
+                        and 0.0 <= now - self.latest_joint_stamp_monotonic_s
+                        <= FPLC_JOINT_FEEDBACK_MAX_AGE_S):
+                    diagnostics["waitRecoveries"] += 1
+                    diagnostics["lastWait"].update(
+                        elapsedS=now-wait_start,
+                        endAgeS=now-self.latest_joint_stamp_monotonic_s,
+                        recovered=True)
+                    return True
 
     def _cart_state_callback(self, msg) -> None:
         for state in msg.states:
@@ -9619,6 +10042,7 @@ class RosBridgeNode(CameraSource, Node):
             source_fault = str(self.latest_joint_source_fault)
             header_stamp_s = self.latest_joint_header_stamp_s
             receipt_wall_s = self.latest_joint_stamp_wall
+            receiver = dict(getattr(self, "joint_feedback_diagnostics", {}))
             header_receipt_lag_s = (
                 None
                 if header_stamp_s is None or receipt_wall_s is None
@@ -9638,6 +10062,12 @@ class RosBridgeNode(CameraSource, Node):
             "jointAcceleration": (
                 None if ddq is None else _rounded_vector(ddq)),
             "jointAccelerationSource": ddq_source,
+            "jointReceiptIntervalS": receiver.get("lastReceiptIntervalS"),
+            "jointReceiptMaxIntervalS": receiver.get("maximumReceiptIntervalS"),
+            "jointReceiptIntervalsOver10ms": receiver.get("receiptIntervalsOver10ms", 0),
+            "jointFeedbackWaitRecoveries": receiver.get("waitRecoveries", 0),
+            "jointFeedbackWaitTimeouts": receiver.get("waitTimeouts", 0),
+            "jointFeedbackLastWait": receiver.get("lastWait"),
         }
         return q, dq, age_s, dq_source, sample_stamp_s, timing
 
@@ -9693,6 +10123,10 @@ class RosBridgeNode(CameraSource, Node):
             )
             psi = self.latest_cart_psi
             publish_count = int(self.publish_count)
+            joint_receiver = dict(getattr(self, "joint_feedback_diagnostics", {}))
+            joint_receiver["scheduling"] = dict(getattr(self, "joint_receiver_runtime", {}))
+            joint_intervals = tuple(getattr(self, "joint_receipt_intervals", ()))
+        joint_receiver["cadence"] = cadence_summary(joint_intervals)
         return {
             "jointPosition": None if q is None else [round(float(v), 6) for v in q],
             "jointVelocity": None if dq is None else [round(float(v), 6) for v in dq],
@@ -9724,6 +10158,7 @@ class RosBridgeNode(CameraSource, Node):
             "cartPsi": None if psi is None else round(float(psi), 6),
             "cartAgeS": None if cart_age is None else round(float(cart_age), 6),
             "publishCount": publish_count,
+            "jointFeedbackReceiver": joint_receiver,
         }
 
     def publish_right_arm_command(self, q: np.ndarray) -> None:
@@ -9780,13 +10215,29 @@ class RosBridge:
     def __init__(self, cfg: ProbeConfig):
         if not _ROS_AVAILABLE:
             raise RuntimeError(f"ROS2 Python bridge unavailable: {_ROS_IMPORT_ERROR}")
-        if rclpy is None or MultiThreadedExecutor is None:
+        if rclpy is None or MultiThreadedExecutor is None or SingleThreadedExecutor is None:
             raise RuntimeError("ROS2 Python bridge unavailable")
         if not rclpy.ok():
             rclpy.init(args=None)
         self.node = RosBridgeNode(cfg)
         self.executor = MultiThreadedExecutor(num_threads=4)
         self.executor.add_node(self.node)
+        self.joint_node = None
+        self.joint_executor = None
+        self.joint_thread = None
+        if cfg.ros_bridge:
+            self.joint_node = Node("interactive_policy_joint_feedback", context=self.node.context)
+            self.joint_node.create_subscription(
+                # Feedback is a latest-state input. Do not drain a ten-frame
+                # backlog after a scheduling stall; source dt still measures
+                # skipped frames and the atomic q/dq contract is unchanged.
+                JointState, cfg.joint_state_topic, self.node._joint_state_callback, 1)
+            self.joint_executor = SingleThreadedExecutor(context=self.node.context)
+            self.joint_executor.add_node(self.joint_node)
+            self.joint_thread = threading.Thread(
+                target=self._spin_joint_feedback,
+                name="policy_probe_joint_feedback", daemon=True)
+            self.joint_thread.start()
         self.thread = threading.Thread(
             target=self._spin,
             name="policy_probe_ros_spin",
@@ -9803,6 +10254,20 @@ class RosBridge:
             self.executor.spin()
         except Exception:
             pass
+
+    def _spin_joint_feedback(self) -> None:
+        from pingpong_controller.control_runtime import configure_joint_feedback_thread
+        try:
+            self.node.joint_receiver_runtime = configure_joint_feedback_thread()
+            self.joint_executor.spin()
+        except Exception as exc:
+            self.node.joint_receiver_runtime = {
+                **self.node.joint_receiver_runtime,
+                "status": "failed", "error": str(exc)}
+            self.node.get_logger().error(f"Joint feedback receiver stopped: {exc}")
+
+    def wait_for_joint_feedback(self, *, timeout_s: float = FPLC_JOINT_FEEDBACK_WAIT_S) -> bool:
+        return self.node.wait_for_joint_feedback(timeout_s=timeout_s)
 
     def get_joint_feedback(self) -> tuple[np.ndarray | None, np.ndarray | None]:
         return self.node.get_joint_feedback()
@@ -9845,6 +10310,52 @@ class RosBridge:
 
     def camera_ball_state(self) -> tuple[np.ndarray, np.ndarray, bool, dict[str, Any]]:
         return self.node.camera_ball_state()
+
+    def set_raw_camera_recording(self, directory: str | None) -> bool:
+        """UI request only; the camera process owns copying and disk I/O."""
+        camera = getattr(self.node, 'camera_process', None)
+        if camera is None:
+            return False
+        camera.set_raw_recording(directory)
+        return True
+
+    def raw_camera_recording_status(self) -> dict[str, Any]:
+        camera = getattr(self.node, 'camera_process', None)
+        if camera is None:
+            return {'enabled': True, 'state': 'unavailable',
+                    'error': 'Camera subprocess is unavailable; no raw frames can be saved.'}
+        status = dict(camera.raw_recording_status())
+        requested = getattr(camera, '_raw_directory', None)
+        if (requested and status.get('directory') != requested
+                and status.get('state') not in {'unavailable', 'error'}):
+            # Do not show the preceding session's saved count while a new
+            # request is still travelling to the camera process.
+            status = {'state': 'starting', 'directory': requested}
+        status.update(enabled=True)
+        status.setdefault('state', 'pending')
+        if status.get('state') == 'unavailable':
+            status['error'] = (status.get('metadata') or {}).get('error', 'Raw recorder unavailable')
+        return status
+
+    def ball_sensor_recording_snapshot(self):
+        """Take references only: no sensor locks, polling, copies or formatting."""
+        node = self.node
+        camera = getattr(node, "camera_process", None)
+        if not node.cfg.enable_camera_ball:
+            camera_snapshot = None
+        elif camera is not None:
+            camera_snapshot = camera.recording_snapshot()
+        else:
+            camera_snapshot = (node.camera_recording_packet, node.camera_error,
+                               False, (node.camera_clock.generation,
+                                       node.latest_camera_clock_sync.get("epoch"),
+                                       bool(node.latest_camera_clock_sync.get("ready"))), .5)
+        mocap = node.mocap_input
+        mocap_snapshot = (
+            mocap.recording_snapshot()
+            if node.cfg.enable_mocap_ball and mocap is not None else None)
+        return (node.now_sec(), time.monotonic(), camera_snapshot, mocap_snapshot,
+                node.cfg.enable_camera_ball, node.cfg.enable_mocap_ball)
 
     def mocap_ball_state(self) -> tuple[np.ndarray, np.ndarray, bool, dict[str, Any]]:
         return self.node.mocap_ball_state()
@@ -9925,6 +10436,10 @@ class RosBridge:
     def shutdown(self) -> None:
         try:
             self.node.stop_backend_control_timer()
+            if self.joint_executor is not None:
+                self.joint_executor.shutdown()
+                self.joint_thread.join(timeout=1.0)
+                self.joint_node.destroy_node()
             self.node.shutdown_camera_source()
             self.node.shutdown_mocap_source()
             self.executor.shutdown()
@@ -9962,6 +10477,8 @@ class PolicySafetyProbe:
         }
         self.last_ball_observation_stamp_s: float | None = None
         self.ball_observation_clock_domain: str | None = None
+        self.camera_observation_continuity = CameraObservationContinuity()
+        self.camera_observation_wait_q: np.ndarray | None = None
         self.policy_ball_sample_step = 0
         self.policy_ball_sample_sequence = 0
         self.policy_ball_sample_profile: str | None = None
@@ -10108,6 +10625,8 @@ class PolicySafetyProbe:
         self.control_loop_overrun_count = 0
         self.control_loop_last_error: str | None = None
         self.control_loop_last_wall: float | None = None
+        self.policy_publish_intervals: deque[float] = deque(maxlen=200)
+        self.policy_publish_last_perf: float | None = None
         self.control_loop_tick = 0
         from pingpong_controller.control_deadline import PolicyDeadlineMonitor
         self.policy_deadline_monitor = PolicyDeadlineMonitor(cfg.control_dt)
@@ -10281,6 +10800,7 @@ class PolicySafetyProbe:
         if cfg.ros_bridge or cfg.enable_camera_ball or cfg.enable_mocap_ball:
             self.ros_bridge = RosBridge(cfg)
         initial_snapshot = self.reset()
+        self._configure_camera_racket_context()
         self.latest_snapshot_payload = initial_snapshot
         if cfg.analysis_run_dir is not None:
             self.recorder.select_analysis_run(
@@ -10294,6 +10814,22 @@ class PolicySafetyProbe:
         self.web_drag_ball_pos = self.last_ball_pos.copy()
         if self.cfg.backend_control_loop:
             self._start_backend_control_loop()
+
+    def _configure_camera_racket_context(self):
+        """Configure ball-observer FK at startup/profile changes, never a tick."""
+        bridge = getattr(self, 'ros_bridge', None)
+        node = getattr(bridge, 'node', None)
+        camera = getattr(node, 'camera_process', None)
+        if (camera is None or not hasattr(camera, 'set_racket_context_source')
+                or not bool(getattr(self.cfg, 'ros_bridge', False))):
+            return
+        from pingpong_controller.ball_observation_model import BallObservationProcessor
+        if not getattr(BallObservationProcessor,'SUPPORTS_RACKET_CONTEXT',False):
+            return  # Frozen v1.0/v1.1 rollback keeps its original context path.
+        from pingpong_controller.ball_racket_context import model_spec, FeedbackReader
+        spec = model_spec(self.controller)
+        if spec is not None:
+            camera.set_racket_context_source(spec, FeedbackReader(node))
 
     def _build_release_locked_policy_controller(
         self,
@@ -10524,6 +11060,8 @@ class PolicySafetyProbe:
         with self.lock:
             self._accept_control_client_payload(
                 payload, allow_reset_takeover=True)
+            self.camera_observation_continuity.reset()
+            self.camera_observation_wait_q = None
             policy_selection_changed = False
             if "policyProfile" in payload:
                 policy_selection_changed = bool(
@@ -10635,6 +11173,7 @@ class PolicySafetyProbe:
             self.hard_workspace_stop_reason = ""
             self.hard_workspace_stop_conditions: dict[str, bool] = {}
             self.hard_workspace_stop_hold_sent = False
+            self.hard_workspace_stop_hold_attempted = False
             self.soft_workspace_reset_latched = False
             self.soft_workspace_reset_reason = ""
             self.soft_workspace_reset_conditions: dict[str, bool] = {}
@@ -11574,6 +12113,7 @@ class PolicySafetyProbe:
         policy-session boundaries such as an explicit reset or profile/model
         switch.
         """
+        self.policy_publish_last_perf = None
         self.policy_needs_reentry_reset = True
         self._reset_policy_dq_adapter("policy_paused")
 
@@ -11640,6 +12180,7 @@ class PolicySafetyProbe:
         self.sim_needs_policy_reset = True
         self.last_policy_execution_trace = None
         self._reset_policy_dq_adapter("policy_profile_changed")
+        self._configure_camera_racket_context()
         self.last_control_mode = None
         return True
 
@@ -11693,6 +12234,7 @@ class PolicySafetyProbe:
         self.sim_needs_policy_reset = True
         self.last_policy_execution_trace = None
         self._reset_policy_dq_adapter("policy_model_changed")
+        self._configure_camera_racket_context()
         self.last_control_mode = None
         return True
 
@@ -15150,6 +15692,7 @@ class PolicySafetyProbe:
             if bool(active)
         }
         self.hard_workspace_stop_hold_sent = False
+        self.hard_workspace_stop_hold_attempted = False
         print(
             "[CommandSafety][STOP] Hard workspace done latched; "
             "publishing one measured-position hold then rejecting commands "
@@ -15160,9 +15703,11 @@ class PolicySafetyProbe:
     def _stop_hard_workspace_command_stream(self) -> bool:
         """Reject all commands after hard workspace done, except one stop hold."""
         self.compensation_was_enabled = False
-        if not bool(getattr(self, "hard_workspace_stop_hold_sent", False)):
+        if (not bool(getattr(self, "hard_workspace_stop_hold_sent", False))
+                and not bool(getattr(self, "hard_workspace_stop_hold_attempted", False))):
+            self.hard_workspace_stop_hold_attempted = True
             held = self._publish_measured_stop_hold()
-            self.hard_workspace_stop_hold_sent = True
+            self.hard_workspace_stop_hold_sent = bool(held)
             if not held:
                 self.command_stream_active = False
                 if not isinstance(
@@ -15193,6 +15738,8 @@ class PolicySafetyProbe:
                 self, "hard_workspace_stop_conditions", {})),
             "holdSent": bool(getattr(
                 self, "hard_workspace_stop_hold_sent", False)),
+            "holdAttempted": bool(getattr(
+                self, "hard_workspace_stop_hold_attempted", False)),
         }
 
     def _soft_workspace_reset_active(self) -> bool:
@@ -15538,9 +16085,11 @@ class PolicySafetyProbe:
             limits = fplc_workspace_intersection((
                 self.cfg.ee_x_limits_m, self.cfg.ee_y_limits_m, self.cfg.ee_z_limits_m))
             try:
+                feedback_wait_ok = self._wait_for_fplc_joint_feedback(reserve_s=0.0005)
                 measured_q, _measured_dq, feedback_age, _source = (
                     self.ros_bridge.get_joint_feedback_with_age())
             except Exception:
+                feedback_wait_ok = False
                 measured_q, feedback_age = None, None
             actor_target = self._right_arm_joint_vector_or_none(
                 getattr(self.controller, "last_cmd_q", None))
@@ -15548,9 +16097,9 @@ class PolicySafetyProbe:
                 publish_profile_name == "normal"
                 and str(getattr(options, "control_mode", "policy")) == "policy")
             feedback_fresh = bool(
-                measured_q is not None and feedback_age is not None
+                feedback_wait_ok and measured_q is not None and feedback_age is not None
                 and math.isfinite(float(feedback_age))
-                and 0.0 <= float(feedback_age) <= 0.010)
+                and 0.0 <= float(feedback_age) <= FPLC_JOINT_FEEDBACK_MAX_AGE_S)
             command_delta = (
                 None if actor_target is None
                 else float(np.max(np.abs(safe - actor_target))))
@@ -15570,7 +16119,8 @@ class PolicySafetyProbe:
                     "jointFeedbackAgeS": (
                         float(feedback_age) if feedback_age is not None
                         and math.isfinite(float(feedback_age)) else None),
-                    "maximumJointFeedbackAgeS": 0.010,
+                    "maximumJointFeedbackAgeS": FPLC_JOINT_FEEDBACK_MAX_AGE_S,
+                    "feedbackWaitSucceeded": feedback_wait_ok,
                     "actorCommandDeltaMaxAbsRad": command_delta,
                     "positionLimitsM": [list(pair) for pair in limits],
                     "relativeRollPitchLimitDeg": np.rad2deg(self.controller.real_rp_outer).tolist(),
@@ -15597,6 +16147,16 @@ class PolicySafetyProbe:
                     "fplc_workspace_or_command_boundary_fault", {"fplc_hard_envelope": True})
                 return self._stop_hard_workspace_command_stream()
         self.ros_bridge.publish_right_arm_command(safe)
+        publish_intervals = getattr(self, "policy_publish_intervals", None)
+        if (publish_intervals is not None and publish_profile_name == "normal"
+                and getattr(options, "control_mode", "policy") == "policy"):
+            published_perf = time.perf_counter()
+            previous_publish = getattr(self, "policy_publish_last_perf", None)
+            if previous_publish is not None:
+                publish_intervals.append(published_perf - previous_publish)
+            self.policy_publish_last_perf = published_perf
+        else:
+            self.policy_publish_last_perf = None
         self.last_published_safe_reference = np.asarray(
             safe, dtype=np.float64).copy()
         self.last_published_command_profile = publish_profile_name
@@ -15683,6 +16243,14 @@ class PolicySafetyProbe:
 
     def start_recording(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload if isinstance(payload, dict) else {}
+        if self.recorder.active is True:
+            return self.recording_status()
+        save_camera_images = payload.get("saveCameraImages", self.cfg.recording_save_camera_images)
+        if not isinstance(save_camera_images, bool):
+            raise ValueError("saveCameraImages must be a boolean")
+        trajectory_only = payload.get("trajectoryOnly", self.cfg.recording_trajectory_only)
+        if not isinstance(trajectory_only, bool):
+            raise ValueError("trajectoryOnly must be a boolean")
         view = payload.get("view")
         view_payload = view if isinstance(view, dict) else None
         try:
@@ -15695,7 +16263,16 @@ class PolicySafetyProbe:
             self.recording_policy_step_count = 0
             self.recording_policy_step_limit_reached = False
         status = self.recorder.start(
-            self.browser_config(), initial_view=view_payload)
+            self.browser_config(), initial_view=view_payload,
+            save_camera_images=save_camera_images, trajectory_only=trajectory_only)
+        self.recording_save_camera_images = save_camera_images
+        status["saveCameraImages"] = save_camera_images
+        status["trajectoryOnly"] = trajectory_only
+        bridge = getattr(self, 'ros_bridge', None)
+        if (save_camera_images and bridge is not None and bool(getattr(self.cfg, 'enable_raw_camera_recording', False))
+                and status.get('runDir') and not status.get('error')):
+            bridge.set_raw_camera_recording(str(Path(status['runDir'])/'raw_camera'))
+        status['rawCamera'] = self.raw_camera_recording_status()
         status["policyStepLimit"] = int(policy_step_limit)
         status["policyStepCount"] = 0
         status["policyStepLimitReached"] = False
@@ -15703,45 +16280,67 @@ class PolicySafetyProbe:
 
     def stop_recording(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload if isinstance(payload, dict) else {}
+        bridge = getattr(self, 'ros_bridge', None)
+        if bridge is not None and bool(getattr(self.cfg, 'enable_raw_camera_recording', False)):
+            bridge.set_raw_camera_recording(None)
         view = payload.get("view")
         freeze_source_seq = max(-1, int(self.control_loop_tick) - 1)
         self.recorder.freeze(freeze_source_seq)
-        alignment = {
-            "event": "sim_alignment",
-            "wallTimeS": time.time(),
-            "freezeSourceSeq": freeze_source_seq,
-            "simEnabled": bool(self.sim_mirror is not None),
-            "flushComplete": self.sim_mirror is None,
-            "alignmentValid": self.sim_mirror is None,
-        }
-        if isinstance(self.sim_mirror, SimMirrorSubprocess):
-            try:
-                flush_timeout_s = max(0.0, float(os.environ.get(
-                    "SIM_RECORDING_FLUSH_TIMEOUT_S", "5.0")))
-            except (TypeError, ValueError):
-                flush_timeout_s = 5.0
-            flush = self.sim_mirror.flush(
-                self.sim_mirror.stream_seq, flush_timeout_s)
-            self.recorder.record_sim_control_samples(
-                self.sim_mirror.drain_completed_samples())
-            alignment.update({
-                "flushComplete": bool(flush.get("complete", False)),
-                "alignmentValid": bool(
-                    flush.get("alignmentValid", False)),
-                "flush": flush,
-            })
-        elif self.sim_mirror is not None:
-            alignment.update({
-                "flushComplete": True,
-                "alignmentValid": True,
-            })
-        self.recorder.record_event(alignment)
-        return self.recorder.stop(
+        if not getattr(self.recorder, "trajectory_only", False):
+            alignment = {
+                "event": "sim_alignment",
+                "wallTimeS": time.time(),
+                "freezeSourceSeq": freeze_source_seq,
+                "simEnabled": bool(self.sim_mirror is not None),
+                "flushComplete": self.sim_mirror is None,
+                "alignmentValid": self.sim_mirror is None,
+            }
+            if isinstance(self.sim_mirror, SimMirrorSubprocess):
+                try:
+                    flush_timeout_s = max(0.0, float(os.environ.get(
+                        "SIM_RECORDING_FLUSH_TIMEOUT_S", "5.0")))
+                except (TypeError, ValueError):
+                    flush_timeout_s = 5.0
+                flush = self.sim_mirror.flush(
+                    self.sim_mirror.stream_seq, flush_timeout_s)
+                self.recorder.record_sim_control_samples(
+                    self.sim_mirror.drain_completed_samples())
+                alignment.update({
+                    "flushComplete": bool(flush.get("complete", False)),
+                    "alignmentValid": bool(
+                        flush.get("alignmentValid", False)),
+                    "flush": flush,
+                })
+            elif self.sim_mirror is not None:
+                alignment.update({
+                    "flushComplete": True,
+                    "alignmentValid": True,
+                })
+            self.recorder.record_event(alignment)
+        analyze = bool(payload.get("analyze", False))
+        status = self.recorder.stop(
             final_view=view if isinstance(view, dict) else None,
-            analyze=bool(payload.get("analyze", False)))
+            analyze=analyze)
+        if not analyze and status.get("runDir") and not status.get("error"):
+            # Always generate sensor comparison plots after flush, even when
+            # full video/policy analysis was unchecked in the browser.
+            status = self.recorder.start_analysis(str(status["runDir"]), ball_sensors_only=True)
+        status['rawCamera'] = self.raw_camera_recording_status()
+        return status
+
+    def raw_camera_recording_status(self) -> dict[str, Any]:
+        if (not bool(getattr(self.cfg, 'enable_raw_camera_recording', False))
+                or not getattr(self, "recording_save_camera_images", self.cfg.recording_save_camera_images)):
+            return {'enabled': False, 'state': 'disabled'}
+        bridge = getattr(self, 'ros_bridge', None)
+        if bridge is None:
+            return {'enabled': True, 'state': 'unavailable', 'error': 'Camera bridge unavailable'}
+        return bridge.raw_camera_recording_status()
 
     def recording_status(self) -> dict[str, Any]:
-        return self.recorder.status()
+        status = self.recorder.status()
+        status['rawCamera'] = self.raw_camera_recording_status()
+        return status
 
     def cached_recording_status(self) -> dict[str, Any]:
         return self.recording_status()
@@ -16180,6 +16779,13 @@ class PolicySafetyProbe:
             str(camera_measurement.get("observation_state", ""))
             if isinstance(camera_measurement, dict) else "")
         prediction = prediction_diagnostics or {}
+        if prediction.get('model') == 'quality_bearing_range_flight':
+            if not prediction.get('velocityValid', False):
+                return ('contact_waiting' if str(prediction.get('reason', '')).startswith('contact_')
+                        else 'observation_invalid')
+            return ('tracking' if prediction.get('state') == 'measured' else
+                    'bearing_update' if prediction.get('state') == 'bearing' else
+                    'detection_loss_prediction')
         predicted = bool(prediction.get("predicted", False))
         active_trigger = str(prediction.get("activeTrigger") or "")
         predictor_state = str(prediction.get("state") or "")
@@ -16194,7 +16800,7 @@ class PolicySafetyProbe:
         # that explicitly activated high-FOV prediction.  Report the selected
         # estimator state, rather than leaving the state machine labelled as a
         # generic rejected measurement.
-        if predicted and active_trigger == "high_fov_edge_exit":
+        if predicted and active_trigger in {"high_fov_edge_exit", "high_ball_gap"}:
             return "high_fov_prediction"
         if raw_state == "motion_outlier":
             return (
@@ -16202,7 +16808,7 @@ class PolicySafetyProbe:
                 else "motion_outlier_invalid")
         if not measured_valid:
             if predicted and active_trigger in {
-                    "high_fov_occlusion", "high_fov_edge_exit"}:
+                    "high_fov_occlusion", "high_fov_edge_exit", "high_ball_gap"}:
                 return "high_fov_prediction"
             if predicted:
                 return "detection_loss_prediction"
@@ -16333,6 +16939,7 @@ class PolicySafetyProbe:
         options: RuntimeOptions,
     ) -> HighBallOcclusionPredictor:
         key = (
+            bool(options.high_ball_occlusion_prediction),
             int(options.high_ball_prediction_history_frames),
             float(options.high_ball_prediction_activation_z_m),
             float(options.high_ball_prediction_min_upward_velocity_m_s),
@@ -16352,6 +16959,8 @@ class PolicySafetyProbe:
         if (self.high_ball_occlusion_predictor is None
                 or self.high_ball_occlusion_predictor_key != key):
             config = HighBallOcclusionConfig(
+                enable_high_ball_gap_prediction=bool(
+                    options.high_ball_occlusion_prediction),
                 history_frames=int(
                     options.high_ball_prediction_history_frames),
                 activation_z_m=float(
@@ -16506,7 +17115,10 @@ class PolicySafetyProbe:
             and (previous_impact_stamp is None
                  or abs(impact_stamp - float(previous_impact_stamp))
                  > 1.0e-6))
-        if history_reset_on_impact:
+        quality_observation = bool(
+            isinstance(camera_measurement, dict)
+            and camera_measurement.get('ball_observation_version') == 1)
+        if history_reset_on_impact and not quality_observation:
             # Predictor measurements are another consumer of detector state.
             # Clearing only the detector's velocity window is insufficient:
             # an otherwise valid position-fit would still span the collision.
@@ -16539,24 +17151,33 @@ class PolicySafetyProbe:
             depth_anomaly=depth_anomaly_detected,
             camera_velocity_ready=camera_velocity_ready,
             camera_measurement=camera_measurement)
-        result = predictor.step(
-            measured_pos,
-            measured_vel,
-            trusted_measured_valid,
-            measurement_stamp_s,
-            query_time_s,
-            force_prediction_reason=(
-                "sensor_depth_anomaly"
-                if depth_anomaly_enabled and depth_anomaly_detected
-                else (
-                    "high_fov_edge_exit"
-                    if high_fov_enabled and top_fov_exit_detected
-                    else None)),
-            allow_high_fov_prediction=high_fov_enabled,
-            measurement_velocity_valid=camera_velocity_ready,
-            measurement_reacquisition_confirmed=(
-                detector_reacquisition_confirmed),
-        )
+        if quality_observation:
+            result = predictor.step_quality_observation(
+                measured_pos, measured_vel, trusted_measured_valid,
+                measurement_stamp_s if measurement_stamp_s is not None else query_time_s,
+                query_time_s, camera_measurement,
+                [getattr(self.cfg, 'sim_cartesian_x_offset_m', 0.),
+                 getattr(self.cfg, 'sim_cartesian_y_offset_m', 0.),
+                 getattr(self.cfg, 'sim_base_height_m', 0.)])
+        else:
+            result = predictor.step(
+                measured_pos,
+                measured_vel,
+                trusted_measured_valid,
+                measurement_stamp_s,
+                query_time_s,
+                force_prediction_reason=(
+                    "sensor_depth_anomaly"
+                    if depth_anomaly_enabled and depth_anomaly_detected
+                    else (
+                        "high_fov_edge_exit"
+                        if high_fov_enabled and top_fov_exit_detected
+                        else None)),
+                allow_high_fov_prediction=high_fov_enabled,
+                measurement_velocity_valid=camera_velocity_ready,
+                measurement_reacquisition_confirmed=(
+                    detector_reacquisition_confirmed),
+            )
         reacquisition_velocity_warmup = bool(
             trusted_measured_valid
             and not camera_velocity_ready
@@ -16986,6 +17607,27 @@ class PolicySafetyProbe:
         vel = np.asarray(out.get("velocity", [0.0, 0.0, 0.0]), dtype=np.float32).reshape(3) * 1e-3
         return pos, vel, True, max(0.0, age_s), info
 
+    def _camera_observation_recovery_decision(self, valid, age_s, options):
+        """Classify a camera-only recovery without changing observation validity."""
+        continuity = getattr(self, 'camera_observation_continuity', None)
+        if continuity is None:
+            continuity = self.camera_observation_continuity = CameraObservationContinuity()
+        prediction = getattr(self, 'last_high_ball_occlusion_info', {}) or {}
+        enabled = bool(self.active_policy_profile in FPLC_PROFILES
+            and options.ball_source == 'camera' and not options.use_ball_estimator
+            and prediction.get('model') == 'quality_bearing_range_flight')
+        reason = str(prediction.get('reason', ''))
+        if getattr(self, 'last_policy_ball_handover_info', {}).get('state') == 'expired_range':
+            reason = 'prediction_timeout'
+        direct = getattr(self, 'fplc_direct_ball_input', {})
+        return continuity.step(time.monotonic(), enabled=enabled,
+            source_key=(self.active_policy_profile, options.ball_source,
+                        getattr(self, 'selected_ball_clock_epoch', None)),
+            valid=bool(valid and math.isfinite(age_s) and 0. <= age_s <= .350),
+            observed=bool(direct.get('ball_observed', False)),
+            ready=not bool(getattr(self.controller, '_fplc_requires_measured_reset', True)),
+            measurement_stamp=direct.get('direct_ball_stamp_s'), reason=reason)
+
     def _hold_fplc_ball_state(
         self,
         pos: np.ndarray,
@@ -17022,6 +17664,22 @@ class PolicySafetyProbe:
         direct = dict(getattr(self, "fplc_direct_ball_input", {}) or {})
         observed = bool(direct.get("ball_observed", valid))
         propagated = bool(direct.get("ball_state_already_propagated", False))
+        prediction = getattr(self, "last_high_ball_occlusion_info", {}) or {}
+        quality_history = bool(options.ball_source == 'camera'
+            and prediction.get('model') == 'quality_bearing_range_flight')
+        range_expired = False
+        velocity_only_bridge = bool(
+            observed and propagated and not options.use_ball_estimator
+            and prediction.get("positionPredicted") is False
+            and prediction.get("velocityPredicted") is True)
+        # Age the measured backup during a velocity-only bridge as well.
+        # Prediction can preserve this backup, but cannot restart its budget.
+        if self.policy_ball_sample_has_valid and previous_wall is not None:
+            elapsed = now - previous_wall
+            if math.isfinite(elapsed) and elapsed >= 0.0:
+                self.policy_ball_sample_age_s += max(float(self.cfg.control_dt), elapsed)
+            else:
+                self.policy_ball_sample_has_valid = False
         try:
             p = np.asarray(pos, dtype=np.float32).reshape(3)
             v = np.asarray(vel, dtype=np.float32).reshape(3)
@@ -17038,9 +17696,16 @@ class PolicySafetyProbe:
             age_available = age_s is not None or not _is_sensor_ball_source(options.ball_source)
             represented_valid = bool(
                 finite and age_available and math.isfinite(age) and 0.0 <= age <= timeout)
-            self.policy_ball_sample_has_valid = bool(
-                represented_valid and observed and not propagated)
-            if self.policy_ball_sample_has_valid:
+            if represented_valid and quality_history and prediction.get('observationRangeAgeS') is not None:
+                range_age = float(prediction['observationRangeAgeS'])
+                if not math.isfinite(range_age) or range_age < 0.:
+                    represented_valid = False
+                elif range_age > timeout:
+                    represented_valid, range_expired = False, True
+                    age = range_age
+            fresh_direct = bool(represented_valid and observed and not propagated)
+            if fresh_direct:
+                self.policy_ball_sample_has_valid = True
                 previous_stamp = self.policy_ball_sample_source_stamp_s
                 self.policy_ball_sample_pos = p.copy()
                 self.policy_ball_sample_vel = v.copy()
@@ -17051,14 +17716,22 @@ class PolicySafetyProbe:
                 state, accepted = "fresh", True
             elif represented_valid:
                 # Never extend an estimator/predictor's validity budget.
+                if not velocity_only_bridge:
+                    self.policy_ball_sample_has_valid = False
+                else:
+                    self.policy_ball_sample_has_valid = bool(
+                        self.policy_ball_sample_has_valid
+                        and self.policy_ball_sample_age_s <= timeout)
                 state = "represented"
-        elif (not observed and not propagated
+            else:
+                self.policy_ball_sample_has_valid = False
+        elif (not quality_history and not observed and not propagated
                 and _is_sensor_ball_source(options.ball_source)
                 and self.policy_ball_sample_has_valid
                 and previous_wall is not None):
             elapsed = now - previous_wall
             if math.isfinite(elapsed) and elapsed >= 0.0:
-                age = self.policy_ball_sample_age_s + max(float(self.cfg.control_dt), elapsed)
+                age = self.policy_ball_sample_age_s
                 p = self.policy_ball_sample_pos.copy()
                 v = self.policy_ball_sample_vel.copy()
                 self.policy_ball_sample_age_s = age
@@ -17069,6 +17742,8 @@ class PolicySafetyProbe:
             self.policy_ball_sample_has_valid = False
         if not math.isfinite(age) or age < 0.0:
             age = float(getattr(self.cfg, "ball_lost_timeout_s", .6))
+        if range_expired:
+            state = 'expired_range'
         self.last_policy_ball_handover_info = {
             "mode": "fplc_state_hold",
             "state": state,
@@ -17086,7 +17761,31 @@ class PolicySafetyProbe:
         direct["hold_reference_on_dropout"] = bool(
             hold_enabled and represented_valid and not observed
             and _is_sensor_ball_source(options.ball_source))
+        state_rate = float(getattr(options, 'ball_observation_rate_hz', 90.))
+        if state_rate > 90. or quality_history:
+            direct.pop('ball_history_position_m', None)
+            direct.pop('ball_history_age_s', None)
+            direct.pop('ball_history_measurement_age_s', None)
+            direct['ball_observation_rate_hz'] = state_rate
+            # The camera producer owns all fitting. At every selected rate the
+            # actor samples this already-bounded current-time estimate, while
+            # its observation flag and age still describe real measurements.
+            if (represented_valid and options.ball_source == 'camera'
+                    and prediction.get('model') == 'quality_bearing_range_flight'):
+                range_age = prediction.get('observationRangeAgeS')
+                if range_age is not None:
+                    direct['ball_history_position_m'] = p.copy()
+                    # The actor age belongs to the represented position time.
+                    # Preserve the older true range age separately for expiry;
+                    # never present an extrapolation as a new measurement.
+                    direct['ball_history_age_s'] = age
+                    direct['ball_history_measurement_age_s'] = float(range_age)
         self.last_policy_ball_handover_info["referenceHoldEnabled"] = hold_enabled
+        if state_rate > 90. or quality_history:
+            self.last_policy_ball_handover_info['ballStateRateHz'] = state_rate
+            self.last_policy_ball_handover_info['historyUsesPredictedState'] = 'ball_history_position_m' in direct
+            self.last_policy_ball_handover_info['historyMeasurementAgeS'] = direct.get('ball_history_measurement_age_s')
+            self.last_policy_ball_handover_info['historyStateAgeS'] = direct.get('ball_history_age_s')
         self.fplc_direct_ball_input = direct
         return p.copy(), v.copy(), represented_valid, age
 
@@ -17537,6 +18236,18 @@ class PolicySafetyProbe:
         out["ee_abc_vel_rad_s"] = abc_vel
         return out
 
+    def _wait_for_fplc_joint_feedback(self, *, reserve_s: float) -> bool:
+        """Use only this 5 ms tick's spare budget, preserving its next deadline."""
+        wait_for_feedback = getattr(self.ros_bridge, "wait_for_joint_feedback", None)
+        if not callable(wait_for_feedback):
+            return True
+        timeout_s = FPLC_JOINT_FEEDBACK_WAIT_S
+        deadline = getattr(self, "control_tick_deadline_perf", None)
+        if deadline is not None:
+            timeout_s = min(timeout_s, max(
+                0.0, deadline - time.perf_counter() - reserve_s))
+        return bool(wait_for_feedback(timeout_s=timeout_s))
+
     def _joint_feedback_for_policy(
         self,
     ) -> tuple[
@@ -17552,6 +18263,9 @@ class PolicySafetyProbe:
             self.current_policy_joint_sample = None
             self.policy_joint_sample_error = "joint_state_uninitialized"
             return None, None, None, "local_command", None, {}
+        feedback_wait_ok = True
+        if getattr(self, "active_policy_profile", "") in FPLC_PROFILES:
+            feedback_wait_ok = self._wait_for_fplc_joint_feedback(reserve_s=0.003)
         timing_getter = getattr(
             self.ros_bridge,
             "get_joint_feedback_coherent_with_timing",
@@ -17583,6 +18297,8 @@ class PolicySafetyProbe:
         previous = getattr(self, "last_policy_joint_sample", None)
         sample = None
         error = str(timing.get("jointSourceFault", "") or "") or None
+        if not feedback_wait_ok:
+            error = error or "joint_feedback_wait_timeout"
         if (q is None or dq is None or age_s is None
                 or sample_stamp_s is None):
             error = error or "joint_state_uninitialized"
@@ -17621,7 +18337,9 @@ class PolicySafetyProbe:
                         OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
                 *FPLC_PROFILES})
                 maximum_age_s = (
-                    0.010 if strict_feedback_profile else 0.05)
+                    FPLC_JOINT_FEEDBACK_MAX_AGE_S
+                    if getattr(self, "active_policy_profile", "") in FPLC_PROFILES
+                    else 0.010 if strict_feedback_profile else 0.05)
                 error = sample.transition_error(
                     previous,
                     max_receipt_age_s=maximum_age_s,
@@ -17652,6 +18370,10 @@ class PolicySafetyProbe:
         self.current_policy_joint_sample = sample
         self.policy_joint_sample_error = error
         timing["jointSampleControlError"] = error
+        # A rejected sample has no inference trace. Preserve its timing for
+        # this exact tick so recordings still explain the original stop.
+        self.current_policy_joint_feedback_timing = (
+            int(getattr(self, "control_loop_tick", -1)), timing)
         return q, dq, age_s, source, sample_stamp_s, timing
 
     def _joint_velocity_observation_for_policy(
@@ -18898,7 +19620,9 @@ class PolicySafetyProbe:
                 or self.active_policy_profile
                 == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85)
             maximum_feedback_age_s = (
-                0.010
+                FPLC_JOINT_FEEDBACK_MAX_AGE_S
+                if self.active_policy_profile in FPLC_PROFILES
+                else 0.010
                 if self.active_policy_profile in {
                     OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                     OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
@@ -18940,12 +19664,30 @@ class PolicySafetyProbe:
                         })
                 self.last_control_mode = "policy"
                 return "policy_feedback_hold", reason, {}, age_s, False
+            prediction = getattr(self, 'last_high_ball_occlusion_info', {}) or {}
+            continuity_info = self._camera_observation_recovery_decision(valid, age_s, options)
+            if continuity_info['action'] == 'waiting':
+                if getattr(self, 'camera_observation_wait_q', None) is None:
+                    self.camera_observation_wait_q = np.asarray(
+                        arm_q if arm_q is not None else self.controller.current_arm_cmd_q(),
+                        dtype=np.float32).copy()
+                # Hold one measured position, never infer an action from an
+                # invalid ball. The existing publisher and feedback guards
+                # keep their cadence; no Send-off/rearm transition is needed.
+                self._sync_policy_to_safe_pose(self.camera_observation_wait_q)
+                self._mark_policy_paused()
+                self.last_control_mode = 'policy'
+                reason = ('camera observation recovery '
+                          f"({1000*continuity_info['elapsedS']:.1f} ms): {prediction.get('reason', '')}")
+                return 'policy_observation_wait', reason, {}, age_s, False
+            self.camera_observation_wait_q = None
+            continuity_fault = continuity_info['action'] == 'fault'
             if (self.active_policy_profile
                     in {
                         OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85,
                         OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
                 *FPLC_PROFILES}
-                    and (not valid or age_s
+                    and (continuity_fault or not valid or age_s
                          > 0.350)):
                 hold_q = (
                     arm_q if arm_q is not None
@@ -18956,6 +19698,8 @@ class PolicySafetyProbe:
                     f"{self.active_policy_profile} ball state invalid"
                     if not valid else
                     f"{self.active_policy_profile} ball state stale ({age_s:.3f}s)")
+                if continuity_fault and continuity_info.get('elapsedS', 0.) > CameraObservationContinuity.MAX_WAIT_S:
+                    reason = 'camera observation recovery exceeded 200 ms'
                 if options.publish_commands:
                     self._require_publish_rearm(
                         "policy_ball_state_fault")
@@ -18991,7 +19735,7 @@ class PolicySafetyProbe:
                 # Explicitly local, non-publishing probe mode has no encoder
                 # stream.  Use its own coherent command state so smoke/sim
                 # inspection remains possible.  Hardware publication still
-                # takes the mandatory <=10 ms JointState path above.
+                # takes the configured running JointState age gate above.
                 if arm_q is None:
                     arm_q = self.controller.current_arm_cmd_q()
                 if policy_arm_dq is None:
@@ -19838,7 +20582,12 @@ class PolicySafetyProbe:
             # even when the UI switches to simcode6 after another profile was
             # launched with a different experiment-wide camera rate.
             obs_rate = 60.0
-        elif policy_profile in FPLC_PROFILES or policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
+        elif policy_profile in FPLC_PROFILES:
+            obs_rate = (float(self.cfg.ball_observation_rate_hz)
+                        if self.cfg.policy_profile in FPLC_PROFILES else 90.)
+            if obs_rate not in (90., 120., 200.):
+                raise ValueError('FPLC ball state rate must be 90, 120 or 200 Hz')
+        elif policy_profile == OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85:
             obs_rate = 90.0
         elif policy_profile == OBSERVATION_PROFILE_GPU1_QACC_FT_V153:
             obs_rate = 60.0
@@ -20977,6 +21726,41 @@ class PolicySafetyProbe:
     ) -> None:
         if not self.recorder.active:
             return
+        if getattr(self.recorder, "trajectory_only", False):
+            # Reuse the tick's cached FK; do not build joint/action/obs
+            # telemetry or add FK/sensor calls to the 200 Hz command path.
+            trace = getattr(self, "last_policy_execution_trace", None) if policy_executed else None
+            obs = (trace.get("obs") if isinstance(trace, dict) else
+                   getattr(self.controller, "last_obs", None))
+            width = len(obs) if obs is not None else 0
+            racket = obs[52:55] if width in (72, 117, 156) else obs[26:29] if width >= 29 else None
+            if getattr(self, "last_workspace_safety_fk_ok", False):
+                racket = getattr(self, "last_workspace_safety_ee_pos", racket)
+            high = getattr(self, "last_high_ball_occlusion_info", {}) or {}
+            prediction = high if high.get("predicted") else (getattr(self, "last_estimator_info", {}) or {})
+            self.recorder.record_control_sample({
+                "schemaVersion": RECORDING_SCHEMA_VERSION,
+                "sourceSeq": int(source_seq), "sourceTimeS": round(float(source_time_s), 9),
+                "wallTimeS": round(time.time(), 6), "time": round(float(self.now_s), 6),
+                "tick": int(self.control_loop_tick), "mode": str(mode), "ballSource": str(ball_source),
+                "ballObservationSeq": int(ball_observation_seq), "cameraStampS": camera_stamp_s,
+                "ballClockSync": (camera_measurement or {}).get("clockSync", {}),
+                "cameraMeasurement": {key: (camera_measurement or {}).get(key) for key in ("markerId",)},
+                "rawValid": bool(raw_valid), "valid": bool(control_valid), "age": round(float(age_s), 6),
+                "rawBall": _rounded_vector(raw_ball_pos),
+                "measuredBall": _rounded_vector(measured_ball_pos),
+                "measuredVelocity": _rounded_vector(measured_ball_vel),
+                "observedBall": _rounded_vector(observed_ball_pos),
+                "observedVelocity": _rounded_vector(observed_ball_vel),
+                "predictedBall": _point_or_none(prediction.get("positionM")),
+                "predictedVelocity": _point_or_none(prediction.get("velocityMps")),
+                "predictedBallIsPredicted": bool(prediction.get("predicted", False)),
+                "racket": _rounded_vector(racket) if racket is not None else None,
+                "_ballSensorSnapshot": (
+                    self.ros_bridge.ball_sensor_recording_snapshot() if self.ros_bridge is not None else
+                    (None, time.monotonic(), None, None, self.cfg.enable_camera_ball, self.cfg.enable_mocap_ball)),
+            })
+            return
         cmd = self.controller.latest_command_state()
         obs_action = self.controller.latest_obs_and_action()
         trace = (
@@ -21012,7 +21796,7 @@ class PolicySafetyProbe:
             )
             policy_cmd = cmd
         policy_racket = (
-            np.asarray(policy_obs[52:55] if policy_obs.shape[0] in (72, 156) else policy_obs[26:29], dtype=np.float32)
+            np.asarray(policy_obs[52:55] if policy_obs.shape[0] in (72, 117, 156) else policy_obs[26:29], dtype=np.float32)
             if policy_obs.shape[0] >= 29 else None
         )
         estimator_payload = (
@@ -21041,6 +21825,11 @@ class PolicySafetyProbe:
             feedback_timing = (
                 trace.get("jointFeedbackTiming", {})
                 if trace is not None else {})
+            if not feedback_timing:
+                timing_tick, captured_timing = getattr(
+                    self, "current_policy_joint_feedback_timing", (-1, {}))
+                if timing_tick == int(source_seq):
+                    feedback_timing = captured_timing
             for key in (
                 "jointSampleStampS",
                 "jointSampleDtS",
@@ -21055,6 +21844,12 @@ class PolicySafetyProbe:
                 "jointRepeatedSourceSample",
                 "jointSourceFault",
                 "jointSampleControlError",
+                "jointReceiptIntervalS",
+                "jointReceiptMaxIntervalS",
+                "jointReceiptIntervalsOver10ms",
+                "jointFeedbackWaitRecoveries",
+                "jointFeedbackWaitTimeouts",
+                "jointFeedbackLastWait",
             ):
                 ros_light[key] = feedback_timing.get(key)
             joint_sample = getattr(self, "current_policy_joint_sample", None)
@@ -21120,6 +21915,13 @@ class PolicySafetyProbe:
                     self.cfg.done_ball_required_consecutive_ticks),
             },
             "ballSource": str(ball_source),
+            # Cache references only. The writer finishes and validates these
+            # observations at this tick's time in its separate process.
+            "_ballSensorSnapshot": (
+                self.ros_bridge.ball_sensor_recording_snapshot()
+                if self.ros_bridge is not None else
+                (None, time.monotonic(), None, None,
+                 self.cfg.enable_camera_ball, self.cfg.enable_mocap_ball)),
             "rawBall": _rounded_vector(raw_ball_pos),
             "measuredBall": _rounded_vector(measured_ball_pos),
             "measuredVelocity": _rounded_vector(measured_ball_vel),
@@ -21127,10 +21929,10 @@ class PolicySafetyProbe:
             "observedVelocity": _rounded_vector(observed_ball_vel),
             "ballState6D": _float32_vector(
                 np.concatenate((observed_ball_pos, observed_ball_vel))
-                if policy_obs.size in (72, 156) else policy_obs[20:26]),
+                if policy_obs.size in (72, 117, 156) else policy_obs[20:26]),
             "ballStateSource": (
                 "runtime_context_state_not_actor_velocity"
-                if policy_obs.size in (72, 156) else "actor_ball_state_slice"),
+                if policy_obs.size in (72, 117, 156) else "actor_ball_state_slice"),
             "predictedBall": _point_or_none(prediction_payload.get("positionM")),
             "predictedVelocity": _point_or_none(
                 prediction_payload.get("velocityMps")),
@@ -21161,7 +21963,7 @@ class PolicySafetyProbe:
                 None if getattr(self, "current_policy_joint_sample", None) is None
                 else self.current_policy_joint_sample.payload()),
             "policyBallObservation": _float32_vector(
-                policy_obs[28:52] if policy_obs.size in (72, 156) else policy_obs[20:26]),
+                policy_obs[28:52] if policy_obs.size in (72, 117, 156) else policy_obs[20:26]),
             "fplcProjection": dict(getattr(self.controller, "last_projection", {})),
             "policyAction": _rounded_vector(policy_action),
             "policyExecutedAction": _rounded_vector(
@@ -21281,6 +22083,8 @@ class PolicySafetyProbe:
                 self.last_high_ball_occlusion_info),
             "policyBallHandover": dict(
                 self.last_policy_ball_handover_info),
+            "cameraObservationContinuity": dict(
+                getattr(getattr(self, 'camera_observation_continuity', None), 'last_info', {})),
             "releaseGate": dict(self.last_release_gate_info),
             "ros": ros_light,
         }
@@ -21388,6 +22192,8 @@ class PolicySafetyProbe:
                     OBSERVATION_PROFILE_GPU1_QACC_FT_V153,
                 *FPLC_PROFILES}):
             self._reset_policy_ball_sampling_contract()
+        # Hold decisions need this frame's position/velocity provenance.
+        self.last_high_ball_occlusion_info = high_ball_occlusion_info
         self.fplc_direct_ball_input = {
             "direct_ball_position_m": measured_p.copy(),
             "direct_ball_age_s": self._raw_measurement_age_s(valid, ball_stamp_s, options),
@@ -21689,6 +22495,7 @@ class PolicySafetyProbe:
                         policy_measured_p, policy_measured_v,
                         policy_measured_valid, options,
                         measurement_stamp_s=policy_measurement_stamp_s))
+                self.last_high_ball_occlusion_info = high_ball_occlusion_info
                 self.fplc_direct_ball_input = {
                     "direct_ball_position_m": measured_p.copy(),
                     "direct_ball_age_s": self._raw_measurement_age_s(
@@ -22265,6 +23072,8 @@ class PolicySafetyProbe:
                 "measuredHz": round(float(self._control_loop_hz()), 3),
                 "snapshotHz": round(float(self.cfg.backend_snapshot_rate_hz), 3),
                 "workMs": round(float(self._control_loop_work_ms()), 3),
+                "cadence": cadence_summary(tuple(self.control_loop_times)),
+                "policyPublications": cadence_summary(tuple(getattr(self, "policy_publish_intervals", ()))),
                 "overruns": int(self.control_loop_overrun_count),
                 "error": self.control_loop_last_error,
                 "tick": int(self.control_loop_tick),
@@ -22642,7 +23451,10 @@ class PolicySafetyProbe:
             normalize_observation_profile(self.cfg.policy_profile)
         ] = dict(active_compensation_defaults)
         policy_profile_contracts = {
-            str(profile): _policy_runtime_contract(controller)
+            str(profile): {
+                **_policy_runtime_contract(controller),
+                "observationNames": _obs_names(controller._expected_obs_dim),
+            }
             for profile, controller in self.policy_controllers.items()
         }
         margin = 0.18
@@ -22655,6 +23467,17 @@ class PolicySafetyProbe:
             "displayRateHz": self.cfg.display_rate_hz,
             "recording": {
                 "outputRoot": str(self.cfg.recording_output_root),
+                "saveCameraImages": bool(self.cfg.recording_save_camera_images),
+                "trajectoryOnly": bool(self.cfg.recording_trajectory_only),
+                "ballSensorFile": "ball_sensor_samples.jsonl",
+                "ballSensorSources": ["camera", "mocap"],
+                "rawCamera": {
+                    "enabled": bool(getattr(self.cfg, 'enable_raw_camera_recording', False)),
+                    "maxDurationS": float(getattr(self.cfg, 'raw_camera_max_duration_s', 60.)),
+                    "maxPayloadGiB": float(getattr(self.cfg, 'raw_camera_max_gb', 8.)),
+                    "directory": "raw_camera",
+                    "format": "raw-ir-depth-npz-v1",
+                },
                 "analysisRunDir": (
                     None if self.cfg.analysis_run_dir is None
                     else str(self.cfg.analysis_run_dir)),
@@ -23055,6 +23878,7 @@ class PolicySafetyProbe:
                 "udpPort": int(self.cfg.mocap_udp_port),
                 "markerId": int(self.cfg.mocap_marker_id),
                 "markerXLimitsM": getattr(self.cfg, 'mocap_marker_x_limits_m', None),
+                "markerZLimitsM": getattr(self.cfg, 'mocap_marker_z_limits_m', (-1.0, 1.0)),
                 "markerSelectionFrame": "mocap_raw_m",
                 "rigidBodySlot": int(self.cfg.mocap_rigid_body_slot),
                 "rigidBodyId": int(self.cfg.mocap_rigid_body_id),
@@ -23544,7 +24368,9 @@ HTML_TEMPLATE = r"""<!doctype html>
         <button id="liveViewButton" class="nav-button active" type="button">Live</button>
         <button id="analysisViewButton" class="nav-button" type="button">Analysis</button>
         <button id="recordingButton" type="button">Record</button>
-        <label class="mini-check"><input id="analyzeAfterRecord" type="checkbox" checked><span>Analyze</span></label>
+        <label class="mini-check" title="录制相机 JPG 和已启用的原始 IR/深度/RGB；关闭仍保存球观测与控制日志"><input id="saveCameraImages" type="checkbox"><span>保存相机图像</span></label>
+        <label class="mini-check" title="保存球位置、时间、有效性和颠球计数所需的速度/球拍位置；不保存策略观测、动作、关节或仿真日志。图像独立选择。"><input id="recordingTrajectoryOnly" type="checkbox"><span>仅记录球轨迹</span></label>
+        <label class="mini-check"><input id="analyzeAfterRecord" type="checkbox" checked><span>Full analysis</span></label>
         <span id="recordingStatus">idle</span>
       </div>
     </div>
@@ -23755,6 +24581,13 @@ HTML_TEMPLATE = r"""<!doctype html>
           <option value="fplc_gpu0_v161">FPLC GPU0 V161 (156D)</option>
           <option value="fplc_gpu1_v172">FPLC GPU1 V172 (72D)</option>
           <option value="fplc_v220_s17_u839_20261013_r1">FPLC GPU1 V220 S17 u839 (72D)</option>
+          <option value="fplc_gpu1_v223">simcode10 V223 S15 姿态观测 (72D)</option>
+          <option value="fplc_gpu0_v224">simcode10 V224 S14 GPU0 / V223父模型 (117D)</option>
+          <option value="fplc_gpu1_v224">simcode10 V224 S14 GPU1 / V172父模型 (117D)</option>
+          <option value="fplc_gpu1_v274_s9">simcode10 V274 S9 反弹DR (72D)</option>
+          <option value="fplc_gpu1_v274_s11">simcode10 V274 S11 相机AR1 (72D)</option>
+          <option value="fplc_gpu0_v319">simcode10 V319 S17 位置/动量恢复 (72D)</option>
+          <option value="fplc_v321_s4_u2097_20261029_r1">simcode10 V321 S4 u2097 长回合候选 (72D)</option>
         </select>
       </div>
       <div class="row" id="policyModelRow">
@@ -23891,6 +24724,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   </main>
   <section id="analysisView" class="analysis-view hidden">
     <aside class="analysis-menu">
+      <button class="analysis-kind" data-kind="sensorComparison" type="button">Camera / Mocap</button>
       <button class="analysis-kind active" data-kind="camera" type="button">Camera Video</button>
       <button class="analysis-kind" data-kind="trajectory" type="button">3D / 2D Replay</button>
       <button class="analysis-kind" data-kind="ball" type="button">Ball State</button>
@@ -23926,6 +24760,12 @@ HTML_TEMPLATE = r"""<!doctype html>
         </div>
         <div id="analysisReportPane" class="analysis-pane">
           <pre id="analysisNoiseReport" class="analysis-report"></pre>
+        </div>
+        <div id="analysisSensorPlots" class="analysis-pane" style="overflow:auto">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px">
+            <a id="analysisSensorComparisonLink" target="_blank"><img id="analysisSensorComparisonImage" style="width:100%" alt="Camera and motion capture position comparison"></a>
+            <a id="analysisSensorDifferenceLink" target="_blank"><img id="analysisSensorDifferenceImage" style="width:100%" alt="Timestamp aligned camera minus motion capture position differences"></a>
+          </div>
         </div>
       </div>
     </div>
@@ -24003,6 +24843,7 @@ let currentView = 'live';
 let analysisData = null;
 let analysisKind = 'sim2real';
 let analysisDetail = 'overview';
+let analysisSensorPlotRun = '';
 let analysisIndex = 0;
 let analysisPlaying = false;
 let analysisPlayTimer = null;
@@ -24034,6 +24875,21 @@ const analysisViewButtonEl = document.getElementById('analysisViewButton');
 const recordingButtonEl = document.getElementById('recordingButton');
 const recordingStatusEl = document.getElementById('recordingStatus');
 const analyzeAfterRecordEl = document.getElementById('analyzeAfterRecord');
+const saveCameraImagesEl = document.getElementById('saveCameraImages');
+const recordingTrajectoryOnlyEl = document.getElementById('recordingTrajectoryOnly');
+recordingTrajectoryOnlyEl.checked = !!(CONFIG.recording || {}).trajectoryOnly;
+function syncRecordingModeControls() {
+  analyzeAfterRecordEl.disabled = recordingTrajectoryOnlyEl.checked;
+  analyzeAfterRecordEl.title = recordingTrajectoryOnlyEl.checked ? '仅球轨迹模式自动生成轨迹分析' : '';
+  if (!recordingActive) recordingButtonEl.textContent = recordingTrajectoryOnlyEl.checked
+    ? (saveCameraImagesEl.checked ? 'Record 球轨迹 + 图像' : 'Record 仅球轨迹')
+    : (saveCameraImagesEl.checked ? 'Record + 图像' : 'Record 仅数据');
+}
+recordingTrajectoryOnlyEl.addEventListener('change', syncRecordingModeControls);
+saveCameraImagesEl.checked = (CONFIG.recording || {}).saveCameraImages !== false;
+saveCameraImagesEl.addEventListener('change', () => {
+  syncRecordingModeControls();
+});
 const analysisKindEls = Array.from(document.querySelectorAll('.analysis-kind'));
 const analysisSubListEl = document.getElementById('analysisSubList');
 const analysisPlayEl = document.getElementById('analysisPlay');
@@ -24314,6 +25170,8 @@ function setControlDisabled(el, disabled) {
 }
 function syncPolicyModelControl() {
   const fplc = policyProfileEl.value.startsWith('fplc_');
+  if (fplc) inputs.obsHz.value = String((CONFIG.policy?.defaultProfile || '').startsWith('fplc_') ? (CONFIG.defaultBallObservationRateHz || 90) : 90);
+  setControlDisabled(inputs.obsHz, fplc);
   if (fplc) inputs.workspaceSafetyMode.value = 'position';
   setControlDisabled(inputs.workspaceSafetyMode, fplc);
   for (const option of resetInitialPoseEl.options) {
@@ -24325,6 +25183,29 @@ function syncPolicyModelControl() {
   const enabled = policyProfileEl.value === 'gpu0_qvel_real_rmp_v85';
   policyModelEl.disabled = !enabled;
   policyModelRowEl.classList.toggle('disabled', !enabled);
+}
+function syncPolicyObservationControls() {
+  const policy = CONFIG.policy || {};
+  const contract = (policy.profileContracts || {})[policyProfileEl.value] || {};
+  const names = contract.observationNames || policy.observationNames || [];
+  const locked = policyProfileEl.value.startsWith('fplc_');
+  const previousScales = policyObservationScales;
+  const selected = policyObservationScaleTargetEl.value;
+  policyObservationScaleTargetEl.replaceChildren();
+  policyObservationScales = names.map((name, index) => {
+    const option = document.createElement('option');
+    option.value = String(index);
+    option.textContent = `obs[${index}] — ${name}`;
+    policyObservationScaleTargetEl.appendChild(option);
+    return locked ? 1.0 : (previousScales[index] ?? 1.0);
+  });
+  policyObservationScaleTargetEl.value = Number(selected) < names.length ? selected : '0';
+  inputs.policyObservationScaleFactor.value = String(
+    policyObservationScales[Number(policyObservationScaleTargetEl.value)] ?? 1.0);
+  // Observation names remain inspectable; these authenticated actors only
+  // accept unit scales. Rebuild this UI only at initialization/profile change.
+  inputs.policyObservationScaleFactor.disabled = locked;
+  policyObservationScaleResetEl.disabled = locked;
 }
 function setResetInitialPoseOptions() {
   const defaults = CONFIG.resetInitialPoses || {};
@@ -24911,26 +25792,15 @@ function setRuntimeDefaults() {
     policyModelEl.selectedIndex = 0;
   }
   syncPolicyModelControl();
-  const observationNames = Array.isArray(policyDefaults.observationNames)
-    ? policyDefaults.observationNames : [];
-  observationNames.forEach((name, index) => {
-    const option = document.createElement('option');
-    option.value = String(index);
-    option.textContent = `obs[${index}] — ${name}`;
-    policyObservationScaleTargetEl.appendChild(option);
-  });
   const observationScaleDefaults = policyDefaults.observationScale || {};
   const configuredScales = Array.isArray(observationScaleDefaults.scales)
     ? observationScaleDefaults.scales : [];
-  policyObservationScales = observationNames.map((_, index) => {
-    const value = Number(configuredScales[index]);
+  policyObservationScales = configuredScales.map((scale) => {
+    const value = Number(scale);
     return Number.isFinite(value) ? clamp(value, -100, 100) : 1.0;
   });
   policyObservationScaleTargetEl.value = '0';
-  setNumberDefault(
-    inputs.policyObservationScaleFactor,
-    policyObservationScales[0] ?? 1.0,
-    3);
+  syncPolicyObservationControls();
   const compensationDefaults = CONFIG.compensation || {};
   const releaseDefaults = CONFIG.releaseGate || {};
   const estimatorDefaults = CONFIG.ballEstimator || {};
@@ -25150,6 +26020,7 @@ policyProfileEl.addEventListener('change', () => {
   renderJuggleStartControl('disarmed after RL profile change; re-enable Send command explicitly');
   applyCompensationProfileDefaults(policyProfileEl.value);
   syncPolicyModelControl();
+  syncPolicyObservationControls();
   syncEstimatorModeControl();
   drawAll();
 });
@@ -25741,12 +26612,38 @@ function updateRecordingUi(status) {
   recordingButtonEl.classList.toggle('active', recordingActive);
   recordingButtonEl.classList.toggle('busy', recordingBusy);
   recordingButtonEl.disabled = recordingBusy;
-  recordingButtonEl.textContent = recordingActive ? 'Stop' : 'Record';
+  saveCameraImagesEl.disabled = recordingActive || recordingBusy;
+  recordingTrajectoryOnlyEl.disabled = recordingActive || recordingBusy;
+  if (recordingActive && typeof status.trajectoryOnly === 'boolean') recordingTrajectoryOnlyEl.checked = status.trajectoryOnly;
+  if (recordingActive && typeof status.saveCameraImages === 'boolean') saveCameraImagesEl.checked = status.saveCameraImages;
+  recordingButtonEl.textContent = recordingActive ? 'Stop' : (saveCameraImagesEl.checked ? 'Record + 图像' : 'Record 仅数据');
+  syncRecordingModeControls();
   const counts = status.counts || {};
   const pieces = recordingActive
     ? [`rec`, `${counts.control || 0} ctrl`, `${counts.snapshots || 0} snap`, `${counts.frames || 0} img`, `${counts.simFrames || 0} simimg`]
     : ['idle'];
   if (status.dropped) pieces.push(`drop ${status.dropped}`);
+  if (status.juggle) {
+    pieces.push(`颠球 ${status.juggle.count || 0} 次`);
+    if (status.juggle.status === 'no_valid_observations') pieces.push('无有效球观测，无法统计');
+    if (status.juggle.status === 'partial') pieces.push('录制丢帧，计数可能不完整');
+  }
+  const savedImages = status.saveCameraImages ?? saveCameraImagesEl.checked;
+  const trajectoryOnly = status.trajectoryOnly ?? recordingTrajectoryOnlyEl.checked;
+  if (trajectoryOnly) pieces.push('仅球轨迹 + 颠球计数');
+  if (!savedImages) pieces.push(trajectoryOnly ? '相机图像未保存' : '相机图像未保存（保留球观测与控制日志）');
+  if (status.rawCamera && savedImages) {
+    const raw = status.rawCamera;
+    const writer = raw.writer || {};
+    if (!raw.enabled) {
+      pieces.push('原始 IR/深度未开启：当前只保存日志/JPG，不能离线重跑检测');
+    } else {
+      pieces.push(`原始 IR/深度 ${raw.state || 'pending'}: ${writer.written || 0} saved / ${(raw.overwritten || 0) + (raw.poolFull || 0) + (raw.copyErrors || 0) + (raw.unprocessedAtStop || 0)} dropped`);
+      if (recordingActive && !(writer.written > 0)) pieces.push('尚无原始帧落盘');
+    }
+    if (raw.error || writer.error) pieces.push(`raw err ${raw.error || writer.error}`);
+  }
+  recordingStatusEl.style.color = (savedImages && (!status.rawCamera?.enabled || ['error', 'unavailable', 'duration_limit', 'size_limit'].includes(status.rawCamera?.state))) ? '#b45309' : '';
   if (status.error) pieces.push(`err ${status.error}`);
   recordingStatusEl.textContent = pieces.join(' / ');
 }
@@ -25796,6 +26693,7 @@ function analysisCurveSamples() {
 }
 
 function analysisTimelineLength() {
+  if (analysisKind === 'sensorComparison') return 0;
   if (!analysisData) return 0;
   if (analysisKind === 'camera') return (analysisData.frames || []).length;
   if (analysisKind === 'trajectory') return (analysisData.points || []).length;
@@ -25803,9 +26701,11 @@ function analysisTimelineLength() {
 }
 
 function hasAnalysisKindData(kind) {
+  if (kind === 'sensorComparison') return !!((analysisStatus.outputs || {}).ballSensorPositionComparison);
   if (!analysisData) return false;
   if (kind === 'camera') return ((analysisData.frames || []).length > 0);
   if (kind === 'trajectory') return ((analysisData.points || []).length > 0);
+  if (analysisData.metadata?.trajectoryOnly && ['policyInput', 'policyOutput', 'sim2real'].includes(kind)) return false;
   if (kind === 'sim2real') {
     const report = analysisData.simRealComparison || {};
     return ((report.rows || []).length > 0) || Object.keys(report.groups || {}).length > 0;
@@ -25817,7 +26717,7 @@ function hasAnalysisKindData(kind) {
 }
 
 function preferredAnalysisKind() {
-  for (const kind of ['sim2real', 'camera', 'trajectory', 'ball', 'policyInput', 'policyOutput']) {
+  for (const kind of ['sensorComparison', 'sim2real', 'camera', 'trajectory', 'ball', 'policyInput', 'policyOutput']) {
     if (hasAnalysisKindData(kind)) return kind;
   }
   return 'camera';
@@ -25833,6 +26733,7 @@ function setAnalysisIndex(next) {
 }
 
 function analysisPaneFor(kind, detail) {
+  if (kind === 'sensorComparison') return 'sensorComparison';
   if (kind === 'camera') return 'camera';
   if (kind === 'trajectory') return 'trajectory';
   if (kind === 'ball' && detail === 'report') return 'report';
@@ -25847,6 +26748,8 @@ function setAnalysisPanes() {
   analysisTrajectoryPaneEl.classList.toggle('active', pane === 'trajectory');
   analysisCurvePaneEl.classList.toggle('active', pane === 'curve');
   analysisReportPaneEl.classList.toggle('active', pane === 'report');
+  document.getElementById('analysisSensorPlots').classList.toggle('active', pane === 'sensorComparison');
+  analysisPlayEl.disabled = pane === 'sensorComparison';
 }
 
 function stopAnalysisPlayback() {
@@ -26726,12 +27629,27 @@ async function loadAnalysisArtifacts(status) {
   analysisLinksEl.innerHTML = Object.entries(outputs).map(([k, v]) =>
     `<div><a href="${analysisFileUrl(v)}" target="_blank">${k}</a></div>`
   ).join('');
+  if (outputs.ballSensorPositionComparison && analysisSensorPlotRun !== (status.analysisDir || '')) {
+    analysisSensorPlotRun = status.analysisDir || '';
+    setAnalysisKind('sensorComparison');
+  }
 }
 
 function updateAnalysisUi(status) {
   status = status || {};
   analysisStatus = status;
   const outputs = status.outputs || {};
+  for (const [key, name] of [['ballSensorPositionComparison', 'Comparison'], ['ballSensorPositionDifference', 'Difference']]) {
+    if (outputs[key]) {
+      const url = analysisFileUrl(outputs[key]);
+      const imageEl = document.getElementById(`analysisSensor${name}Image`);
+      if (imageEl.dataset.filename !== `${status.analysisDir || ''}/${outputs[key]}`) {
+        imageEl.dataset.filename = `${status.analysisDir || ''}/${outputs[key]}`;
+        imageEl.src = url;
+        document.getElementById(`analysisSensor${name}Link`).href = url;
+      }
+    }
+  }
   const active = !!status.active;
   const hasOutputs = Object.keys(outputs).length > 0;
   analysisViewButtonEl.disabled = !active && !hasOutputs && !status.analysisDir;
@@ -27051,7 +27969,7 @@ async function step() {
       cameraColorFilter: cameraFlowEls.colorFilter.checked && !cameraFlowEls.colorFilter.disabled,
       dt
     };
-    if (recordingActive) {
+    if (recordingActive && !recordingTrajectoryOnlyEl.checked) {
       payload.recordingView = buildRecordingView('sample', false);
     }
     latest = await postJson('/step', payload);
@@ -27148,6 +28066,8 @@ async function step() {
     const simClock = sim.simClock || {};
     const simSyncStatus = sim.sync || {};
     const backendLoop = latest.backendControlLoop || {};
+    const receiverTiming = (ros.jointFeedbackReceiver || {}).cadence || {};
+    const publicationTiming = backendLoop.policyPublications || {};
     const recording = latest.recording || {};
     const recordingCounts = recording.counts || {};
     const wouldDone = latest.wouldDone || {};
@@ -27227,10 +28147,12 @@ async function step() {
 	      `shared racket MPC: N=${runtime.racketMpc?.horizonSteps ?? 'waiting'} wp=${runtime.racketMpc?.positionWeight ?? 'waiting'} wv=${runtime.racketMpc?.velocityWeight ?? 'waiting'} wo=${runtime.racketMpc?.orientationWeight ?? 'waiting'} og=${runtime.racketMpc?.orientationGainS ?? 'waiting'} vmax=${runtime.racketMpc?.maxCartesianSpeedMps ?? 'waiting'}m/s amax=${runtime.racketMpc?.maxCartesianAccelerationMps2 ?? 'waiting'}m/s²`,
 	      `compensation: ${comp.enabled ? `${comp.active ? 'active' : 'inactive'} mode=${comp.mode || 'unknown'} delay=${Number.isFinite(comp.delayMs) ? fmt(comp.delayMs, 1) : 'none'}ms tau=${Number.isFinite(comp.tauS) ? fmt(comp.tauS, 3) : 'none'}s beta=${Number.isFinite(comp.mpcBeta) ? fmt(comp.mpcBeta, 2) : 'none'} maxd=${Number.isFinite(comp.mpcMaxDeltaRad) ? fmt(comp.mpcMaxDeltaRad, 3) : 'none'}${comp.error ? ` error=${comp.error}` : ''}` : 'off'}`,
 	      `backend loop: ${backendLoop.enabled ? `on ${backendLoop.source || 'thread'} target=${fmt(backendLoop.targetHz, 0)}Hz measured=${fmt(backendLoop.measuredHz, 1)}Hz snap=${fmt(backendLoop.snapshotHz, 0)}Hz work=${fmt(backendLoop.workMs, 2)}ms over=${backendLoop.overruns || 0} tick=${backendLoop.tick || 0}` : 'off'}`,
+      ros.enabled ? `joint feedback: ${fmt(receiverTiming.measuredHz, 2)}Hz interval P99=${fmt(receiverTiming.intervalP99Ms, 2)}ms max=${fmt(receiverTiming.maximumIntervalMs, 2)}ms` : null,
+      backendLoop.enabled ? `policy publications: ${fmt(publicationTiming.measuredHz, 2)}Hz interval P99=${fmt(publicationTiming.intervalP99Ms, 2)}ms max=${fmt(publicationTiming.maximumIntervalMs, 2)}ms` : null,
       `send command: selected=${publishCommandsEl.checked && !publishCommandsEl.disabled ? 'on' : 'off'} applied=${runtime.publishCommands === true ? 'on' : 'off'}${latest.commandPublishPending ? ' (PENDING)' : ''}`,
       commandStopDescription(commandRearm, resetRecovery),
       `command rearm: ${commandRearm.required ? `REQUIRED reason=${commandRearm.reason || 'safety_transition'} off_seen=${commandRearm.offSeen ? 'yes; enable manually when safe' : 'pending'}` : 'not-required'}`,
-      `hard stop: ${hardStop.active ? `ACTIVE reason=${hardStop.reason || latest.reason || 'done'} hold=${hardStop.holdSent ? 'sent' : 'pending'} reset-required` : 'off'}`,
+      `hard stop: ${hardStop.active ? `ACTIVE reason=${hardStop.reason || latest.reason || 'done'} hold=${hardStop.holdSent ? 'sent' : (hardStop.holdAttempted ? 'failed' : 'pending')} reset-required` : 'off'}`,
       `soft reset: ${softReset.active ? `ACTIVE reason=${softReset.reason || latest.reason || 'done'} target=${(softReset.targetJointPositionDeg || []).join(',')}deg operator-reset-required` : 'off'}`,
       `reset recovery: ${resetRecovery.active ? `ACTIVE reason=${resetRecovery.reason || 'reset'} trajectory=${resetRecovery.commandTrajectoryComplete ? 'complete' : (resetRecovery.trackingPaused ? 'paused-for-feedback' : 'moving')} settled=${resetRecovery.settled ? 'yes' : 'no'} policy_arm=${resetRecovery.policyArmRequired ? 'fresh-send-required' : (resetRecovery.rearmRequired ? 'fault-rearm-required' : 'not-required')}` : 'off'}`,
       backendLoop.enabled ? `active policy: ${fmt((backendLoop.policyTiming || {}).activePolicyHz, 1)}Hz; projection=${(((latest.runtime || {}).policyContract || {}).fplc || {}).projectionRuntime?.backend || 'n/a'}; cyclic GC=${(backendLoop.cyclicGC || {}).automaticDeferred ? 'deferred until Send off' : 'default'}` : null,
@@ -27242,6 +28164,8 @@ async function step() {
       `predictive: horizon=${Number.isFinite(runtime.donePredictionHorizonS) ? fmt(runtime.donePredictionHorizonS, 3) : fmt(readNumber(inputs.donePredictionHorizonS, 0.12, 0, 0.5), 3)}s dt=${Number.isFinite(runtime.donePredictionDtS) ? fmt(runtime.donePredictionDtS, 3) : fmt(readNumber(inputs.donePredictionDtS, 0.01, 0.001, 0.1), 3)}s margin=${Number.isFinite(runtime.donePredictionMarginM) ? fmt(runtime.donePredictionMarginM, 3) : fmt(readNumber(inputs.donePredictionMarginM, 0.02, 0, 0.15), 3)}m ori=${Number.isFinite(runtime.donePredictionOrientationMarginRad) ? fmt(runtime.donePredictionOrientationMarginRad, 3) : fmt(readNumber(inputs.donePredictionOrientationMarginRad, 0.035, 0, 0.5), 3)}rad`,
       `ball source: ${latest.ballSource || ballSourceEl.value}`,
       mocap.enabled ? `mocap: marker_YY=${Number.isFinite(mocap.markerId) ? mocap.markerId : readInt(inputs.mocapMarkerId, (CONFIG.mocapBall && CONFIG.mocapBall.markerId) ?? 1, 0, 999)} / ${mocap.detected ? 'detected' : (mocap.ready === false ? 'not-ready' : 'lost')} clock=${mocap.clockSync && mocap.clockSync.ready ? 'synced' : ((mocap.clockSync && mocap.clockSync.status) || 'waiting')} age=${Number.isFinite(mocap.measurementAgeS) ? fmt(mocap.measurementAgeS) : 'none'}s udp=${mocap.udpHost || '?'}:${mocap.udpPort || '?'}` : null,
+      mocap.enabled && mocap.udp ? `mocap UDP: recv=${mocap.udp.received_count ?? 0} decoded=${mocap.udp.decoded_count ?? 0} accepted=${mocap.udp.accepted_count ?? 0} parse_errors=${mocap.udp.parse_error_count ?? 0} filtered=${mocap.udp.selection_reject_count ?? 0} clock_rejected=${mocap.udp.clock_reject_count ?? 0} status=${mocap.udp.status || 'waiting'} source=${(mocap.udp.last_packet_addr || []).join(':') || 'none'} bytes=${mocap.udp.last_packet_bytes ?? 0}` : null,
+      mocap.enabled && mocap.markerSelection ? `mocap selection: ${mocap.markerSelection.status || 'waiting'} candidates=${mocap.markerSelection.eligible_marker_count ?? 0}/${mocap.markerSelection.total_marker_count ?? 0} z_rejected=${mocap.markerSelection.z_rejected_marker_count ?? 0}` : null,
       `camera: ${camera.enabled ? `${cameraSource} / ${camera.cameraInfoReceived ? 'info' : 'no-info'} / ${camera.detectorReady ? 'detector' : 'no-detector'} / ${camera.detected ? 'detected' : 'lost'} age=${Number.isFinite(camera.ageS) ? fmt(camera.ageS) : 'none'}s hz=${Number.isFinite(camera.callbackHz) ? fmt(camera.callbackHz, 1) : '0.0'} frame=${camera.frame || 'none'}` : 'off'}`,
       camera.enabled ? `camera path: ${cameraPath}` : null,
       camera.enabled ? `camera flow: detect=${camRt.detect ? 'on' : 'off'} overlay=${camRt.visualize ? 'on' : 'off'} yolo=${camRt.yolo ? 'on' : 'off'} sensorDepth=${sensorDepthOn ? 'on' : 'off'} centerDepth=${camRt.sensorSurfaceToCenterDepth ? 'on' : 'off'} depthMode=${camRt.depthMode || 'sensor'} velocity=${camRt.physicsConstrainedVelocity ? 'physics' : (camRt.velocityLeastSquares ? 'LS' : 'endpoint')}N${camRt.velocityWindowFrames ?? 3} clearLoss=${camRt.clearBuffersOnDetectionLoss ? 'on' : 'off'} motionGate=${camRt.motionConsistencyGate ? 'on' : 'off'} impactReset=${camRt.impactVelocityReset ? 'on' : 'off'} undistort=${camRt.undistort ? 'on' : 'off'} rgbKF=${camRt.kalman ? 'on' : 'off'} pixelKF=${camRt.pixelKalman ? 'on' : 'off'} candidate=${camRt.candidateFilter ? 'on' : 'off'} ellipse=${camRt.ellipseFit ? 'on' : 'off'} tracker=${camRt.temporalTracker ? 'on' : 'off'} color=${camRt.colorFilter ? 'on' : 'off'} frames=${camera.frameCount || 0} det=${camera.detectionCount || 0} vizHz=${Number.isFinite(camera.visualizationRateHz) ? fmt(camera.visualizationRateHz, 0) : '30'} web=${camera.webMaxWidth || 'full'}px/q${camera.webJpegQuality || 62}` : null,
@@ -27326,11 +28250,13 @@ recordingButtonEl.addEventListener('click', async () => {
     const path = wasRecording ? '/recording/stop' : '/recording/start';
     const kind = wasRecording ? 'stop' : 'start';
     const status = await postJson(path, {
-      view: buildRecordingView(kind, true),
+      view: recordingTrajectoryOnlyEl.checked ? null : buildRecordingView(kind, true),
+      saveCameraImages: saveCameraImagesEl.checked,
+      trajectoryOnly: recordingTrajectoryOnlyEl.checked,
       analyze: wasRecording && analyzeAfterRecordEl.checked
     });
     updateRecordingUi(status);
-    if (wasRecording && analyzeAfterRecordEl.checked) {
+    if (wasRecording && (recordingTrajectoryOnlyEl.checked || analyzeAfterRecordEl.checked)) {
       setAppView('analysis');
       refreshAnalysisStatus();
     }
@@ -27543,9 +28469,11 @@ def _control_subprocess_main(
             from pingpong_controller.probe_timing import ProbeStageTimings
             stage_timings = ProbeStageTimings(
                 probe, os.environ["PROBE_STAGE_TIMINGS_PATH"])
+        startup_config = probe.browser_config()
+        startup_config_pending = True
         _queue_replace_latest(status_q, {
             "kind": "config",
-            "config": probe.browser_config(),
+            "config": startup_config,
             "snapshot": probe.latest_snapshot_payload,
         })
         status_period_s = 1.0 / max(float(cfg.backend_snapshot_rate_hz), 1e-6)
@@ -27616,6 +28544,13 @@ def _control_subprocess_main(
                     pending_cmds.append(cmd)
             for cmd in pending_cmds:
                 kind = str(cmd.get("kind", ""))
+                if kind in {"step", "reset"}:
+                    # A first HTTP command also proves the parent received
+                    # config if its explicit ACK was coalesced in command_q.
+                    startup_config_pending = False
+                if kind == "config_ack":
+                    startup_config_pending = False
+                    continue
                 if kind == "stop":
                     shutdown_requested.set()
                     return
@@ -27644,9 +28579,13 @@ def _control_subprocess_main(
             if now >= next_status_wall:
                 snapshot = probe.latest_snapshot_payload
                 if snapshot is not None:
+                    # The status queue coalesces to one item. Until the parent
+                    # acknowledges startup, replacing its first config with a
+                    # snapshot must retain the configuration in that item.
                     _queue_replace_latest(status_q, {
-                        "kind": "snapshot",
+                        "kind": "config" if startup_config_pending else "snapshot",
                         "snapshot": snapshot,
+                        **({"config": startup_config} if startup_config_pending else {}),
                     })
                 next_status_wall = now + status_period_s
 
@@ -27771,6 +28710,7 @@ class ControlSubprocessProxy:
         next_notice_wall = start_wall + 15.0
         while time.time() < deadline:
             if self.latest_config is not None:
+                _queue_replace_latest(self.command_q, {"kind": "config_ack"})
                 return
             if self.last_error is not None:
                 raise RuntimeError(
@@ -28824,7 +29764,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SIMCODE8_POLICY_XML)
     p.add_argument("--robot-xml-path", type=Path, default=DEFAULT_ROBOT_XML)
     p.add_argument(
-        "--policy-obs-dim", type=int, choices=(50, 57, 67, 72, 156), default=67)
+        "--policy-obs-dim", type=int, choices=(50, 57, 67, 72, 117, 156), default=67)
     p.add_argument(
         "--reset-initial-pose",
         default=RESET_INITIAL_POSE_DEFAULT,
@@ -29379,6 +30319,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Max rate for high-frequency compact control samples; <=0 disables them.",
     )
     p.add_argument(
+        "--save-camera-images",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        dest="recording_save_camera_images",
+        help="Save camera JPG and enabled raw IR/depth/RGB during Record; browser can override per run.",
+    )
+    p.add_argument(
+        "--recording-trajectory-only",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Record ball trajectories and bounce-count evidence; omit policy, joint and simulation telemetry.",
+    )
+    p.add_argument(
         "--recording-image-rate-hz",
         type=finite_float,
         default=30.0,
@@ -29658,6 +30611,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--mocap-marker-x-limits-m", default=None,
         help="Select the unique UDP marker with raw mocap X in MIN,MAX meters; empty disables selection.")
     p.add_argument(
+        "--mocap-marker-z-limits-m", default="-1.0,1.0",
+        help="Exclude raw mocap scatter points outside Z=MIN,MAX meters before ball selection.")
+    p.add_argument(
         "--mocap-rigid-body-slot",
         type=int,
         default=None,
@@ -29710,6 +30666,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--disable-camera-subprocess", action="store_true",
         help="Run direct RealSense processing in the control process for diagnostics.")
+    p.add_argument('--enable-raw-camera-recording', action='store_true',
+        help='Best-effort raw IR/depth/RGB sidecar, follows recording start/stop; requires camera subprocess.')
+    p.add_argument('--raw-camera-max-duration-s', type=finite_float, default=60.,
+        help='Maximum raw recording duration per session; raw recording stops first.')
+    p.add_argument('--raw-camera-max-gb', type=finite_float, default=8.,
+        help='Bound raw image payload per recording (GiB); no impact on ordinary logs.')
     p.add_argument(
         "--disable-hybrid-detector",
         action="store_true",
@@ -29820,6 +30782,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Start with temporal-median depth instead of synchronized depth.",
     )
     p.set_defaults(use_synchronized_ir_depth=False)
+    p.add_argument(
+        "--enable-depth-assisted-ir", action="store_true",
+        help="Recover missed IR balls using same-frame stereo support; "
+             "opt-in shared online/offline detector path.")
     p.add_argument(
         "--use-pixel-kalman", action="store_true",
         help="Enable the hybrid detector's IR-pixel Kalman filter.")
@@ -29937,6 +30903,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def config_from_args(args: argparse.Namespace) -> ProbeConfig:
+    if bool(args.enable_raw_camera_recording) and (
+            args.disable_camera_subprocess or args.camera_source_mode != 'direct_realsense'):
+        raise ValueError('Raw camera recording requires direct_realsense in the camera subprocess')
     model_path = args.model_path.expanduser().resolve()
     simcode2_model_path = args.simcode2_model_path.expanduser().resolve()
     simcode2_policy_xml = args.simcode2_policy_xml_path.expanduser().resolve()
@@ -30391,6 +31360,8 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         recording_output_root=args.recording_output_root.expanduser().resolve(),
         recording_control_rate_hz=min(
             500.0, max(0.0, float(args.recording_control_rate_hz))),
+        recording_save_camera_images=bool(args.recording_save_camera_images),
+        recording_trajectory_only=bool(args.recording_trajectory_only),
         recording_image_rate_hz=min(
             120.0, max(0.0, float(args.recording_image_rate_hz))),
         recording_analysis_video_fps=min(
@@ -30489,6 +31460,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         mocap_calibration_path=str(args.mocap_calibration_path),
         mocap_marker_id=int(args.mocap_marker_id),
         mocap_marker_x_limits_m=parse_limits(args.mocap_marker_x_limits_m),
+        mocap_marker_z_limits_m=parse_limits(args.mocap_marker_z_limits_m),
         mocap_rigid_body_slot=int(mocap_rigid_body_slot),
         mocap_rigid_body_id=int(args.mocap_rigid_body_id),
         mocap_rigid_body_name=str(args.mocap_rigid_body_name),
@@ -30506,6 +31478,9 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
             1e-4, float(args.mocap_velocity_window_max_span_s)),
         camera_source_mode=str(args.camera_source_mode),
         camera_subprocess=not bool(args.disable_camera_subprocess),
+        enable_raw_camera_recording=bool(args.enable_raw_camera_recording),
+        raw_camera_max_duration_s=max(.1, float(args.raw_camera_max_duration_s)),
+        raw_camera_max_gb=max(.001, float(args.raw_camera_max_gb)),
         use_hybrid_detector=not bool(args.disable_hybrid_detector),
         use_depth_sensor=not bool(args.disable_depth_sensor),
         image_width=max(1, int(args.image_width)),
@@ -30572,6 +31547,7 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         use_kalman=bool(args.use_kalman),
         use_ir_depth_kalman=bool(args.use_ir_depth_kalman),
         use_synchronized_ir_depth=bool(args.use_synchronized_ir_depth),
+        enable_depth_assisted_ir=bool(args.enable_depth_assisted_ir),
         use_pixel_kalman=bool(args.use_pixel_kalman),
         pixel_kalman_process_noise_pos=max(
             0.0, float(args.pixel_kalman_process_noise_pos)),

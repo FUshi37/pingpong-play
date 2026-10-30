@@ -1,0 +1,20 @@
+{
+  "sampleCount": 10000,
+  "originalControlBytes": 260207978,
+  "trajectoryBytes": 17873660,
+  "reductionPercent": 93.13,
+  "bounceCountFull": 26,
+  "bounceCountTrajectory": 26,
+  "export": {
+    "sampleCount": 10000,
+    "plotSampleCount": 251,
+    "maxPlotSamples": 256,
+    "plotStride": 40,
+    "fullResolutionFile": "ball_trajectory.csv",
+    "reading": "streaming_two_pass"
+  },
+  "exportPythonPeakMiB": 1.73,
+  "scope": "Offline first 10000 saved samples; no hardware commands; preview capped at 256 for memory measurement",
+  "regressionTestsPassed": 315,
+  "productionMaxPlotSamples": 8000
+}

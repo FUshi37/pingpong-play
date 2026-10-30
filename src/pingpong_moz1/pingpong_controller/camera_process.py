@@ -81,6 +81,9 @@ def camera_worker(cfg_values, input_queue, state_queue, frame_queue, stop, paren
     previous_sample = previous_frame = None
     sync_request = 0
     previous_revision = -1
+    raw_request = None
+    racket_kinematics = None
+    racket_model_id = None
     try:
         source._init_direct_realsense_camera_source()
         replace_latest(state_queue, {'kind': 'ready'})
@@ -93,11 +96,26 @@ def camera_worker(cfg_values, input_queue, state_queue, frame_queue, stop, paren
                     break
             if pending is not None:
                 clock.receiver.anchor = pending['clockAnchor']
+                spec = pending.get('racketModel')
+                if spec is not None and spec['id'] != racket_model_id:
+                    from pingpong_controller.ball_racket_context import RacketKinematics
+                    offset = [getattr(cfg,k,0.) for k in ('sim_cartesian_x_offset_m',
+                        'sim_cartesian_y_offset_m','sim_base_height_m')]
+                    racket_kinematics = RacketKinematics(spec,offset)
+                    racket_model_id = spec['id']
+                if racket_kinematics is not None:
+                    source.set_camera_racket_context(*racket_kinematics.evaluate(pending.get('racketFeedback')))
                 if pending['syncRequest'] != sync_request:
                     source.resynchronize_camera_clock()
                     sync_request = pending['syncRequest']
                 changed = pending.get('revision') != previous_revision
                 previous_revision = pending.get('revision')
+                requested = pending.get('rawRecording')
+                if requested != raw_request:
+                    raw_request = requested
+                    recorder = source.raw_camera_recorder
+                    if recorder is not None:
+                        recorder.set_session(requested, source.raw_camera_metadata)
                 options = pending.get('options') if changed else None
                 if options is not None:
                     options = CameraRuntimeOptions(**options)
@@ -116,13 +134,27 @@ def camera_worker(cfg_values, input_queue, state_queue, frame_queue, stop, paren
             if key != previous_sample:
                 with source.camera_lock:
                     pos, vel, valid, feedback = source.camera_ball_state()
+                    recording_sync = source.latest_camera_clock_sync
                     packet = {
                         'kind': 'sample', 'position': pos, 'velocity': vel,
+                        'racketModelId': racket_model_id,
+                        'rawRecording': (source.raw_camera_recorder.status()
+                            if source.raw_camera_recorder is not None else
+                            {'state': 'unavailable' if getattr(cfg,'enable_raw_camera_recording',False) else 'disabled',
+                             'metadata': source.raw_camera_metadata}),
                         'valid': valid, 'feedback': feedback,
                         'observationWallS': source.latest_camera_wall,
                         'frameStatus': source.camera_control_frame_status(),
                         'rotation': source.camera_frame_rotation(),
                         'syncRequest': sync_request,
+                        'recording': (
+                            (source.camera_recording_packet[0], sync_request,
+                             source.camera_recording_packet[2])
+                            if source.camera_recording_packet is not None
+                            and source.camera_recording_packet[1] == (
+                                source.camera_clock.generation,
+                                recording_sync.get('epoch'), bool(recording_sync.get('ready')))
+                            else None),
                     }
                 sent = replace_latest(state_queue, packet)
                 if sent:
@@ -150,6 +182,9 @@ class CameraProcess:
         self._pump_stop = threading.Event()
         self._ready = threading.Event()
         self._pending = {}
+        self._raw_directory = None
+        self._racket_source = None
+        self.racket_context_error = None
         self._revision = 0
         self._sample = None
         self._frame = None
@@ -182,10 +217,24 @@ class CameraProcess:
                 revision = self._revision
                 try:
                     pending = dict(self._pending, clockAnchor=receiver_clock_anchor(self.receiver_clock),
-                                   syncRequest=self.sync_request, revision=revision)
+                                   syncRequest=self.sync_request, revision=revision,
+                                   rawRecording=self._raw_directory)
+                    racket_source = self._racket_source
+                    if racket_source is not None:
+                        spec, reader = racket_source
+                        if self._sample is None or self._sample.get('racketModelId') != spec['id']:
+                            pending['racketModel'] = spec
+                        try:
+                            pending['racketFeedback'] = reader()
+                            self.racket_context_error = None
+                        except Exception as exc:
+                            # A failed context read only invalidates contact
+                            # geometry; camera frame delivery keeps running.
+                            pending['racketFeedback'] = None
+                            self.racket_context_error = str(exc)
                     if replace_latest(self.input_queue, pending):
                         sent_revision = revision
-                        next_clock = now + .01
+                        next_clock = now + (.008 if racket_source is not None else .01)
                 except ValueError:
                     # Discard an imprecise anchor and retry, never relabel a
                     # delayed clock read as the time of this sensor frame.
@@ -223,6 +272,21 @@ class CameraProcess:
         self._pending = {**self._pending, 'options': asdict(options)}
         self._revision += 1
 
+    def set_racket_context_source(self, spec, reader):
+        """Configure outside the control tick; pump reads, worker computes FK."""
+        self._racket_source = (spec,reader)
+        self._revision += 1
+
+    def set_raw_recording(self, directory):
+        # Keep the persistent request separate from frequently replaced viz
+        # dictionaries so a concurrent visualization update cannot lose Stop.
+        self._raw_directory = directory
+        self._revision += 1
+
+    def raw_recording_status(self):
+        sample = self._sample
+        return {} if sample is None else sample.get('rawRecording', {})
+
     def resynchronize(self):
         self.sync_request += 1
         self._revision += 1
@@ -235,6 +299,13 @@ class CameraProcess:
 
     def measurement(self):
         return self._measurement(self._sample)
+
+    def recording_snapshot(self):
+        # No process.is_alive()/sensor polling or vector copies on the
+        # control thread. The pump reports worker exits via self.error.
+        sample = self._sample
+        return (None if sample is None else sample.get('recording'),
+                self.error, self.closed, self.sync_request, .5)
 
     def _measurement(self, sample):
         if sample is None:
@@ -290,6 +361,7 @@ class CameraProcess:
             except Exception:
                 feedback['measurementAgeS'] = None
         feedback['cameraProcess'] = {'enabled': True, 'alive': self.process.is_alive(), 'pid': self.process.pid}
+        feedback['rawRecording'] = self.raw_recording_status()
         if self.error:
             feedback.update(detected=False, ready=False, error=self.error)
         pos, vel, valid, _, _ = self._measurement(sample)

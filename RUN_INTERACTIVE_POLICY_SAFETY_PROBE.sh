@@ -11,11 +11,62 @@ case "${PROBE_CONFIG_ONLY:-false}" in
     *) echo "ERROR: PROBE_CONFIG_ONLY must be true/false or 1/0" >&2; exit 2 ;;
 esac
 
+# Ball-state history refresh: 90 (current default), 120 or 200 Hz.
+# Camera capture remains REALSENSE_FPS=90; higher camera state rates sample
+# the existing v1.4 prediction at the 200 Hz control ticks. No extra timer.
+# Examples: ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh --ball-state-rate-hz 120
+#           BALL_OBSERVATION_RATE_HZ=200 ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+_PROBE_EXTRA_ARGS=()
+while (( $# )); do
+    case "$1" in
+        --ball-state-rate-hz|--ball-observation-rate-hz)
+            if (( $# < 2 )); then
+                echo "ERROR: $1 requires 90, 120 or 200" >&2; exit 2
+            fi
+            BALL_OBSERVATION_RATE_HZ="$2"
+            shift 2
+            ;;
+        --ball-state-rate-hz=*|--ball-observation-rate-hz=*)
+            BALL_OBSERVATION_RATE_HZ="${1#*=}"
+            shift
+            ;;
+        --save-camera-images) PROBE_RECORDING_SAVE_CAMERA_IMAGES=true; shift ;;
+        --no-save-camera-images) PROBE_RECORDING_SAVE_CAMERA_IMAGES=false; shift ;;
+        --recording-trajectory-only) PROBE_RECORDING_TRAJECTORY_ONLY=true; shift ;;
+        --no-recording-trajectory-only) PROBE_RECORDING_TRAJECTORY_ONLY=false; shift ;;
+        *) _PROBE_EXTRA_ARGS+=("$1"); shift ;;
+    esac
+done
+set -- "${_PROBE_EXTRA_ARGS[@]}"
+
+# Applies to both visualization JPGs and raw IR/depth/RGB during Record.
+# Long runs: ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh --no-save-camera-images
+# The browser checkbox can override this default for each recording.
+PROBE_RECORDING_SAVE_CAMERA_IMAGES="${PROBE_RECORDING_SAVE_CAMERA_IMAGES:-true}"
+case "${PROBE_RECORDING_SAVE_CAMERA_IMAGES,,}" in
+    true|1|yes) PROBE_RECORDING_SAVE_CAMERA_IMAGES=true ;;
+    false|0|no) PROBE_RECORDING_SAVE_CAMERA_IMAGES=false ;;
+    *) echo "ERROR: PROBE_RECORDING_SAVE_CAMERA_IMAGES must be true/false or 1/0" >&2; exit 2 ;;
+esac
+
+# Ball trajectories and bounce counts, without policy/joint/simulation logs.
+PROBE_RECORDING_TRAJECTORY_ONLY="${PROBE_RECORDING_TRAJECTORY_ONLY:-false}"
+case "${PROBE_RECORDING_TRAJECTORY_ONLY,,}" in
+    true|1|yes) PROBE_RECORDING_TRAJECTORY_ONLY=true ;;
+    false|0|no) PROBE_RECORDING_TRAJECTORY_ONLY=false ;;
+    *) echo "ERROR: PROBE_RECORDING_TRAJECTORY_ONLY must be true/false or 1/0" >&2; exit 2 ;;
+esac
+
 WORKSPACE_DIR="${WORKSPACE_DIR:-/home/spirit-ai/pingpong_moz1}"
 PROBE_SCRIPT="$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/tools/interactive_policy_safety_probe.py"
 POLICY_RELEASE_VALIDATOR="$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/policy_release_manifest.py"
 POLICY_RELEASE_MANIFEST="${POLICY_RELEASE_MANIFEST:-$WORKSPACE_DIR/config/policy_release_manifest.json}"
 POLICY_RELEASE_ID="${POLICY_RELEASE_ID:-fplc_gpu1_v172}"
+# simcode10: fplc_gpu1_v223 (72D), fplc_gpu0_v224/fplc_gpu1_v224 (117D),
+# fplc_gpu1_v274_s9/fplc_gpu1_v274_s11 (72D), fplc_gpu0_v319 (72D).
+# V321 S4/u2097 (72D): POLICY_RELEASE_ID=fplc_v321_s4_u2097_20261029_r1
+# Select with POLICY_RELEASE_ID; model/XML/schema are resolved together from
+# the authenticated contracts. simcode10/COLCON_IGNORE excludes the snapshot.
 SETUP_FILE="${SETUP_FILE:-$WORKSPACE_DIR/install/setup.bash}"
 CONFIG_DONE_MONITORING_YAML="${CONFIG_DONE_MONITORING_YAML:-$WORKSPACE_DIR/config_done_monitoring.yaml}"
 LOAD_CONFIG_DONE_MONITORING="${LOAD_CONFIG_DONE_MONITORING:-true}"
@@ -50,6 +101,22 @@ ENABLE_BALL_STATE_ESTIMATOR="${ENABLE_BALL_STATE_ESTIMATOR:-false}"
 RESET_INITIAL_POSE="${RESET_INITIAL_POSE:-default_2_horizontal}"
 RESET_VELOCITY_LIMIT_DEG_S="${RESET_VELOCITY_LIMIT_DEG_S:-15.0}"
 RESET_ACCELERATION_LIMIT_DEG_S2="${RESET_ACCELERATION_LIMIT_DEG_S2:-40.0}"
+FPLC_JOINT_FEEDBACK_MAX_AGE_MS="${FPLC_JOINT_FEEDBACK_MAX_AGE_MS:-15}"
+if ! python3 - "$FPLC_JOINT_FEEDBACK_MAX_AGE_MS" <<'PY'
+import math
+import sys
+try:
+    value = float(sys.argv[1])
+    if not math.isfinite(value) or not 10.0 <= value <= 20.0:
+        raise ValueError('feedback age outside supported range')
+except ValueError:
+    print("ERROR: FPLC_JOINT_FEEDBACK_MAX_AGE_MS must be between 10 and 20", file=sys.stderr)
+    raise SystemExit(2)
+PY
+then
+    exit 2
+fi
+export FPLC_JOINT_FEEDBACK_MAX_AGE_MS
 
 # Load supported safety parameters before applying the remaining built-in
 # defaults below. For variables not seeded by the launch profile above,
@@ -607,11 +674,19 @@ if [[ ! "$PROBE_CONTROL_RT_PRIORITY" =~ ^[0-9]+$ ]] || (( 10#$PROBE_CONTROL_RT_P
     exit 2
 fi
 export PROBE_CONTROL_RT_PRIORITY
+PROBE_JOINT_RT_PRIORITY="${PROBE_JOINT_RT_PRIORITY:-1}"
+if [[ ! "$PROBE_JOINT_RT_PRIORITY" =~ ^[0-9]+$ ]] || (( 10#$PROBE_JOINT_RT_PRIORITY > 20 )); then
+    echo "ERROR: PROBE_JOINT_RT_PRIORITY must be an integer from 0 to 20" >&2
+    exit 2
+fi
+export PROBE_JOINT_RT_PRIORITY
 PROBE_DISPLAY_RATE_HZ="${PROBE_DISPLAY_RATE_HZ:-60.0}"
 PROBE_RECORDING_OUTPUT_ROOT="${PROBE_RECORDING_OUTPUT_ROOT:-$WORKSPACE_DIR/src/pingpong_moz1/pingpong_controller/outputs/interactive_recordings}"
 ANALYSIS="${ANALYSIS:-false}"
 ANALYSIS_RUN_DIR="${ANALYSIS_RUN_DIR:-}"
 PROBE_RECORDING_CONTROL_RATE_HZ="${PROBE_RECORDING_CONTROL_RATE_HZ:-200.0}"
+# Browser Record captures both enabled ball sensors at this rate, regardless
+# of the selected control source. See docs/probe_ball_sensor_recording.md.
 PROBE_RECORDING_IMAGE_RATE_HZ="${PROBE_RECORDING_IMAGE_RATE_HZ:-60.0}"
 PROBE_RECORDING_ANALYSIS_VIDEO_FPS="${PROBE_RECORDING_ANALYSIS_VIDEO_FPS:-60.0}"
 PROBE_RECORDING_QUEUE_SIZE="${PROBE_RECORDING_QUEUE_SIZE:-4096}"
@@ -701,6 +776,9 @@ BALL_ESTIMATOR_Q_DEPTH_VEL_MULT="${BALL_ESTIMATOR_Q_DEPTH_VEL_MULT:-0.20}"
 BALL_ESTIMATOR_R_LATERAL_MM="${BALL_ESTIMATOR_R_LATERAL_MM:-25.0}"
 BALL_ESTIMATOR_R_DEPTH_MM="${BALL_ESTIMATOR_R_DEPTH_MM:-90.0}"
 ENABLE_HIGH_BALL_OCCLUSION_PREDICTION="${ENABLE_HIGH_BALL_OCCLUSION_PREDICTION:-true}"
+# With this switch enabled, high-band gaps use a fixed-gravity fit (>=5 real
+# samples, <=4 mm residual) and <=200 ms extrapolation. The longer paper-model
+# limit below still applies to the separate low-height depth/IR-edge paths.
 ENABLE_SENSOR_DEPTH_ANOMALY_PREDICTION="${ENABLE_SENSOR_DEPTH_ANOMALY_PREDICTION:-true}"
 HIGH_BALL_PREDICTION_HISTORY_FRAMES="${HIGH_BALL_PREDICTION_HISTORY_FRAMES:-10}"
 HIGH_BALL_PREDICTION_ACTIVATION_Z_M="${HIGH_BALL_PREDICTION_ACTIVATION_Z_M:-1.42}"
@@ -753,10 +831,11 @@ case "${ENABLE_MOCAP_BALL,,}" in
 esac
 MOCAP_UDP_HOST="${MOCAP_UDP_HOST:-0.0.0.0}"
 MOCAP_UDP_PORT="${MOCAP_UDP_PORT:-65501}"
-MOCAP_CALIBRATION_PATH="${MOCAP_CALIBRATION_PATH:-$WORKSPACE_DIR/mocap_calibration.txt}"
+MOCAP_CALIBRATION_PATH="${MOCAP_CALIBRATION_PATH:-$WORKSPACE_DIR/mocap_calibration_auto.txt}"
 MOCAP_MARKER_ID="${MOCAP_MARKER_ID:-1}"
 # Filter all scatter points in the original mocap frame before calibration.
 MOCAP_MARKER_X_LIMITS_M="${MOCAP_MARKER_X_LIMITS_M:--2.0,2.0}"
+MOCAP_MARKER_Z_LIMITS_M="${MOCAP_MARKER_Z_LIMITS_M:--1.0,1.0}"
 MOCAP_RIGID_BODY_ID="${MOCAP_RIGID_BODY_ID:-1}"
 MOCAP_RIGID_BODY_SLOT="${MOCAP_RIGID_BODY_SLOT:-$MOCAP_RIGID_BODY_ID}"
 MOCAP_RIGID_BODY_NAME="${MOCAP_RIGID_BODY_NAME:-}"
@@ -789,6 +868,14 @@ MOCAP_VELOCITY_WINDOW_FRAMES="${MOCAP_VELOCITY_WINDOW_FRAMES:-3}"
 MOCAP_VELOCITY_WINDOW_MAX_SPAN_S="${MOCAP_VELOCITY_WINDOW_MAX_SPAN_S:-0.05}"
 CAMERA_SOURCE_MODE="${CAMERA_SOURCE_MODE:-direct_realsense}"
 CAMERA_SUBPROCESS="${CAMERA_SUBPROCESS:-true}"
+ENABLE_RAW_CAMERA_RECORDING="${ENABLE_RAW_CAMERA_RECORDING:-true}"
+RAW_CAMERA_MAX_DURATION_S="${RAW_CAMERA_MAX_DURATION_S:-60}"
+RAW_CAMERA_MAX_GB="${RAW_CAMERA_MAX_GB:-8}"
+case "${ENABLE_RAW_CAMERA_RECORDING,,}" in
+    true|1) ENABLE_RAW_CAMERA_RECORDING=true ;;
+    false|0) ENABLE_RAW_CAMERA_RECORDING=false ;;
+    *) echo "ERROR: ENABLE_RAW_CAMERA_RECORDING must be true/false or 1/0" >&2; exit 2 ;;
+esac
 case "${CAMERA_SUBPROCESS,,}" in
     true|1) CAMERA_SUBPROCESS=true ;;
     false|0) CAMERA_SUBPROCESS=false ;;
@@ -850,7 +937,8 @@ DETECTOR_HALF="${DETECTOR_HALF:-false}"
 # these values only set their initial states.
 USE_KALMAN="${USE_KALMAN:-false}"
 USE_IR_DEPTH_KALMAN="${USE_IR_DEPTH_KALMAN:-false}"
-USE_SYNCHRONIZED_IR_DEPTH="${USE_SYNCHRONIZED_IR_DEPTH:-false}"
+USE_SYNCHRONIZED_IR_DEPTH="${USE_SYNCHRONIZED_IR_DEPTH:-true}"
+ENABLE_DEPTH_ASSISTED_IR="${ENABLE_DEPTH_ASSISTED_IR:-true}"
 CAMERA_TILT_DEG="${CAMERA_TILT_DEG:-50.33}"
 USE_UNDISTORT="${USE_UNDISTORT:-true}"
 ENABLE_ELLIPSE_FIT="${ENABLE_ELLIPSE_FIT:-true}"
@@ -894,6 +982,7 @@ fi
 echo "[ProbeConfig] workspace mode=$WORKSPACE_SAFETY_MODE ee_x=$DONE_EE_X_LIMITS_M ee_y=$DONE_EE_Y_LIMITS_M ee_z=$DONE_EE_Z_LIMITS_M"
 echo "[ProbeConfig] non-FPLC workspace ee_x=$_PROBE_BASE_EE_X_LIMITS_M ee_y=$_PROBE_BASE_EE_Y_LIMITS_M ee_z=$_PROBE_BASE_EE_Z_LIMITS_M"
 echo "[ProbeConfig] policy_thread_realtime_priority=$PROBE_CONTROL_RT_PRIORITY (SCHED_RR with child inheritance reset; only policy thread; 0=benchmark opt-out)"
+echo "[ProbeConfig] joint_feedback=dedicated_executor queue_depth=1 realtime_priority=$PROBE_JOINT_RT_PRIORITY FPLC_running_max_age=${FPLC_JOINT_FEEDBACK_MAX_AGE_MS}ms arm_hold_max_age=10ms jitter_wait_cap=5ms (current_tick_budget_only; running_max_age+5ms absolute_wait_bound)"
 case "$WORKSPACE_SAFETY_MODE" in
     *_soft)
         echo "[ProbeConfig] workspace safety=hard_envelope terminal_action=reset_joint_pose_on_any_done pose_source=joint_state_fk reset_initial_pose=$RESET_INITIAL_POSE"
@@ -905,6 +994,7 @@ esac
 echo "[ProbeConfig] predictive=$DONE_ENABLE_PREDICTIVE_STOP horizon=${DONE_PREDICTION_HORIZON_S}s dt=${DONE_PREDICTION_DT_S}s margin=${DONE_PREDICTION_MARGIN_M}m ori_margin=${DONE_PREDICTION_ORIENTATION_MARGIN_RAD}rad done_monitoring=$ENABLE_DONE_MONITORING"
 echo "[ProbeConfig] ball estimator=$ENABLE_BALL_STATE_ESTIMATOR backend=$BALL_ESTIMATOR_BACKEND prediction=$BALL_ESTIMATOR_ENABLE_PREDICTION output=$BALL_ESTIMATOR_CONTROL_OUTPUT_MODE"
 echo "[ProbeConfig] high-FOV prediction=$ENABLE_HIGH_BALL_OCCLUSION_PREDICTION model=IROS2249 N=$HIGH_BALL_PREDICTION_HISTORY_FRAMES activation_z=${HIGH_BALL_PREDICTION_ACTIVATION_Z_M}m min_up_vz=${HIGH_BALL_PREDICTION_MIN_UPWARD_VELOCITY_M_S}m/s max=${HIGH_BALL_PREDICTION_MAX_PREDICTION_S}s stop_z=${HIGH_BALL_PREDICTION_STOP_Z_M}m drag=${HIGH_BALL_PREDICTION_DRAG_COEFFICIENT_PER_M}/m"
+echo "[ProbeConfig] high-band gap=$ENABLE_HIGH_BALL_OCCLUSION_PREDICTION model=fixed-gravity apex>=1.40m seed/stop>=1.35m fit<=4mm max<=0.20s; predicted samples do not refill history"
 echo "[ProbeConfig] adaptive depth-fault 3D prediction=$ENABLE_SENSOR_DEPTH_ANOMALY_PREDICTION"
 echo "[ProbeConfig] reacquisition velocity handover=$ENABLE_HIGH_BALL_REACQUISITION_VELOCITY_HANDOVER frames=$HIGH_BALL_REACQUISITION_VELOCITY_FRAMES blend=${HIGH_BALL_REACQUISITION_VELOCITY_BLEND_S}s"
 echo "[ProbeConfig] observation chain clear_loss=$ENABLE_CAMERA_CLEAR_BUFFERS_ON_LOSS motion_gate=$ENABLE_CAMERA_MOTION_CONSISTENCY_GATE physics_velocity=$ENABLE_CAMERA_PHYSICS_CONSTRAINED_VELOCITY position_smoothing=$ENABLE_CAMERA_TRAJECTORY_POSITION_SMOOTHING impact_reset=$CAMERA_IMPACT_VELOCITY_RESET time_comp=$ENABLE_CAMERA_CONTROL_TIME_COMPENSATION reacq_smooth=$ENABLE_CAMERA_REACQUISITION_SMOOTHING optimized_prediction_init=$ENABLE_OPTIMIZED_BALL_PREDICTION_INITIAL_STATE"
@@ -921,6 +1011,9 @@ echo "[ProbeConfig] sim mirror=$ENABLE_SIM_MIRROR backend=$SIM_BACKEND (simcode4
 echo "[ProbeConfig] sim compensation_preset=$COMPENSATION_PRESET mode=$COMPENSATION_MODE delay=${COMP_DELAY_MS}ms tau=${COMP_ACTUATOR_TAU_S}s gain=$COMP_ACTUATOR_GAIN beta=$COMP_MPC_BETA tau_scale=$COMP_MPC_TAU_SCALE horizon=$COMP_MPC_HORIZON_STEPS weights=${COMP_MPC_TRACKING_WEIGHT}/${COMP_MPC_NOMINAL_WEIGHT}/${COMP_MPC_DELTA_WEIGHT} max_delta=${COMP_MPC_MAX_DELTA_RAD}rad"
 echo "[ProbeConfig] real-only compensation delay=${REAL_COMP_DELAY_MS}ms tau=${REAL_COMP_ACTUATOR_TAU_S}s gain=$REAL_COMP_ACTUATOR_GAIN beta=$REAL_COMP_MPC_BETA delay_scale=$REAL_COMP_MPC_DELAY_SCALE tau_scale=$REAL_COMP_MPC_TAU_SCALE horizon=$REAL_COMP_MPC_HORIZON_STEPS weights=${REAL_COMP_MPC_TRACKING_WEIGHT}/${REAL_COMP_MPC_NOMINAL_WEIGHT}/${REAL_COMP_MPC_DELTA_WEIGHT} max_delta=$REAL_COMP_MPC_MAX_DELTA_RAD parameter_target=real"
 echo "[ProbeConfig] policy observation=${POLICY_OBS_DIM}D ball_refresh=${BALL_OBSERVATION_RATE_HZ}Hz release_verified=true valid_frame_age=$RL_USE_VALID_BALL_OBS_AGE joint_feedback=atomic_measured_q_dq"
+if [[ "$POLICY_PROFILE" == fplc_* ]]; then
+    echo "[ProbeConfig] ball_state_rate=${BALL_OBSERVATION_RATE_HZ}Hz choices=90/120/200 camera_capture=${REALSENSE_FPS}Hz control=${CONTROL_RATE_HZ}Hz camera_fill=v1.4_prediction sampler=fractional_control_ticks age=original_measurement"
+fi
 echo "[ProbeConfig] policy dq_mode=$POLICY_DQ_MODE coherence=$([ "$POLICY_DQ_MODE" = raw_coherent ] && echo coherent || echo incoherent_legacy_ablation) adapter=$ENABLE_POLICY_DQ_ADAPTER allow_incoherent=$ALLOW_INCOHERENT_DQ_ABLATION impact_limit=$INCOHERENT_DQ_ABLATION_MAX_IMPACTS dq_obs_scale=$POLICY_DQ_OBSERVATION_SCALE"
 if [[ "$POLICY_PROFILE" == fplc_* ]]; then
     echo "[ProbeConfig] FPLC persistent_qref=true horizon=10s projection=training_24_sweeps training_roll_pitch=2deg real_roll_pitch=${FPLC_REAL_ROLL_PITCH_LIMITS_DEG}deg yaw=free reset=simcode9_native_XY_surface_Z_follow_IK safety_intervention=measured_hold_disarm_history_reset"
@@ -929,6 +1022,9 @@ echo "[ProbeConfig] command safety limiter=hard-disabled all_paths=true independ
 echo "[ProbeConfig] plant_matcher mode=$POLICY_PLANT_MATCHER_MODE apply_allowed=$ALLOW_POLICY_PLANT_MATCHER_APPLY real_config=$POLICY_PLANT_MATCHER_REAL_CONFIG"
 echo "[ProbeConfig] ball_handover mode=$POLICY_BALL_HANDOVER_MODE"
 echo "[ProbeConfig] camera=${CAMERA_SOURCE_MODE} ${IMAGE_WIDTH}x${IMAGE_HEIGHT}@${REALSENSE_FPS}Hz yolo=${ENABLE_YOLO} candidate_filter=${ENABLE_HYBRID_CANDIDATE_FILTER} visualization=${ENABLE_CAMERA_VISUALIZATION}@${CAMERA_VISUALIZATION_RATE_HZ}Hz"
+echo "[ProbeConfig] raw_camera_recording=${ENABLE_RAW_CAMERA_RECORDING} max_duration_s=${RAW_CAMERA_MAX_DURATION_S} max_payload_gib=${RAW_CAMERA_MAX_GB}"
+echo "[ProbeConfig] recording save_camera_images=${PROBE_RECORDING_SAVE_CAMERA_IMAGES} (JPG + raw IR/depth/RGB; browser can override per run) juggle_count=writer_summary"
+echo "[ProbeConfig] recording trajectory_only=${PROBE_RECORDING_TRAJECTORY_ONLY} (ball positions + count evidence; no policy obs/actions/joints/sim logs)"
 echo "[ProbeConfig] camera depth_mode=$CAMERA_DEPTH_MODE surface_to_center=$ENABLE_SENSOR_SURFACE_TO_CENTER_DEPTH depth_sync=$USE_SYNCHRONIZED_IR_DEPTH median_frames=$DEPTH_TEMPORAL_WINDOW_FRAMES velocity_ls=$CAMERA_VELOCITY_LEAST_SQUARES velocity_frames=$CAMERA_VELOCITY_WINDOW_FRAMES impact_reset=$CAMERA_IMPACT_VELOCITY_RESET"
 if [ "$ENABLE_CAMERA_BALL" = "true" ]; then
     echo "[ProbeConfig] camera timestamp_sync=required capture_clock=RealSense_or_ROS_header receiver_clock=ROS min_samples=8 min_span=0.05s switch_resync=required unsynchronized_observation=invalid"
@@ -936,7 +1032,8 @@ fi
 echo "[ProbeConfig] contact_action_shield=$ENABLE_CONTACT_ACTION_SHIELD window=${CONTACT_SHIELD_PRE_CONTACT_WINDOW_S}/${CONTACT_SHIELD_POST_CONTACT_WINDOW_S}s normal_xy=$CONTACT_SHIELD_MAX_NORMAL_LATERAL lateral_speed=${CONTACT_SHIELD_MAX_LATERAL_SPEED_M_S}m/s workspace_margin=${CONTACT_SHIELD_WORKSPACE_MARGIN_M}m"
 echo "[ProbeConfig] vertical_contact_energy_shield=$ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD pre=${VERTICAL_CONTACT_PRE_CONTACT_WINDOW_S}s target_apex_delta=${VERTICAL_CONTACT_TARGET_APEX_HEIGHT_M}m restitution=$VERTICAL_CONTACT_RESTITUTION hard_racket_vz=${VERTICAL_CONTACT_MAX_RACKET_UPWARD_SPEED_M_S}m/s"
 echo "[ProbeConfig] mocap=${ENABLE_MOCAP_BALL} udp=${MOCAP_UDP_HOST}:${MOCAP_UDP_PORT} ball_marker=${MOCAP_MARKER_ID} rb_slot=${MOCAP_RIGID_BODY_SLOT} rb_id=${MOCAP_RIGID_BODY_ID} calibration=${MOCAP_CALIBRATION_PATH}"
-echo "[ProbeConfig] mocap ball_selection=unique_raw_X_in_range x_limits_m=${MOCAP_MARKER_X_LIMITS_M} frame=mocap_raw_m"
+echo "[ProbeConfig] recording ball_sensors=camera:${ENABLE_CAMERA_BALL},mocap:${ENABLE_MOCAP_BALL} rate=${PROBE_RECORDING_CONTROL_RATE_HZ}Hz file=ball_sensor_samples.jsonl trigger=browser_Record control_read=cache_references formatting=sensor_producer_and_writer"
+echo "[ProbeConfig] mocap ball_selection=unique_raw_XZ_in_range x_limits_m=${MOCAP_MARKER_X_LIMITS_M} z_limits_m=${MOCAP_MARKER_Z_LIMITS_M} frame=mocap_raw_m"
 if [ "$ENABLE_MOCAP_BALL" = "true" ]; then
     echo "[ProbeConfig] mocap timestamp_sync=required receiver_clock=ROS min_samples=$MOCAP_CLOCK_SYNC_MIN_SAMPLES min_span=${MOCAP_CLOCK_SYNC_MIN_SPAN_S}s window=${MOCAP_CLOCK_SYNC_WINDOW_S}s unsynchronized_observation=invalid"
 else
@@ -1147,6 +1244,20 @@ fi
 if [ "$CAMERA_SUBPROCESS" = "false" ]; then
     FLOW_ARGS+=(--disable-camera-subprocess)
 fi
+if [ "$PROBE_RECORDING_SAVE_CAMERA_IMAGES" = "false" ]; then
+    FLOW_ARGS+=(--no-save-camera-images)
+fi
+if [ "$PROBE_RECORDING_TRAJECTORY_ONLY" = "true" ]; then
+    FLOW_ARGS+=(--recording-trajectory-only)
+fi
+if [ "$ENABLE_RAW_CAMERA_RECORDING" = "true" ]; then
+    if [ "$CAMERA_SUBPROCESS" != "true" ]; then
+        echo "ERROR: raw camera recording requires CAMERA_SUBPROCESS=true" >&2
+        exit 2
+    fi
+    FLOW_ARGS+=(--enable-raw-camera-recording --raw-camera-max-duration-s "$RAW_CAMERA_MAX_DURATION_S" --raw-camera-max-gb "$RAW_CAMERA_MAX_GB")
+    echo "[ProbeConfig] raw recording enabled: follows Record/Stop, bounded shared memory, best-effort drop, max ${RAW_CAMERA_MAX_DURATION_S}s / ${RAW_CAMERA_MAX_GB}GiB"
+fi
 if [ "$PROBE_CONTROL_SUBPROCESS" = "true" ]; then
     FLOW_ARGS+=(--control-subprocess --backend-control-loop)
 fi
@@ -1201,6 +1312,9 @@ if [ "$USE_SYNCHRONIZED_IR_DEPTH" = "true" ]; then
     CAMERA_ARGS+=(--use-synchronized-ir-depth)
 else
     CAMERA_ARGS+=(--disable-synchronized-ir-depth)
+fi
+if [ "$ENABLE_DEPTH_ASSISTED_IR" = "true" ]; then
+    CAMERA_ARGS+=(--enable-depth-assisted-ir)
 fi
 if [ "$ENABLE_SENSOR_SURFACE_TO_CENTER_DEPTH" = "true" ]; then
     CAMERA_ARGS+=(--enable-sensor-surface-to-center-depth)
@@ -1584,6 +1698,7 @@ exec python3 "$PROBE_SCRIPT" \
     --mocap-calibration-path "$MOCAP_CALIBRATION_PATH" \
     --mocap-marker-id "$MOCAP_MARKER_ID" \
     --mocap-marker-x-limits-m="$MOCAP_MARKER_X_LIMITS_M" \
+    --mocap-marker-z-limits-m="$MOCAP_MARKER_Z_LIMITS_M" \
     --mocap-rigid-body-slot "$MOCAP_RIGID_BODY_SLOT" \
     --mocap-rigid-body-id "$MOCAP_RIGID_BODY_ID" \
     --mocap-rigid-body-name "$MOCAP_RIGID_BODY_NAME" \

@@ -2,6 +2,7 @@
 """Motion capture ball detector - receives ball state via UDP."""
 
 from collections import deque
+import errno
 import json
 import re
 import socket
@@ -445,19 +446,36 @@ def parse_mocap_objects(
     return out
 
 
-def _validate_marker_x_limits(limits):
+def _validate_marker_limits(limits, axis):
     if limits is None:
         return None
     values = np.asarray(limits, dtype=np.float64)
     if (values.shape != (2,) or not np.all(np.isfinite(values))
             or values[0] >= values[1]):
-        raise ValueError('Mocap marker X limits must be a finite increasing pair')
+        raise ValueError(f'Mocap marker {axis} limits must be a finite increasing pair')
     return (float(values[0]), float(values[1]))
 
 
+def _validate_marker_x_limits(limits):
+    return _validate_marker_limits(limits, 'X')
+
+
+def _marker_in_limits(position_m, x_limits, z_limits):
+    return bool(np.all(np.isfinite(position_m))
+                and (x_limits is None or x_limits[0] <= float(position_m[0]) <= x_limits[1])
+                and (z_limits is None or z_limits[0] <= float(position_m[2]) <= z_limits[1]))
+
+
+def _marker_limits_info(x_limits, z_limits):
+    return dict(x_min_m=None if x_limits is None else x_limits[0],
+                x_max_m=None if x_limits is None else x_limits[1],
+                z_min_m=None if z_limits is None else z_limits[0],
+                z_max_m=None if z_limits is None else z_limits[1])
+
+
 def _parse_x_filtered_marker_frame(payload, *, marker_id, limits,
-                                   position_unit, timestamp_unit):
-    """Select one raw mocap point, independently of its changing field index.
+                                   position_unit, timestamp_unit, z_limits=None):
+    """Select one raw point within the X/Z ranges, independent of field index.
 
     A missing/ambiguous observation still carries frame timing, but its
     position must never enter the measurement or velocity history.
@@ -495,21 +513,25 @@ def _parse_x_filtered_marker_frame(payload, *, marker_id, limits,
         timestamp_unit)
     eligible = []
     total = 0
+    z_rejected = 0
     for candidate, index in candidates:
         position = _extract_position(candidate, index)
         if position is None:
             continue
         total += 1
         scale = _scale_for_unit(position, position_unit)
-        position_m = (position * scale).astype(np.float32)
-        if not limits[0] <= float(position_m[0]) <= limits[1]:
+        position_m = position * scale
+        if z_limits is not None and not z_limits[0] <= float(position_m[2]) <= z_limits[1]:
+            z_rejected += 1
+        if not _marker_in_limits(position_m, limits, z_limits):
             continue
         velocity = _extract_velocity(candidate, index)
-        eligible.append((index, position_m,
+        eligible.append((index, position_m.astype(np.float32),
                          None if velocity is None else (velocity * scale).astype(np.float32)))
     selected = len(eligible) == 1
-    info = dict(enabled=True, frame='mocap_raw_m', x_min_m=limits[0], x_max_m=limits[1],
+    info = dict(enabled=True, frame='mocap_raw_m', **_marker_limits_info(limits, z_limits),
                 total_marker_count=total, eligible_marker_count=len(eligible),
+                z_rejected_marker_count=z_rejected,
                 selected_marker_id=eligible[0][0] if selected else None,
                 status=('selected' if selected else
                         'no_candidate' if not eligible else 'ambiguous_candidates'),
@@ -529,7 +551,8 @@ def parse_mocap_packet(data: bytes,
                        rigid_body_id: Optional[int] = None,
                        position_unit: str = 'auto',
                        timestamp_unit: str = 's',
-                       marker_x_limits_m: Optional[Tuple[float, float]] = None) -> Optional[MocapPacket]:
+                       marker_x_limits_m: Optional[Tuple[float, float]] = None,
+                       marker_z_limits_m: Optional[Tuple[float, float]] = None) -> Optional[MocapPacket]:
     """Parse one UDP packet from the mocap system.
 
     Supported formats:
@@ -540,8 +563,9 @@ def parse_mocap_packet(data: bytes,
         {"opti_rb_0_px": ..., "opti_rb_0_qw": ..., "opti_rb_1_id": 1, ...}
       - Generic JSON marker lists and legacy binary <d6f>.
 
-    When marker_x_limits_m is set, select the unique scatter point whose X
-    lies in this inclusive range in meters, before robot-frame calibration.
+    When X or Z limits are set, select the unique scatter point inside all
+    configured inclusive ranges in meters, before robot-frame calibration.
+    Rigid-body pose parsing is independent of the scatter-point filters.
     """
     if not data:
         return None
@@ -585,10 +609,11 @@ def parse_mocap_packet(data: bytes,
             if packet is not None:
                 return packet
 
-        if marker_x_limits_m is not None:
+        if marker_x_limits_m is not None or marker_z_limits_m is not None:
             return _parse_x_filtered_marker_frame(
                 payload, marker_id=marker_id,
                 limits=_validate_marker_x_limits(marker_x_limits_m),
+                z_limits=_validate_marker_limits(marker_z_limits_m, 'Z'),
                 position_unit=position_unit, timestamp_unit=timestamp_unit)
 
         marker_payloads = list(
@@ -641,10 +666,12 @@ def parse_mocap_packet(data: bytes,
             source_format='json',
             raw=payload)
 
-    if len(data) >= _BINARY_PACKET_SIZE:
+    # The legacy <d6f> datagram is exactly 32 bytes. Do not reinterpret an
+    # unknown text/protocol packet as ball coordinates just because it is long.
+    if len(data) == _BINARY_PACKET_SIZE:
         try:
             values = struct.unpack(
-                _BINARY_PACKET_FORMAT, data[:_BINARY_PACKET_SIZE])
+                _BINARY_PACKET_FORMAT, data)
         except struct.error:
             return None
         pos = np.array([values[1], values[2], values[3]], dtype=np.float64)
@@ -657,14 +684,15 @@ def parse_mocap_packet(data: bytes,
             timestamp_s=_normalize_timestamp(values[0], timestamp_unit),
             source_format='binary_d6f',
             raw={})
-        if marker_x_limits_m is not None:
+        if marker_x_limits_m is not None or marker_z_limits_m is not None:
             limits = _validate_marker_x_limits(marker_x_limits_m)
-            eligible = bool(np.all(np.isfinite(packet.position_m))
-                            and limits[0] <= float(packet.position_m[0]) <= limits[1])
+            z_limits = _validate_marker_limits(marker_z_limits_m, 'Z')
+            eligible = _marker_in_limits(pos * scale, limits, z_limits)
             packet.tracked = eligible
             packet.marker_selection_info = dict(
-                enabled=True, frame='mocap_raw_m', x_min_m=limits[0], x_max_m=limits[1],
+                enabled=True, frame='mocap_raw_m', **_marker_limits_info(limits, z_limits),
                 total_marker_count=1, eligible_marker_count=int(eligible), selected_marker_id=None,
+                z_rejected_marker_count=int(z_limits is not None and not z_limits[0] <= float(pos[2] * scale) <= z_limits[1]),
                 status='selected' if eligible else 'no_candidate', frame_idx=None)
         return packet
 
@@ -698,7 +726,8 @@ class MocapBallDetector:
                  clock_sync_min_samples: int = 8,
                  clock_sync_min_span_s: float = 0.05,
                  clock_sync_window_s: float = 10.0,
-                 marker_x_limits_m: Optional[Tuple[float, float]] = None):
+                 marker_x_limits_m: Optional[Tuple[float, float]] = None,
+                 marker_z_limits_m: Optional[Tuple[float, float]] = (-1.0, 1.0)):
         """Initialize mocap ball detector.
 
         Args:
@@ -710,6 +739,8 @@ class MocapBallDetector:
             marker_id: Marker index used by marker_<id>_px/py/pz JSON fields.
             marker_x_limits_m: Optional inclusive X range in raw mocap meters;
                 selects the unique in-range point instead of a fixed index.
+            marker_z_limits_m: Inclusive raw mocap Z range in meters; defaults
+                to [-1, 1] to exclude contaminated scatter points before selection.
             object_kind: marker / opti_rb / auto.
             rigid_body_slot: OptiTrack slot Y in opti_rb_Y_* fields.
             rigid_body_id: OptiTrack id YY in opti_rb_YY_id.
@@ -741,6 +772,7 @@ class MocapBallDetector:
         self.position_unit = str(position_unit or 'auto')
         self.timestamp_unit = str(timestamp_unit or 's')
         self.marker_x_limits_m = _validate_marker_x_limits(marker_x_limits_m)
+        self.marker_z_limits_m = _validate_marker_limits(marker_z_limits_m, 'Z')
         self.velocity_alpha = min(max(float(velocity_alpha), 0.0), 1.0)
         self.max_velocity_m_s = float(max_velocity_m_s)
         self.velocity_window_frames = max(1, int(velocity_window_frames))
@@ -777,6 +809,19 @@ class MocapBallDetector:
         self._last_marker_selection = {}
         self._packet_count = 0
         self._parse_error_count = 0
+        # Count socket receipts separately from accepted ball observations.
+        # A filtered/unsynchronized stream is still a working UDP connection.
+        self._udp_received_count = 0
+        self._decoded_packet_count = 0
+        self._selection_reject_count = 0
+        self._clock_reject_count = 0
+        self._receiver_error_count = 0
+        self._receive_status = 'waiting_for_udp'
+        self._last_udp_monotonic_s = None
+        self._last_udp_addr = None
+        self._last_udp_size = None
+        self._last_udp_preview = None
+        self._last_receiver_error = None
         self._velocity_reject_count = 0
         self._velocity_window_reject_count = 0
         self._velocity_time_source = None
@@ -824,7 +869,9 @@ class MocapBallDetector:
         try:
             self._last_start_error = None
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Unicast UDP is delivered to one matching socket, not broadcast
+            # to every receiver. Reusing this port can silently steal packets
+            # from another probe instance; fail explicitly instead.
             self._socket.bind((self.udp_host, self.udp_port))
             self._socket.settimeout(1.0)  # 1s timeout for blocking recv
             print(
@@ -834,6 +881,9 @@ class MocapBallDetector:
         except Exception as e:
             self._last_start_error = e
             print(f"[MocapBallDetector] Failed to open UDP socket: {e}")
+            if isinstance(e, OSError) and e.errno == errno.EADDRINUSE:
+                print('[MocapBallDetector] UDP port already occupied; '
+                      'stop the other mocap receiver before starting this one')
             if self._socket is not None:
                 self._socket.close()
                 self._socket = None
@@ -866,6 +916,13 @@ class MocapBallDetector:
                 arrival_monotonic_s = time.monotonic()
                 arrival_clock_s = self._receiver_clock()
                 arrival_time_s = time.time()
+                with self._lock:
+                    self._udp_received_count += 1
+                    self._last_udp_monotonic_s = arrival_monotonic_s
+                    self._last_udp_addr = addr
+                    self._last_udp_size = len(data)
+                    self._last_udp_preview = data[:512].decode('utf-8', errors='replace')
+                    self._receive_status = 'received'
 
                 packet = parse_mocap_packet(
                     data,
@@ -875,24 +932,36 @@ class MocapBallDetector:
                     rigid_body_id=self.rigid_body_id,
                     position_unit=self.position_unit,
                     timestamp_unit=self.timestamp_unit,
-                    marker_x_limits_m=self.marker_x_limits_m)
+                    marker_x_limits_m=self.marker_x_limits_m,
+                    marker_z_limits_m=self.marker_z_limits_m)
                 if packet is None:
                     with self._lock:
                         self._parse_error_count += 1
-                        if self.marker_x_limits_m is not None:
+                        self._receive_status = 'parse_failed'
+                        if self.marker_x_limits_m is not None or self.marker_z_limits_m is not None:
                             self._latest_observation_valid = False
+                    callback = getattr(self, 'recording_callback', None)
+                    if callback is not None:
+                        callback()
                     continue
 
                 self.process_packet(
                     packet, arrival_clock_s=arrival_clock_s,
                     arrival_monotonic_s=arrival_monotonic_s,
                     arrival_wall_s=arrival_time_s, addr=addr)
+                callback = getattr(self, 'recording_callback', None)
+                if callback is not None:
+                    callback()
 
             except socket.timeout:
                 # No packet received within timeout - this is fine
                 continue
             except Exception as e:
                 if self._running:
+                    with self._lock:
+                        self._receiver_error_count += 1
+                        self._last_receiver_error = str(e)
+                        self._receive_status = 'receiver_error'
                     print(f"[MocapBallDetector] Receiver error: {e}")
                 continue
 
@@ -901,19 +970,26 @@ class MocapBallDetector:
                        addr=None) -> bool:
         """Accept one observation atomically; late/repeated frames stay held."""
         with self._lock:
-            if self.marker_x_limits_m is not None and packet.marker_selection_info is None:
+            self._decoded_packet_count += 1
+            limits_info = _marker_limits_info(self.marker_x_limits_m, self.marker_z_limits_m)
+            selection_matches = (packet.marker_selection_info is not None
+                                 and all(packet.marker_selection_info.get(key) == value
+                                         for key, value in limits_info.items()))
+            if ((self.marker_x_limits_m is not None or self.marker_z_limits_m is not None)
+                    and packet.source_format != 'optitrack_opti_rb' and not selection_matches):
                 if packet.source_format == 'json':
                     packet = _parse_x_filtered_marker_frame(
                         packet.raw, marker_id=self.marker_id, limits=self.marker_x_limits_m,
+                        z_limits=self.marker_z_limits_m,
                         position_unit=self.position_unit, timestamp_unit=self.timestamp_unit)
                 else:
-                    eligible = bool(np.all(np.isfinite(packet.position_m))
-                                    and self.marker_x_limits_m[0] <= float(packet.position_m[0])
-                                    <= self.marker_x_limits_m[1])
+                    eligible = _marker_in_limits(packet.position_m, self.marker_x_limits_m,
+                                                 self.marker_z_limits_m)
                     packet.marker_selection_info = dict(
-                        enabled=True, frame='mocap_raw_m',
-                        x_min_m=self.marker_x_limits_m[0], x_max_m=self.marker_x_limits_m[1],
+                        enabled=True, frame='mocap_raw_m', **limits_info,
                         total_marker_count=1, eligible_marker_count=int(eligible),
+                        z_rejected_marker_count=int(self.marker_z_limits_m is not None
+                            and not self.marker_z_limits_m[0] <= float(packet.position_m[2]) <= self.marker_z_limits_m[1]),
                         selected_marker_id=None,
                         status='selected' if eligible else 'no_candidate', frame_idx=packet.frame_idx)
                     packet.tracked = eligible
@@ -922,6 +998,8 @@ class MocapBallDetector:
                 packet.timestamp_s, arrival_clock_s, arrival_monotonic_s,
                 frame_idx=packet.frame_idx)
             if not timing.accepted:
+                self._clock_reject_count += 1
+                self._receive_status = 'clock_' + timing.status
                 return False
             if self.clock_sync.epoch != previous_epoch:
                 self._velocity_history.clear()
@@ -930,6 +1008,8 @@ class MocapBallDetector:
                 self._prev_sample_time_source = None
             self._last_marker_selection = dict(packet.marker_selection_info or {})
             if packet.tracked is False:
+                self._selection_reject_count += 1
+                self._receive_status = self._last_marker_selection.get('status', 'untracked')
                 self._latest_observation_valid = False
                 self._velocity_history.clear()
                 self._prev_vel_mocap_m_s = None
@@ -959,6 +1039,7 @@ class MocapBallDetector:
             self._latest_raw = packet.raw
             self._latest_observation_valid = True
             self._packet_count += 1
+            self._receive_status = ('observation_accepted' if timing.ready else timing.status)
             return True
 
     def _sample_time_locked(self, source_timestamp_s,
@@ -1113,7 +1194,10 @@ class MocapBallDetector:
             return self._diagnostics_locked()
 
     def _diagnostics_locked(self):
-        age = time.monotonic() - self._latest_arrival_monotonic_s
+        now_monotonic = time.monotonic()
+        age = now_monotonic - self._latest_arrival_monotonic_s
+        udp_age = (None if self._last_udp_monotonic_s is None else
+                   now_monotonic - self._last_udp_monotonic_s)
         valid = bool(self._latest_observation_valid and self._packet_count > 0
                      and 0 <= age < self.timeout_s)
         clock_sync = self.clock_sync.diagnostics()
@@ -1125,6 +1209,25 @@ class MocapBallDetector:
             if abs(receiver_elapsed - age) > self.clock_sync.reset_jump_s:
                 clock_sync.update(ready=False, status='receiver_clock_changed')
         return {
+            'udp': {
+                'bind_host': self.udp_host,
+                'bind_port': self.udp_port,
+                'received_count': self._udp_received_count,
+                'decoded_count': self._decoded_packet_count,
+                'accepted_count': self._packet_count,
+                'parse_error_count': self._parse_error_count,
+                'selection_reject_count': self._selection_reject_count,
+                'clock_reject_count': self._clock_reject_count,
+                'receiver_error_count': self._receiver_error_count,
+                'status': ('udp_timeout' if udp_age is not None and udp_age >= self.timeout_s
+                           else self._receive_status),
+                'last_packet_age_s': udp_age,
+                'last_packet_addr': self._last_udp_addr,
+                'last_packet_bytes': self._last_udp_size,
+                'last_packet_preview': self._last_udp_preview,
+                'last_packet_truncated': bool(self._last_udp_size and self._last_udp_size > 512),
+                'last_receiver_error': self._last_receiver_error,
+            },
             'packet_count': self._packet_count,
             'age_s': age,
             'valid': valid,

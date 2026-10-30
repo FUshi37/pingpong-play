@@ -4,8 +4,13 @@
 from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional, Tuple
+import time
 
 import numpy as np
+try:
+    from pingpong_controller.probe_ball_recording import make_sensor_recording_sample
+except ImportError:
+    from probe_ball_recording import make_sensor_recording_sample
 
 try:
     from pingpong_controller.mocap_ball_detector import MocapBallDetector
@@ -40,6 +45,7 @@ class MocapBallInput:
             self._resynchronize_locked(reason)
 
     def _resynchronize_locked(self, reason):
+        self._recording_sync_request += 1
         self.detector.clock_sync.reset(reason)
         self.detector._latest_measurement_timestamp_s = None
         self.detector._velocity_history.clear()
@@ -73,7 +79,9 @@ class MocapBallInput:
                  clock_sync_min_samples: int = 8,
                  clock_sync_min_span_s: float = 0.05,
                  clock_sync_window_s: float = 10.0,
-                 marker_x_limits_m: Optional[Tuple[float, float]] = None):
+                 marker_x_limits_m: Optional[Tuple[float, float]] = None,
+                 enable_recording_cache: bool = False,
+                 marker_z_limits_m: Optional[Tuple[float, float]] = (-1.0, 1.0)):
         self.detector = MocapBallDetector(
             udp_host=udp_host,
             udp_port=udp_port,
@@ -91,6 +99,7 @@ class MocapBallInput:
             clock_sync_min_span_s=clock_sync_min_span_s,
             clock_sync_window_s=clock_sync_window_s,
             marker_x_limits_m=marker_x_limits_m,
+            marker_z_limits_m=marker_z_limits_m,
         )
         self.marker_id = int(marker_id)
         self.position_unit = str(position_unit)
@@ -99,8 +108,32 @@ class MocapBallInput:
         self.sim_cartesian_y_offset_m = float(sim_cartesian_y_offset_m)
         self.sim_base_height_m = float(sim_base_height_m)
         self._last_start_error: Exception | None = None
+        self._recording_packet = None
+        self._recording_sync_request = 0
+        self._recording_error = None
+        self._recording_closed = False
+        if enable_recording_cache:
+            self.detector.recording_callback = self._update_recording_packet
+
+    def _update_recording_packet(self):
+        """Run from the UDP receiver, never from the 200 Hz control thread."""
+        request = self._recording_sync_request
+        try:
+            p, v, valid, feedback = self.get_control_state()
+            self._recording_packet = (
+                make_sensor_recording_sample('mocap', p, v, valid,
+                                             feedback.get('measurementTimestampS'), feedback),
+                request, time.monotonic() - float(feedback.get('ageS') or 0.))
+            self._recording_error = None
+        except Exception as exc:
+            self._recording_error = str(exc)
+
+    def recording_snapshot(self):
+        return (self._recording_packet, self._recording_error,
+                self._recording_closed, self._recording_sync_request, self.detector.timeout_s)
 
     def start(self) -> bool:
+        self._recording_closed = False
         ok = bool(self.detector.start())
         if not ok:
             self._last_start_error = getattr(
@@ -108,6 +141,7 @@ class MocapBallInput:
         return ok
 
     def stop(self) -> None:
+        self._recording_closed = True
         self.detector.stop()
 
     def get_waist03_state(
@@ -178,6 +212,7 @@ class MocapBallInput:
             'frameIdx': diagnostics.get('frame_idx'),
             'sourceFormat': diagnostics.get('source_format'),
             'packetCount': diagnostics.get('packet_count'),
+            'udp': diagnostics.get('udp', {}),
             'parseErrorCount': diagnostics.get('parse_error_count'),
             'velocityRejectCount': diagnostics.get('velocity_reject_count'),
             'velocityWindowRejectCount': diagnostics.get(

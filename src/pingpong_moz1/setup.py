@@ -8,6 +8,8 @@ setup(
     packages=find_packages(exclude=['test']),
     package_data={
         package_name: [
+            'ball_observation_calibration.json',
+            'mocap_calibration_waypoints_20261027.json',
             'ball_tracker/*.yaml',
             'models/*',
             'output/*',
@@ -35,6 +37,7 @@ setup(
             'pingpong_node = pingpong_controller.pingpong_node:main',
             'enhanced_trajectory_visualizer = pingpong_controller.enhanced_trajectory_visualizer:main',
             'mocap_calibration = pingpong_controller.mocap_calibration:main',
+            'mocap_auto_calibration = pingpong_controller.mocap_auto_calibration:main',
             'mocap_ball_state_node = pingpong_controller.mocap_ball_state_node:main',
         ],
     },

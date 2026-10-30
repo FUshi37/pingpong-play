@@ -15,6 +15,7 @@ import numpy as np
 
 from pingpong_controller.camera_process import replace_latest
 from pingpong_controller.observation_clock import ReceiverClock, receiver_clock_anchor
+from pingpong_controller.probe_ball_recording import make_sensor_recording_sample
 
 
 class _StopFlag:
@@ -73,10 +74,16 @@ def mocap_worker(kwargs, input_q, state_q, stop, parent_pid, anchor):
             p, v, valid, feedback = source.get_control_state()
             feedback['syncRequest'] = sync_request
             key = (sync_request, feedback.get('packetCount'), feedback.get('parseErrorCount'), valid,
+                   feedback.get('udp', {}).get('received_count'),
+                   feedback.get('udp', {}).get('receiver_error_count'),
+                   feedback.get('udp', {}).get('status'),
                    feedback.get('markerId'), tuple(sorted(feedback.get('clockSync', {}).items())))
             if key != previous:
                 packet = dict(kind='sample', position=p, velocity=v, valid=valid,
-                              feedback=feedback, observedMonotonicS=observed_monotonic)
+                              feedback=feedback, observedMonotonicS=observed_monotonic,
+                              recording=(make_sensor_recording_sample(
+                                  'mocap', p, v, valid, feedback.get('measurementTimestampS'), feedback),
+                                  sync_request, observed_monotonic - float(feedback.get('ageS') or 0.)))
                 if replace_latest(state_q, packet):
                     previous = key
             stop.wait(.002)
@@ -175,6 +182,13 @@ class MocapInputProcess:
         if sample is not None:
             # Both timestamps remain those of the actual UDP observation.
             elapsed = time.monotonic() - sample['observedMonotonicS']
+            udp = dict(feedback.get('udp') or {})
+            if udp.get('last_packet_age_s') is not None:
+                udp['last_packet_age_s'] += elapsed
+                if udp['last_packet_age_s'] >= self.timeout_s:
+                    udp['status'] = 'udp_timeout'
+            if udp:
+                feedback['udp'] = udp
             arrival_age = float(feedback.get('ageS') or 0.) + elapsed
             stamp = feedback.get('measurementTimestampS')
             receiver_stamp = feedback.get('receiverTimestampS')
@@ -186,7 +200,12 @@ class MocapInputProcess:
             clock_ok = bool(receiver_stamp is not None
                 and abs((now - float(receiver_stamp)) - arrival_age) <= .25)
             sync = dict(feedback.get('clockSync') or {})
-            if not clock_ok:
+            if receiver_stamp is None:
+                # Before the first accepted ball observation there is no
+                # receipt clock to compare. Keep control blocked, but do not
+                # report a clock jump that has never been observed.
+                sync.update(ready=False, status='waiting_for_first_observation')
+            elif not clock_ok:
                 sync.update(ready=False, status='receiver_clock_changed')
             if feedback.get('syncRequest', 0) != self.sync_request:
                 sync.update(ready=False, status='awaiting_resynchronization')
@@ -214,6 +233,11 @@ class MocapInputProcess:
         return (np.asarray(sample['position'], np.float32).copy(),
                 np.asarray(sample['velocity'], np.float32).copy(), True, feedback) if valid else (
                     np.zeros(3, np.float32), np.zeros(3, np.float32), False, feedback)
+
+    def recording_snapshot(self):
+        sample = self._sample
+        return (None if sample is None else sample.get('recording'),
+                self.error, self.closed, self.sync_request, self.timeout_s)
 
     def stop(self):
         if self.closed:

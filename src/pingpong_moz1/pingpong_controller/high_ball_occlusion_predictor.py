@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bounded high-FOV ball prediction for the policy observation path.
 
-This module implements the trajectory model in Section III-B of
+The original mode implements the trajectory model in Section III-B of
 ``IROS2249_ball_bouncing_final_version_peisen_xu_0715.pdf``:
 
 * fit X/Y with first-order least squares and Z with second-order least
@@ -9,13 +9,12 @@ This module implements the trajectory model in Section III-B of
 * propagate ``p_dot = v`` and
   ``v_dot = gravity - k_m * ||v|| * v`` with forward Euler integration.
 
-It is deliberately *not* a general missing-detection tracker.  Ordinary
-camera loss is predicted only when a continuous, upward-moving track leaves
-the camera near the configured top-of-view height.  A separate caller-owned
-    measurement guard may explicitly force the same bounded model after declaring
-    sensor depth untrusted, and a caller-provided IR top-edge cue can replace the
-    installation-dependent world-height gate while retaining the rising-track
-    check.  Normal trusted measurements pass through unchanged.
+The interactive high-band mode uses HighBallGapModel: a robust fixed-gravity
+fit of measured positions, bounded to 200 ms and guarded by fit residual and
+extrapolation uncertainty. It also supports a descending track near its apex.
+A separate caller-owned measurement guard may request the original model
+for low-height depth faults or explicit IR top-edge exits. Normal trusted
+measurements pass through unchanged.
 The optional reacquisition handover still passes visible position through
 immediately, but temporarily replaces the unavailable endpoint velocity with
 a smooth model-to-detector transition.  In particular, a detector velocity
@@ -29,6 +28,9 @@ from dataclasses import dataclass
 from typing import Iterable
 
 import numpy as np
+
+from pingpong_controller.high_ball_gap_model import HighBallGapConfig, HighBallGapModel
+from pingpong_controller.ball_observation_model import query_observation_snapshot
 
 
 # The control loop can observe the same camera frame through a raw timestamp
@@ -70,11 +72,17 @@ class HighBallOcclusionConfig:
     reacquisition_smoothing_frames: int = 2
     reacquisition_smoothing_blend_s: float = 0.025
     enable_optimized_initial_state: bool = False
+    # Independent of high-FOV occlusion; measured from the last complete state.
+    velocity_warmup_max_prediction_s: float = 0.100
+    # Enabled by the interactive camera high-FOV path. Keep the original
+    # paper-model mode available to other callers and existing experiments.
+    enable_high_ball_gap_prediction: bool = False
 
     def __post_init__(self) -> None:
         if int(self.history_frames) < 3:
             raise ValueError("history_frames must be at least 3")
         positive = {
+            "velocity_warmup_max_prediction_s": self.velocity_warmup_max_prediction_s,
             "max_prediction_s": self.max_prediction_s,
             "integration_step_s": self.integration_step_s,
             "max_history_gap_s": self.max_history_gap_s,
@@ -185,6 +193,12 @@ class HighBallOcclusionPredictor:
 
     def __init__(self, config: HighBallOcclusionConfig | None = None) -> None:
         self.config = config or HighBallOcclusionConfig()
+        self._high_gap_model = HighBallGapModel(HighBallGapConfig(
+            max_prediction_s=min(.200, self.config.max_prediction_s),
+            gravity_m_s2=self.config.gravity_m_s2,
+            stop_z_m=max(1.350, self.config.stop_prediction_z_m)))
+        self._high_gap_seed = None
+        self._high_gap_diagnostics = {}
         self._history: deque[tuple[float, np.ndarray]] = deque(
             maxlen=max(
                 int(self.config.history_frames),
@@ -233,7 +247,38 @@ class HighBallOcclusionPredictor:
     def active(self) -> bool:
         return bool(self._active)
 
+    def step_quality_observation(self, position, velocity, valid, measurement_time,
+                                 query_time, observation, frame_offset_m):
+        """Consume quality-versioned observations; old recordings keep step()."""
+        if observation.get('observation_processed'):
+            r = query_observation_snapshot(observation, measurement_time, query_time, frame_offset_m,
+                max_prediction_s=self.config.max_prediction_s, prediction_floor_m=self.config.stop_prediction_z_m)
+            diagnostics = dict(enabled=True, model='quality_bearing_range_flight', reason=r['reason'],
+                state=r['source'], valid=r['valid'], predicted=r['position_predicted'],
+                positionValid=r['position_valid'], velocityValid=r['valid'],
+                positionPredicted=r['position_predicted'], velocityPredicted=r['valid'],
+                activeTrigger=r['source'] if r['position_predicted'] else None,
+                historySamples=observation.get('observation_history_samples'),
+                flightSegment=observation.get('observation_segment'), elapsedS=r['range_age_s'],
+                observationRangeAgeS=r['range_age_s'], observationUncertaintyMm=1000*r['uncertainty_m'],
+                observationFitRmseMm=None if observation.get('observation_fit_rmse_m') is None else 1000*observation['observation_fit_rmse_m'],
+                bearingUpdateAccepted=observation.get('observation_bearing_accepted', False),
+                rangeInnovationRejected=observation.get('observation_range_rejected', False))
+            return HighBallOcclusionResult(r['position'], r['velocity'], r['valid'],
+                                           r['position_predicted'], r['timestamp'], diagnostics)
+        # A quality-versioned frame must have been processed by the camera
+        # producer. Do not silently move fitting back into the control loop.
+        position_valid = bool(valid and np.isfinite(position).all())
+        return HighBallOcclusionResult(
+            np.asarray(position, float).copy() if position_valid else np.zeros(3),
+            np.zeros(3), False, False, float(measurement_time),
+            dict(enabled=True, reason='observation_processor_unavailable',
+                 state='measured_position_only', positionValid=position_valid,
+                 velocityValid=False, positionPredicted=False, velocityPredicted=False))
+
     def reset(self, *, clear_counters: bool = False) -> None:
+        self._high_gap_model.reset()
+        self._high_gap_diagnostics = {}
         self._history.clear()
         self._clear_active()
         self._last_reason = "reset"
@@ -293,6 +338,47 @@ class HighBallOcclusionPredictor:
             if force_prediction_reason else None)
         self._last_control_time_compensation_s = 0.0
 
+        if (self.config.enable_high_ball_gap_prediction
+                and allow_high_fov_prediction and not position_valid
+                and self._active_trigger != "high_ball_gap"
+                and self._high_gap_model.predict(query_time) is not None):
+            # A fresh, well fitted high trajectory takes precedence over an
+            # older velocity-warmup bridge. Its seed still comes exclusively
+            # from real position samples, never from the previous prediction.
+            self._clear_active()
+            self._try_activate(query_time)
+
+        # Apply the same bounds to missing frames and to reacquisition paths,
+        # which can otherwise return before the ordinary timeout checks below.
+        if self._active and self._active_trigger == "high_ball_gap":
+            gap_state = self._high_gap_model.predict_fit(
+                self._high_gap_seed, query_time)
+            if gap_state is None:
+                reason = self._high_gap_model.reason
+                self._expiration_count += 1
+                self._clear_active()
+                self._history.clear()
+                if not position_valid:
+                    self._last_reason = reason
+                    return self._result(
+                        np.zeros(3), np.zeros(3), False, False, query_time,
+                        reason=reason, elapsed_s=None)
+            else:
+                self._high_gap_diagnostics = gap_state[2]
+
+        if (self._active and self._active_trigger == "velocity_warmup"
+                and query_time - float(self._initial_time_s)
+                > self._effective_max_prediction_s() + 1.0e-9):
+            self._expiration_count += 1
+            self._clear_active()
+            self._history.clear()
+            if not valid:
+                self._last_reason = "velocity_warmup_timeout"
+                return self._result(
+                    position if position_valid else np.zeros(3), np.zeros(3),
+                    False, False, measurement_time,
+                    reason=self._last_reason, elapsed_s=None)
+
         if position_valid and not velocity_valid:
             if self._handover_active:
                 return self._step_reacquisition_handover(
@@ -330,7 +416,8 @@ class HighBallOcclusionPredictor:
                         elapsed_s=prediction_elapsed_s)
                 self._reacquisition_count += 1
                 self._history.clear()
-                if self.config.enable_reacquisition_smoothing:
+                if (self.config.enable_reacquisition_smoothing
+                        and self._active_trigger != "high_ball_gap"):
                     # The detector deliberately marks the first reacquired
                     # positions velocity-unready after clearing its segment.
                     # This is exactly the transition where full-state
@@ -371,7 +458,7 @@ class HighBallOcclusionPredictor:
             # [0, 0, 0] as a valid velocity, producing a nonzero -> zero ->
             # nonzero impulse at every five-frame velocity restart.
             warmup_velocity = self._start_velocity_warmup_bridge(
-                measurement_time, position)
+                measurement_time, position, query_time_s=query_time)
             if warmup_velocity is not None:
                 self._last_reason = "velocity_warmup_bridge_started"
                 return self._result(
@@ -436,7 +523,8 @@ class HighBallOcclusionPredictor:
                     )
                 self._reacquisition_count += 1
                 self._history.clear()
-                if self.config.enable_reacquisition_smoothing:
+                if (self.config.enable_reacquisition_smoothing
+                        and self._active_trigger != "high_ball_gap"):
                     self._start_reacquisition_handover(
                         measurement_time, position, mode="state",
                         gate_confirmed=measurement_reacquisition_confirmed)
@@ -554,7 +642,7 @@ class HighBallOcclusionPredictor:
 
         predicted_position, predicted_velocity = self._predict_at(query_time)
         if (self._active_trigger not in {
-                "sensor_depth_anomaly", "high_fov_edge_exit"}
+                "sensor_depth_anomaly", "high_fov_edge_exit", "velocity_warmup"}
                 and predicted_position[2] < self.config.stop_prediction_z_m):
             self._expiration_count += 1
             self._clear_active()
@@ -568,6 +656,10 @@ class HighBallOcclusionPredictor:
             self._last_reason = "predicting_sensor_depth_anomaly"
         elif self._active_trigger == "high_fov_edge_exit":
             self._last_reason = "predicting_high_fov_edge_exit"
+        elif self._active_trigger == "velocity_warmup":
+            self._last_reason = "predicting_velocity_warmup"
+        elif self._active_trigger == "high_ball_gap":
+            self._last_reason = "predicting_high_ball_gap"
         else:
             self._last_reason = "predicting_high_fov_occlusion"
         return self._result(
@@ -578,11 +670,25 @@ class HighBallOcclusionPredictor:
         span = self._history_span_s()
         return {
             "model": (
-                "robust_xy_gravity_z_neutral_paper_drag"
+                "bounded_high_gap_fixed_gravity"
+                if self._active_trigger == "high_ball_gap"
+                else "robust_xy_gravity_z_neutral_paper_drag"
                 if self.config.enable_optimized_initial_state
                 else "iros2249_ls_gravity_quadratic_drag"),
             "active": bool(self._active),
             "activeTrigger": self._active_trigger,
+            "highGapEnabled": bool(self.config.enable_high_ball_gap_prediction),
+            "highGapHistorySamples": len(self._high_gap_model.history),
+            "highGapReason": self._high_gap_model.reason,
+            "highGapMaxPredictionS": self._high_gap_model.config.max_prediction_s,
+            "highGapUncertaintyMm": (
+                1000*self._high_gap_diagnostics['uncertainty_m']
+                if self._active_trigger == "high_ball_gap"
+                and 'uncertainty_m' in self._high_gap_diagnostics else None),
+            "highGapFitRmseMm": (
+                1000*self._high_gap_diagnostics['fit_rmse_m']
+                if self._active_trigger == "high_ball_gap"
+                and 'fit_rmse_m' in self._high_gap_diagnostics else None),
             "historySamples": len(self._history),
             "historySpanS": None if span is None else round(span, 6),
             "historyFrames": int(
@@ -698,6 +804,8 @@ class HighBallOcclusionPredictor:
         }
 
     def _append_measurement(self, timestamp_s: float, position: np.ndarray) -> None:
+        if self.config.enable_high_ball_gap_prediction:
+            self._high_gap_model.observe(timestamp_s, position)
         if self._history:
             previous_time = self._history[-1][0]
             dt = timestamp_s - previous_time
@@ -727,6 +835,27 @@ class HighBallOcclusionPredictor:
         bypass_high_fov_gates: bool = False,
         bypass_activation_height: bool = False,
     ) -> tuple[bool, str]:
+        high_seed = bool(self._high_gap_model.history and
+                         self._high_gap_model.history[-1][1][2]
+                         >= self._high_gap_model.config.min_seed_z_m)
+        if (self.config.enable_high_ball_gap_prediction
+                and (trigger == "high_fov_occlusion" or
+                     (high_seed and trigger in {
+                         "high_fov_edge_exit", "sensor_depth_anomaly"}))):
+            state = self._high_gap_model.predict(query_time_s)
+            if state is None:
+                return False, self._high_gap_model.reason
+            seed = self._high_gap_model.fit
+            self._high_gap_seed = dict(seed)
+            self._high_gap_diagnostics = state[2]
+            self._active = True
+            self._initial_time_s = seed['t']
+            self._initial_position_m = seed['position'].copy()
+            self._initial_velocity_m_s = seed['velocity'].copy()
+            self._fit_rmse_m = np.repeat(seed['rmse'], 3)
+            self._active_trigger = "high_ball_gap"
+            self._activation_count += 1
+            return True, "activated_high_ball_gap"
         configured_history = (
             min(int(self.config.history_frames), self.OPTIMIZED_HISTORY_FRAMES)
             if self.config.enable_optimized_initial_state
@@ -948,11 +1077,18 @@ class HighBallOcclusionPredictor:
         return float(self.config.activation_z_m)
 
     def _effective_max_prediction_s(self) -> float:
+        if self._active_trigger == "high_ball_gap":
+            return self._high_gap_model.config.max_prediction_s
+        if self._active_trigger == "velocity_warmup":
+            return min(float(self.config.max_prediction_s),
+                       float(self.config.velocity_warmup_max_prediction_s))
         if self.config.enable_optimized_initial_state:
             return float(self.OPTIMIZED_MAX_PREDICTION_S)
         return float(self.config.max_prediction_s)
 
     def _effective_reacquisition_gate_m(self) -> float:
+        if self._active_trigger == "high_ball_gap":
+            return min(.030, float(self.config.reacquisition_gate_m))
         if self.config.enable_optimized_initial_state:
             return float(self.OPTIMIZED_REACQUISITION_GATE_M)
         return float(self.config.reacquisition_gate_m)
@@ -961,6 +1097,13 @@ class HighBallOcclusionPredictor:
         assert self._initial_time_s is not None
         assert self._initial_position_m is not None
         assert self._initial_velocity_m_s is not None
+        if self._active_trigger == "high_ball_gap":
+            dt = max(0., float(timestamp_s)-self._initial_time_s)
+            p = self._initial_position_m + dt*self._initial_velocity_m_s
+            v = self._initial_velocity_m_s.copy()
+            p[2] -= .5*self.config.gravity_m_s2*dt*dt
+            v[2] -= self.config.gravity_m_s2*dt
+            return p, v
         return propagate_paper_model(
             self._initial_position_m,
             self._initial_velocity_m_s,
@@ -998,6 +1141,8 @@ class HighBallOcclusionPredictor:
         self,
         timestamp_s: float,
         position_m: np.ndarray,
+        *,
+        query_time_s: float | None = None,
     ) -> np.ndarray | None:
         """Bridge an incomplete detector state from the last trusted 6D state.
 
@@ -1011,8 +1156,13 @@ class HighBallOcclusionPredictor:
                 or self._last_trusted_velocity_m_s is None):
             return None
         gap_s = float(timestamp_s - self._last_trusted_time_s)
+        query_gap_s = float(
+            (timestamp_s if query_time_s is None else query_time_s)
+            - self._last_trusted_time_s)
         if (gap_s < -_MEASUREMENT_TIMESTAMP_DUPLICATE_TOLERANCE_S
-                or gap_s > self._effective_max_prediction_s()):
+                or max(gap_s, query_gap_s) > min(
+                    self.config.max_prediction_s,
+                    self.config.velocity_warmup_max_prediction_s)):
             return None
         if (not np.all(np.isfinite(self._last_trusted_position_m))
                 or not np.all(np.isfinite(self._last_trusted_velocity_m_s))):
@@ -1067,6 +1217,8 @@ class HighBallOcclusionPredictor:
                 self._last_handover_alpha = 0.0
         self._handover_history.append(
             (float(timestamp_s), np.asarray(position_m, dtype=np.float64).copy()))
+        if self.config.enable_high_ball_gap_prediction:
+            self._high_gap_model.observe(timestamp_s, position_m)
         return True
 
     def _step_reacquisition_handover(
@@ -1088,6 +1240,29 @@ class HighBallOcclusionPredictor:
             np.asarray(position_m, dtype=np.float64) - predicted_position)
         prediction_elapsed_s = max(
             0.0, float(query_time_s) - float(self._initial_time_s))
+        if (self._active_trigger == "velocity_warmup"
+                and np.linalg.norm(self._last_reacquisition_error_m)
+                > self._effective_reacquisition_gate_m()):
+            # The first post-impact position may still be near the old arc.
+            # A confirmed first handover point must not exempt later trusted
+            # measurements from checking that model. Discard the stale seed,
+            # retain the visible position, and await a fresh detector velocity.
+            innovation = self._last_reacquisition_error_m.copy()
+            self.reset()
+            self._velocity_warmup_bridge_rejected_count += 1
+            self._last_velocity_warmup_rejection_error_m = innovation
+            self._append_measurement(measurement_time_s, position_m)
+            if measurement_velocity_valid:
+                self._remember_trusted_state(
+                    measurement_time_s, position_m, velocity_m_s)
+            self._last_reason = "velocity_warmup_model_invalidated"
+            return self._result(
+                position_m,
+                velocity_m_s if measurement_velocity_valid else np.zeros(3),
+                bool(measurement_velocity_valid), False, measurement_time_s,
+                reason=self._last_reason, elapsed_s=prediction_elapsed_s,
+                state="tracking" if measurement_velocity_valid else "tracking_velocity_warmup",
+                position_predicted=False, velocity_predicted=False)
         if (not self._handover_gate_confirmed
                 and np.linalg.norm(self._last_reacquisition_error_m)
                 > self._effective_reacquisition_gate_m()):
@@ -1330,6 +1505,7 @@ class HighBallOcclusionPredictor:
         )
 
     def _clear_active(self) -> None:
+        self._high_gap_seed = None
         self._active = False
         self._initial_time_s = None
         self._initial_position_m = None

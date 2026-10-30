@@ -20,7 +20,6 @@ import os
 import math
 from collections import deque
 from typing import Optional, Dict, Any, Tuple
-from ultralytics import YOLO
 
 from pingpong_controller.calibration_loader import CalibrationData
 from pingpong_controller.ir_depth_kalman_filter import IRDepthKalmanFilter
@@ -69,6 +68,8 @@ class HybridBallDetector:
     ADAPTIVE_NEAR_FIELD_MIN_UPWARD_PIXEL_SPEED_PX_S = 500.0
     ADAPTIVE_NEAR_FIELD_MAX_WINDOW_S = 0.050
     ADAPTIVE_SENSOR_RECOVERY_FRAMES = 2
+    ADAPTIVE_RECOVERY_MAX_HORIZON_S = 0.050
+    ADAPTIVE_RECOVERY_MAX_RESIDUAL_MM = 20.0
     ADAPTIVE_PREDICTION_MAX_S = 0.20
     ADAPTIVE_MAX_DEPTH_SPEED_MM_S = 10000.0
     ADAPTIVE_GEOMETRY_CORRECTION_GAIN = 0.25
@@ -108,6 +109,8 @@ class HybridBallDetector:
     PHYSICS_VELOCITY_MIN_FRAMES = 5
     PHYSICS_VELOCITY_GRAVITY_MM_S2 = 9800.0
     PHYSICS_VELOCITY_MAX_GAP_S = 0.050
+    SHORT_OBSERVATION_GAP_S = 0.034
+    SHORT_GAP_CONTINUITY_RESIDUAL_MM = 12.0
     # The free-flight fit is also used as a low-latency endpoint position
     # smoother.  It evaluates the fitted trajectory at the newest timestamp,
     # rather than averaging old positions, so it does not add a half-window
@@ -205,7 +208,14 @@ class HybridBallDetector:
                  candidate_min_brightness=23000.0,
                  candidate_max_depth_disagreement_mm=180.0,
                  candidate_motion_scale_px=130.0,
-                 depth_correction_model_path='depth_correction_model.pkl'):  # 新增参数
+                 depth_correction_model_path='depth_correction_model.pkl',
+                 load_yolo_model=True,
+                 depth_foreground_percentile=25.0,
+                 depth_assisted_detection_enabled=False,
+                 observation_quality_enabled=True,
+                 partial_surface_detection_enabled=True,
+                 local_surface_detection_enabled=True,
+                 observation_calibration_enabled=True):
         """
         初始化混合检测器
 
@@ -227,6 +237,15 @@ class HybridBallDetector:
         self.roi_margin = roi_margin
         self.depth_scale = depth_scale
         self.depth_neighborhood_px = depth_neighborhood_px
+        self.depth_assisted_detection_enabled = bool(depth_assisted_detection_enabled)
+        self.observation_quality_enabled = bool(observation_quality_enabled)
+        self.partial_surface_detection_enabled = bool(partial_surface_detection_enabled)
+        self.local_surface_detection_enabled = bool(local_surface_detection_enabled)
+        self.observation_calibration_enabled = bool(observation_calibration_enabled)
+        self.depth_foreground_percentile = float(depth_foreground_percentile)
+        if (not np.isfinite(self.depth_foreground_percentile)
+                or not 0.0 <= self.depth_foreground_percentile <= 50.0):
+            raise ValueError('depth_foreground_percentile must be in [0, 50]')
         self.depth_mode = self._normalize_depth_mode(depth_mode)
         self.sensor_surface_to_center_depth_enabled = bool(
             sensor_surface_to_center_depth_enabled)
@@ -284,6 +303,7 @@ class HybridBallDetector:
         # IR 曝光/增益（构造时应用到 stereo sensor）与自适应背景分位数
         self.ir_exposure = exposure
         self.ir_gain = gain
+        self.ir_laser_power = laser_power
         self.brightness_percentile = float(brightness_percentile)
 
         # IR检测参数
@@ -306,12 +326,17 @@ class HybridBallDetector:
             self.T_base_camera = calibration_data.T_base_camera
 
         # 加载YOLO模型
-        print(f"加载YOLO模型: {yolo_model_path}")
-        self.yolo_model = YOLO(yolo_model_path)
-        print("YOLO模型加载完成")
+        self.yolo_model_path = str(yolo_model_path)
+        self._initial_yolo_enabled = bool(load_yolo_model)
+        self.yolo_model = None
+        if load_yolo_model:
+            from ultralytics import YOLO
+            print(f"加载YOLO模型: {yolo_model_path}")
+            self.yolo_model = YOLO(yolo_model_path)
+            print("YOLO模型加载完成")
 
         # YOLO推理参数（优化性能）
-        self.yolo_device = 'cuda:0' if self._check_cuda() else 'cpu'
+        self.yolo_device = 'cuda:0' if load_yolo_model and self._check_cuda() else 'cpu'
         self.yolo_imgsz = 640  # 推理尺寸
 
         print(f"YOLO推理设备: {self.yolo_device}")
@@ -326,7 +351,7 @@ class HybridBallDetector:
             'device': self.yolo_device,
             'imgsz': self.yolo_imgsz,
         }
-        for _ in range(3):
+        for _ in range(3 if load_yolo_model else 0):
             _ = self.yolo_model(dummy_image, **predict_kwargs)
         print("YOLO模型预热完成")
 
@@ -930,6 +955,11 @@ class HybridBallDetector:
 
     def _init_runtime_state(self):
         """初始化在线/离线共享的运行时状态（计数、队列、深度门等）。"""
+        self.observation_calibration = None
+        if (getattr(self, 'observation_calibration_enabled', False)
+                and getattr(self, 'T_base_camera', None) is not None):
+            from pingpong_controller.ball_observation_calibration import load_calibration
+            self.observation_calibration = load_calibration(self)
         self.sensor_surface_to_center_depth_enabled = bool(getattr(
             self, 'sensor_surface_to_center_depth_enabled', False))
         self.clear_buffers_on_detection_loss_enabled = bool(getattr(
@@ -946,7 +976,7 @@ class HybridBallDetector:
         self.last_yolo_time = 0
         self.yolo_miss_count = 0
         self.max_yolo_miss = 3  # 修复：YOLO连续丢失3次后清除bbox（软约束）
-        self.yolo_enabled = True
+        self.yolo_enabled = getattr(self, '_initial_yolo_enabled', True)
         self.ir_tracking_miss_count = 0
 
         # 统计
@@ -995,6 +1025,7 @@ class HybridBallDetector:
         self.pixel_history = deque(maxlen=5)  # (cx, cy, radius)
         self.observation_gap_active = False
         self.observation_buffers_cleared_for_gap = False
+        self.observation_history_preserved_for_gap = False
         self.observation_buffer_clear_count = 0
         self.motion_last_trusted_time = None
         self.motion_last_trusted_position = None
@@ -1570,9 +1601,16 @@ class HybridBallDetector:
             or float(cx) + float(radius) >= float(width - 1) - margin
             or float(cy) + float(radius) >= float(height - 1) - margin)
 
+    def _count_ir_diagnostic(self, name, count=1):
+        diagnostics = getattr(self, 'ir_frame_diagnostics', None)
+        if diagnostics is None:
+            diagnostics = self.ir_frame_diagnostics = {}
+        diagnostics[name] = diagnostics.get(name, 0) + count
+
     def _detect_in_ir(
             self, ir_image, roi=None, depth_image=None,
-            observation_time=None):
+            observation_time=None, *, params_override=None,
+            require_depth_support=False):
         """
         在IR图像中检测球
 
@@ -1583,6 +1621,8 @@ class HybridBallDetector:
         Returns:
             检测结果字典或None
         """
+        params = self.ir_params if params_override is None else {
+            **self.ir_params, **params_override}
         # Crop before threshold/morphology so an ROI actually reduces work.
         # Candidate coordinates are translated back to full-frame IR pixels.
         offset_x = 0
@@ -1600,36 +1640,41 @@ class HybridBallDetector:
             work_ir = ir_image[y1:y2, x1:x2]
 
         # 阈值分割
-        if self.ir_params['use_adaptive']:
+        if params['use_adaptive']:
             threshold = self._update_adaptive_threshold(ir_image, roi)
         else:
-            threshold = self.ir_params['threshold']
+            threshold = params['threshold']
 
         _, binary = cv2.threshold(work_ir, threshold, 255, cv2.THRESH_BINARY)
 
         # 形态学处理：膨胀 → 闭运算 → 去噪
-        dilate_iter = self.ir_params['dilate_iterations']
+        dilate_iter = params['dilate_iterations']
         if dilate_iter > 0:
             dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
             binary = cv2.dilate(binary, dilate_kernel, iterations=dilate_iter)
 
-        close_ksize = self.ir_params['close_kernel_size']
+        close_ksize = params['close_kernel_size']
         if close_ksize >= 3:
             close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
             binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, close_kernel)
 
-        denoise_ksize = self.ir_params['denoise_kernel_size']
+        denoise_ksize = params['denoise_kernel_size']
         if denoise_ksize >= 3:
             denoise_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (denoise_ksize, denoise_ksize))
             binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, denoise_kernel)
 
         # 连通域分析
+        debug_images = getattr(self, 'offline_debug_images', None)
+        if debug_images is not None:
+            debug_images.update(binary=binary.copy(), roi=roi, threshold=threshold)
         contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        self._count_ir_diagnostic('ir_contours_examined', len(contours))
 
         candidates = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < 20:
+                self._count_ir_diagnostic('ir_reject_area')
                 continue
 
             bx, by, bw, bh = cv2.boundingRect(cnt)
@@ -1642,6 +1687,7 @@ class HybridBallDetector:
                     # ROI is biased.  Reject it here so _detect_core performs
                     # its immediate full-frame fallback on the same frame.
                     self.ir_roi_edge_rejected_count += 1
+                    self._count_ir_diagnostic('ir_reject_roi_edge')
                     continue
 
             if len(cnt) >= 5:
@@ -1656,16 +1702,19 @@ class HybridBallDetector:
                     # area-equivalent radius paired with sqrt(fx*fy) is also
                     # less noisy than arbitrarily using one semi-axis.
                     radius = 0.5 * math.sqrt(minor * major)
-                    if not (self.ir_params['min_radius'] < radius < self.ir_params['max_radius']):
+                    if not (params['min_radius'] < radius < params['max_radius']):
+                        self._count_ir_diagnostic('ir_reject_radius')
                         continue
 
                     aspect_ratio = minor / (major + 1e-6)
-                    if aspect_ratio < self.ir_params['circularity_min']:
+                    if aspect_ratio < params['circularity_min']:
+                        self._count_ir_diagnostic('ir_reject_aspect')
                         continue
 
                     ellipse_area = np.pi * 0.25 * minor * major
                     area_circularity = area / (ellipse_area + 1e-6)
                     if not (0.6 < area_circularity < 1.4):
+                        self._count_ir_diagnostic('ir_reject_fill')
                         continue
 
                     # 改进：结合矩重心和椭圆中心，提高稳定性
@@ -1691,6 +1740,9 @@ class HybridBallDetector:
                     if self._ir_contour_is_edge_clipped(
                             cx, cy, radius, ir_image.shape):
                         self.ir_edge_rejected_count += 1
+                        self._count_ir_diagnostic('ir_reject_image_edge')
+                        from pingpong_controller.ball_axis_observation import retain_horizontal_edge
+                        retain_horizontal_edge(self, cx, cy, radius, ir_image.shape)
                         continue
 
                     # Keep only a contour-bounded mask.  The old full-frame
@@ -1717,7 +1769,7 @@ class HybridBallDetector:
                         'geometry_quality_valid': bool(
                             aspect_ratio >= max(
                                 0.70,
-                                float(self.ir_params['circularity_min']))
+                                float(params['circularity_min']))
                             and 0.70 <= area_circularity <= 1.30
                             and center_refine_shift <= max(
                                 4.0, 0.20 * radius)),
@@ -1726,9 +1778,25 @@ class HybridBallDetector:
                         'mask': mask,
                         'mask_origin': (offset_x + bx, offset_y + by),
                     })
-                except:
+                except Exception:
+                    self._count_ir_diagnostic('ir_reject_fit_error')
                     continue
+            else:
+                self._count_ir_diagnostic('ir_reject_contour_points')
 
+        if require_depth_support:
+            from pingpong_controller.depth_assisted_ir import validate_ir_depth
+            supported = []
+            for candidate in candidates:
+                evidence = validate_ir_depth(
+                    candidate, depth_image, depth_scale=self.depth_scale,
+                    fx=self.ir_fx, fy=self.ir_fy, diameter_mm=self.ball_diameter_mm,
+                    max_depth_mm=self.ADAPTIVE_SENSOR_MAX_MM)
+                if evidence is not None:
+                    candidate.update(evidence)
+                    supported.append(candidate)
+            candidates = supported
+        self._count_ir_diagnostic('ir_candidates_accepted', len(candidates))
         if not candidates:
             return None
 
@@ -1736,8 +1804,12 @@ class HybridBallDetector:
                else float(observation_time))
         best = self._select_ir_candidate(candidates, depth_image, now)
         if best is None:
+            self._count_ir_diagnostic('ir_reject_selection')
             return None
 
+        return self._finish_ir_candidate(best, now)
+
+    def _finish_ir_candidate(self, best, now):
         # 核心平滑：2D像素卡尔曼滤波
         # 这是最关键的一步，大幅减少静止球抖动
         best['cx_raw'] = best['cx']  # 保存原始值用于调试
@@ -1753,6 +1825,51 @@ class HybridBallDetector:
             best['cy'] = smoothed_pos[1]
 
         return best
+
+    def _detect_depth_supported_ir(self, ir_image, depth_image, now):
+        """Recover weak IR shapes only when independent stereo supports them."""
+        from pingpong_controller.depth_assisted_ir import depth_supported_candidates
+        if depth_image is None:
+            return None
+        options = dict(
+            depth_scale=self.depth_scale, fx=self.ir_fx, fy=self.ir_fy,
+            diameter_mm=self.ball_diameter_mm,
+            max_depth_mm=self.ADAPTIVE_SENSOR_MAX_MM)
+        roi = self._predicted_ir_roi(now)
+        support_keys = (
+            'depth_support_fraction', 'depth_support_pixels', 'depth_spread_mm')
+        for threshold, dilation in ((100, 5), (70, 3)):
+            overrides = dict(
+                threshold=threshold, dilate_iterations=dilation,
+                circularity_min=.6, use_adaptive=False, min_radius=5)
+            for region in ([roi, None] if roi is not None else [None]):
+                found = self._detect_in_ir(
+                    ir_image, region, depth_image, now,
+                    params_override=overrides, require_depth_support=True)
+                if found is not None:
+                    self._count_ir_diagnostic('depth_assisted_used')
+                    self.ir_frame_diagnostics.update(
+                        depth_assisted_mode='supported_ir',
+                        depth_assisted_threshold=threshold,
+                        **{key: found[key] for key in support_keys})
+                    return found
+        candidates = depth_supported_candidates(
+            ir_image, depth_image, roi=roi, **options)
+        if not candidates and roi is not None:
+            candidates = depth_supported_candidates(ir_image, depth_image, **options)
+        self._count_ir_diagnostic('depth_assisted_candidates', len(candidates))
+        if not candidates:
+            return None
+        predicted = self._predict_candidate_center(now)
+        if predicted is None:
+            best = max(candidates, key=lambda c: c['brightness'])
+        else:
+            best = min(candidates, key=lambda c: np.hypot(
+                c['cx'] - predicted[0], c['cy'] - predicted[1]))
+        self._count_ir_diagnostic('depth_assisted_used')
+        self.ir_frame_diagnostics['depth_assisted_mode'] = 'stereo_surface'
+        self.ir_frame_diagnostics.update({key: best[key] for key in support_keys})
+        return self._finish_ir_candidate(best, now)
 
     def _get_depth_from_depthmap(
             self, cx_px, cy_px, depth_image, ball_mask=None,
@@ -1807,7 +1924,13 @@ class HybridBallDetector:
         # wall/monitor behind the ball. Legacy sensor mode intentionally keeps
         # its historical median behavior.
         if prefer_near_surface:
-            estimates = [float(np.percentile(depths, 25.0))]
+            # Tunable through the shared offline/online core. Keep the
+            # historical 25th percentile unless a replay-validated override
+            # is explicitly supplied. A lower percentile can retain sparse
+            # foreground stereo samples; all subsequent anomaly/motion
+            # gates still apply to the resulting measurement.
+            estimates = [float(np.percentile(
+                depths, getattr(self, 'depth_foreground_percentile', 25.0)))]
             if center_depths.size >= 3:
                 estimates.append(float(np.median(center_depths)))
             hint = (
@@ -2107,6 +2230,20 @@ class HybridBallDetector:
         jump_bad = (
             sensor_jump is not None
             and sensor_jump > self.ADAPTIVE_SENSOR_JUMP_MM)
+        # A rejected raw depth (often several metres) is not the reference
+        # for the next good sample. Only a recent, independently trusted
+        # trajectory can override that raw-to-raw jump or shorten recovery.
+        recovery_consistent = bool(
+            len(self.adaptive_sensor_history) >= 2
+            and prediction_horizon is not None
+            and 0.0 <= prediction_horizon <= self.ADAPTIVE_RECOVERY_MAX_HORIZON_S
+            and prediction_residual is not None
+            and prediction_residual <= self.ADAPTIVE_RECOVERY_MAX_RESIDUAL_MM)
+        jump_overridden = bool(
+            jump_bad and self.adaptive_sensor_anomaly_active
+            and recovery_consistent)
+        if jump_overridden:
+            jump_bad = False
         sensor_too_far = (
             sensor is not None and sensor > self.ADAPTIVE_SENSOR_MAX_MM)
         geometry_bad = (
@@ -2120,7 +2257,22 @@ class HybridBallDetector:
             jump_bad or sensor_too_far or geometry_bad or radius_bad
             or near_field_scale_bad)
 
+        # Spatial evidence is evaluated on every primary/recovery candidate.
+        # A dense current surface is independent of a rejected previous range
+        # and of the morphology radius; 3D motion association still follows.
+        quality = getattr(self, '_current_range_quality', None)
+        strong_surface = bool(quality and quality['range_quality_strong'])
+        if strong_surface:
+            jump_overridden = jump_bad
+            jump_bad = near_field_scale_bad = False
+            recovery_consistent = True
+            detected_anomaly = bool(sensor_too_far or geometry_bad or radius_bad)
+        quality_bad = bool(quality and not quality['range_valid'])
+        detected_anomaly = detected_anomaly or quality_bad
+
         reasons = []
+        if quality_bad:
+            reasons.append(quality['range_quality_reason'])
         if jump_bad:
             reasons.append('sensor_jump')
         if sensor_too_far:
@@ -2139,7 +2291,9 @@ class HybridBallDetector:
         if self.adaptive_sensor_anomaly_active:
             recovery_good = bool(sensor is not None and not detected_anomaly)
             if recovery_good:
-                self.adaptive_sensor_recovery_count += 1
+                self.adaptive_sensor_recovery_count += (
+                    self.ADAPTIVE_SENSOR_RECOVERY_FRAMES
+                    if recovery_consistent else 1)
             else:
                 self.adaptive_sensor_recovery_count = 0
             if (self.adaptive_sensor_recovery_count
@@ -2189,6 +2343,8 @@ class HybridBallDetector:
             'sensor_rejected': bool(detected_anomaly),
             'rejection_reason': rejection_reason,
             'sensor_jump_mm': sensor_jump,
+            'recovery_prediction_consistent': recovery_consistent,
+            'raw_jump_overridden': jump_overridden,
             'observed_radius_px': observed_radius,
             'sensor_projected_radius_px': sensor_projected_radius,
             'radius_mismatch_ratio': radius_mismatch_ratio,
@@ -2260,7 +2416,9 @@ class HybridBallDetector:
 
     def _depth_for_reconstruction(self, depth_raw, *, commit=True):
         """Select same-frameset raw depth or legacy temporal median depth."""
-        if bool(getattr(self, 'synchronized_depth_enabled', False)):
+        if (bool(getattr(self, 'synchronized_depth_enabled', False))
+                or (getattr(self, 'observation_quality_enabled', False)
+                    and self.depth_mode == 'adaptive')):
             return float(depth_raw)
         return self._stabilize_depth(depth_raw, commit=commit)
 
@@ -2490,7 +2648,12 @@ class HybridBallDetector:
         limit = self.TRAJECTORY_POSITION_MAX_CORRECTION_MM
         if correction_norm > limit:
             correction *= limit / max(correction_norm, 1.0e-9)
-        return raw + correction
+        result = raw + correction
+        if getattr(self, '_axis_refinement_enabled', False):
+            # Reduce duplicate Z endpoint filtering; keep the motion/impact
+            # gates and the velocity fit that establish flight identity.
+            result[2] = .75 * result[2] + .25 * raw[2]
+        return result
 
     def _commit_velocity_output(
             self, now, raw_position, fitted_position, velocity, *,
@@ -2772,6 +2935,16 @@ class HybridBallDetector:
         history = self.position_history
         self.last_velocity_impact_detected = False
 
+        # Preserving history over a brief miss is conditional on the actual
+        # reacquired point. A possible impact/discontinuity starts a new fit;
+        # a predicted sample is never inserted into measured history.
+        if (getattr(self, 'observation_history_preserved_for_gap', False) and history
+                and self.motion_last_innovation_mm is not None
+                and np.linalg.norm(self.motion_last_innovation_mm)
+                > self.SHORT_GAP_CONTINUITY_RESIDUAL_MM):
+            history.clear()
+            self._reset_velocity_tracking_state()
+
         if (history and float(now - history[-1][0])
                 > self.PHYSICS_VELOCITY_MAX_GAP_S):
             history.clear()
@@ -2999,6 +3172,7 @@ class HybridBallDetector:
 
     def _clear_observation_buffers(self, *, preserve_depth_guard=False):
         """Clear every temporal state that can leak across a detection gap."""
+        self.observation_history_preserved_for_gap = False
         restart_reference = None
         if (self.last_velocity_ready
                 and self.last_velocity_output_time is not None
@@ -3023,8 +3197,10 @@ class HybridBallDetector:
              self.velocity_restart_reference_velocity) = restart_reference
         self.observation_buffer_clear_count += 1
 
-    def _handle_observation_loss(self, reason, *, preserve_depth_guard=False):
+    def _handle_observation_loss(
+            self, reason, *, preserve_depth_guard=False, observation_time=None):
         self.observation_gap_active = True
+        had_pending_impact = self.pending_impact is not None
         # Impact confirmation may never bridge a missing/untrusted frame.  A
         # candidate that cannot be verified is discarded together with the
         # old segment so it cannot later mix pre/post-impact samples.
@@ -3033,14 +3209,28 @@ class HybridBallDetector:
             self.velocity_impact_rejected_count += 1
             self._reset_velocity_tracking_state()
         # One 90 Hz IR miss is only about 11 ms.  Keep a continuous-flight
-        # fit across that isolated flicker; two consecutive IR misses, or any
-        # depth/3D fault, establish a real segment boundary immediately.
+        # fit across that isolated flicker. Additional missed frames preserve
+        # a ready fit while their age is <= SHORT_OBSERVATION_GAP_S. The next
+        # measured point must pass continuity and PHYSICS_VELOCITY_MAX_GAP_S.
         isolated_ir_flicker = bool(
             str(reason) == 'ir_detection_lost'
             and int(self.ir_tracking_miss_count) < 2)
+        short_trusted_gap = bool(
+            not had_pending_impact
+            and str(reason) in {'ir_detection_lost', 'depth_untrusted'}
+            and self.physics_constrained_velocity_enabled
+            and self.motion_consistency_gate_enabled
+            and self.last_velocity_ready
+            and observation_time is not None
+            and self.motion_last_trusted_time is not None
+            and 0.0 <= float(observation_time - self.motion_last_trusted_time)
+            <= self.SHORT_OBSERVATION_GAP_S)
+        if short_trusted_gap and not isolated_ir_flicker:
+            self.observation_history_preserved_for_gap = True
         should_clear = bool(
             self.clear_buffers_on_detection_loss_enabled
             and not isolated_ir_flicker
+            and not short_trusted_gap
             and not self.observation_buffers_cleared_for_gap)
         if should_clear:
             self._clear_observation_buffers(
@@ -3191,6 +3381,7 @@ class HybridBallDetector:
         self.motion_last_trusted_position = position_array
         self.motion_last_trusted_velocity = velocity_array
         self.observation_gap_active = False
+        self.observation_history_preserved_for_gap = False
         self.observation_buffers_cleared_for_gap = False
         self.motion_reacquisition_candidates.clear()
         self.motion_reacquisition_seed = None
@@ -3319,7 +3510,7 @@ class HybridBallDetector:
         ir_frame = frames.get_infrared_frame(1)
         depth_frame = frames.get_depth_frame()
 
-        if not ir_frame or not depth_frame:
+        if not ir_frame:
             self._handle_observation_loss('missing_realsense_frame')
             return {
                 'detected': False, 'position': [0, 0, 0],
@@ -3341,7 +3532,11 @@ class HybridBallDetector:
         self.last_frame_timestamp = current_timestamp
 
         ir_image = np.asanyarray(ir_frame.get_data())
-        depth_image = np.asanyarray(depth_frame.get_data())
+        from pingpong_controller.ball_observation_calibration import depth_pair_quality
+        pair_valid, pair_delta = depth_pair_quality(
+            current_timestamp, depth_frame.get_timestamp() if depth_frame else None)
+        depth_image = (np.asanyarray(depth_frame.get_data())
+                       if depth_frame and pair_valid is not False else None)
         rgb_image = self.color_image_for_frames(frames, ir_image)
 
         started = time.perf_counter()
@@ -3353,11 +3548,12 @@ class HybridBallDetector:
         target.append(elapsed_ms)
         raw = result.get('raw_measurement')
         if isinstance(raw, dict):
+            raw.update(depth_pair_valid=pair_valid, depth_pair_delta_ms=pair_delta)
             raw.update(self.performance_stats())
         return result
 
     def get_observation_offline(self, rgb_image, ir_image, depth_image,
-                                observation_time):
+                                observation_time, frame_metadata=None):
         """离线数组入口：喂录制的 RGB/IR/depth 数组，复用与在线相同的检测核心。
 
         与 get_observation 的区别仅在于帧来源（numpy 数组而非 RealSense
@@ -3393,6 +3589,12 @@ class HybridBallDetector:
                 },
             }
         started = time.perf_counter()
+        from pingpong_controller.ball_observation_calibration import depth_pair_quality
+        metadata = frame_metadata or {}
+        pair_valid, pair_delta = depth_pair_quality(
+            metadata.get('sourceTimestampMs'), metadata.get('depthTimestampMs'))
+        if pair_valid is False:
+            depth_image = None
         result = self._detect_core(rgb_image, ir_image, depth_image, now)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
         self.detect_time_queue.append(elapsed_ms)
@@ -3401,6 +3603,7 @@ class HybridBallDetector:
         target.append(elapsed_ms)
         raw = result.get('raw_measurement')
         if isinstance(raw, dict):
+            raw.update(depth_pair_valid=pair_valid, depth_pair_delta_ms=pair_delta)
             raw.update(self.performance_stats())
         return result
 
@@ -3486,6 +3689,151 @@ class HybridBallDetector:
             dtype=np.uint8)
 
     def _detect_core(self, rgb_image, ir_image, depth_image, now):
+        # Counts cover both ROI and full-frame attempts; they are not counts
+        # of unique objects. Include effective morphology settings in every
+        # frame, including losses, so future failures can be diagnosed.
+        calibration = getattr(self, 'observation_calibration', None) or {}
+        self._axis_refinement_enabled = bool(
+            calibration.get('axis_refinement', {}).get('enabled', False)
+            and getattr(self, 'observation_quality_enabled', False)
+            and self.depth_mode == 'adaptive' and self.output_frame == 'base_link'
+            and self.T_base_camera is not None)
+        self._horizontal_edges = []
+        self._horizontal_edges_ambiguous = False
+        self._current_range_quality = None
+        self._flight_segment_reset = False
+        self._flight_segment_age_s = 0.0
+        self.ir_frame_diagnostics = {key: 0 for key in (
+            'ir_contours_examined', 'ir_candidates_accepted',
+            'ir_reject_area', 'ir_reject_roi_edge', 'ir_reject_radius',
+            'ir_reject_aspect', 'ir_reject_fill', 'ir_reject_image_edge',
+            'ir_reject_fit_error', 'ir_reject_contour_points', 'ir_reject_selection')}
+        result = self._detect_core_impl(rgb_image, ir_image, depth_image, now)
+        if (not result.get('detected') and depth_image is not None
+                and getattr(self, 'observation_quality_enabled', False)
+                and getattr(self, 'partial_surface_detection_enabled', False)
+                and self.depth_mode == 'adaptive' and self.output_frame == 'base_link'
+                and self.T_base_camera is not None):
+            from pingpong_controller.partial_ball_surface import partial_ball_candidates
+            partial = partial_ball_candidates(ir_image, depth_image,
+                fx=self.ir_fx, fy=self.ir_fy, cx=self.ir_cx, cy=self.ir_cy,
+                depth_scale=self.depth_scale, radius_m=self.ball_radius_mm/1000.)
+            # Ambiguous surfaces cannot initialize a new track. Association
+            # with the established flight state follows in the producer model.
+            if len(partial) == 1:
+                candidate = partial[0]
+                transform = self.T_base_camera @ self.T_ir_to_rgb
+                position = transform[:3, :3] @ candidate['center_m'] + transform[:3, 3]
+                raw = result.setdefault('raw_measurement', {})
+                raw['primary_rejection_reason'] = raw.get('depth_rejection_reason') or raw.get('observation_reason')
+                raw.update(cx=candidate['cx'], cy=candidate['cy'], radius=candidate['radius'],
+                    cx_raw=candidate['cx'], cy_raw=candidate['cy'], depth_method='partial_sphere',
+                    depth_sensor_rejected=False, depth_rejection_reason=None,
+                    sensor_center_depth_mm=float(candidate['center_m'][2]*1000.),
+                    measurement_trusted_3d=True, velocity_ready=False, velocity_valid=False,
+                    observation_state='partial_surface', observation_reason='partial_surface',
+                    detection_method='partial_surface', partial_surface_fit_rms_mm=candidate['fit_rms_mm'])
+                result.update(detected=True, position=(position*1000.).tolist(), velocity=[0., 0., 0.],
+                    detection_method='partial_surface')
+                self._current_range_quality = dict(range_valid=True, range_quality_strong=False,
+                    range_support_fraction=candidate['support_fraction'],
+                    range_support_pixels=candidate['support_pixels'], range_sigma_mm=6.,
+                    range_spread_mm=None, range_quality_reason='partial_sphere_surface')
+        raw = result.setdefault('raw_measurement', {})
+        if (not result.get('detected') and depth_image is not None
+                and getattr(self,'local_surface_detection_enabled',False)
+                and getattr(self,'observation_quality_enabled',False)
+                and self.depth_mode=='adaptive' and self.output_frame=='base_link'
+                and self.T_base_camera is not None and raw.get('geometry_quality_valid')
+                and raw.get('cx') is not None):
+            from pingpong_controller.local_ball_surface import local_surface
+            candidate=local_surface(ir_image,depth_image,raw['cx'],raw['cy'],raw['radius'],
+                self.ir_fx,self.ir_fy,self.ir_cx,self.ir_cy,self.depth_scale)
+            if candidate is not None:
+                transform=self.T_base_camera@self.T_ir_to_rgb
+                position=transform[:3,:3]@candidate['center_m']+transform[:3,3]
+                result.update(detected=True,position=(position*1000.).tolist(),velocity=[0.,0.,0.],detection_method='ir_sphere_surface')
+                raw.update(detection_method='ir_sphere_surface',depth_method='ir_sphere_surface',
+                    primary_rejection_reason=raw.get('depth_rejection_reason') or raw.get('observation_reason'),
+                    sensor_center_depth_mm=float(candidate['center_m'][2]*1000.),
+                    measurement_trusted_3d=True,velocity_ready=False,velocity_valid=False,
+                    observation_state='ir_sphere_surface',observation_reason='ir_sphere_surface',
+                    local_surface_fit_rms_mm=candidate['fit_rms_mm'],local_surface_curvature=candidate['curvature'],
+                    depth_sensor_rejected=False,depth_rejection_reason=None)
+                self._current_range_quality=dict(range_valid=True,range_quality_strong=False,range_sigma_mm=6.,
+                    range_support_fraction=candidate['support_fraction'],range_support_pixels=candidate['support_pixels'],
+                    range_spread_mm=None,range_quality_reason='ir_sphere_surface')
+        raw.update(self.ir_frame_diagnostics)
+        for key in ('threshold', 'use_adaptive', 'dilate_iterations',
+                    'close_kernel_size', 'denoise_kernel_size',
+                    'min_radius', 'max_radius', 'circularity_min'):
+            raw['ir_config_' + key] = self.ir_params.get(key)
+        selection = self.last_depth_selection if raw.get('cx') is not None else {}
+        raw['depth_recovery_prediction_consistent'] = bool(selection.get('recovery_prediction_consistent', False))
+        raw['depth_raw_jump_overridden'] = bool(selection.get('raw_jump_overridden', False))
+        if (getattr(self, 'observation_quality_enabled', False)
+                and self.depth_mode == 'adaptive'):
+            quality = self._current_range_quality or {}
+            raw.update(quality)
+            raw['range_quality_valid'] = bool(quality.get('range_valid', False))
+            raw['range_valid'] = bool(result.get('detected'))
+            raw['bearing_valid'] = bool(raw.get('cx') is not None and raw.get('cy') is not None)
+            raw['velocity_valid'] = bool(raw.get('velocity_ready', False))
+            raw['flight_segment_reset'] = bool(
+                self._flight_segment_reset or raw.get('velocity_impact_detected', False))
+            raw['flight_segment_age_s'] = float(self._flight_segment_age_s)
+            if raw.get('velocity_impact_detected') and self.last_velocity_impact_time is not None:
+                raw['flight_segment_age_s'] = max(0., float(now-self.last_velocity_impact_time))
+            # Only base_link output has the vertical gravity convention used
+            # by the downstream observation model. Keep camera-frame callers
+            # on their existing explicitly selected estimator path.
+            if self.output_frame == 'base_link' and self.T_base_camera is not None:
+                raw['ball_observation_version'] = 1
+                if raw['bearing_valid']:
+                    transform = self.T_base_camera @ self.T_ir_to_rgb
+                    ray = transform[:3, :3] @ np.array([
+                        (raw['cx']-self.ir_cx)/self.ir_fx,
+                        (raw['cy']-self.ir_cy)/self.ir_fy, 1.])
+                    ray /= np.linalg.norm(ray)
+                    for j, axis in enumerate('xyz'):
+                        raw['bearing_origin_'+axis+'_m'] = float(transform[j, 3])
+                        raw['bearing_direction_'+axis] = float(ray[j])
+                    raw['bearing_sigma_rad'] = 1.5/min(self.ir_fx, self.ir_fy)
+                calibration = getattr(self, 'observation_calibration', None)
+                if calibration is not None:
+                    delta = np.asarray(calibration['translation_m'])
+                    rotation=np.asarray(calibration.get('rotation',np.eye(3)))
+                    if result.get('detected'):
+                        result['position'] = (rotation@np.asarray(result['position'])+1000.*delta).tolist()
+                        result['velocity'] = (rotation@np.asarray(result['velocity'])).tolist()
+                    if raw['bearing_valid']:
+                        origin=rotation@transform[:3,3]+delta
+                        direction=rotation@ray
+                    for j, axis in enumerate('xyz'):
+                        key = 'bearing_origin_'+axis+'_m'
+                        if key in raw:
+                            raw[key] = float(origin[j])
+                            raw['bearing_direction_'+axis] = float(direction[j])
+                    if raw['bearing_valid']:
+                        from pingpong_controller.ball_observation_calibration import silhouette_range
+                        value=silhouette_range(raw,calibration,self.ir_params,
+                            float(direction@(rotation@transform[:3,2])),self.image_width,self.image_height,
+                            camera_settings=dict(exposure=getattr(self,'ir_exposure',None),
+                                gain=getattr(self,'ir_gain',None),laser_power=getattr(self,'ir_laser_power',None)))
+                        if value is not None:
+                            raw['monocular_range_m'],raw['monocular_range_sigma_m']=value
+                    raw['ball_calibration_applied'] = True
+                    raw['ball_observation_release'] = calibration.get('release','camera-observation-v1.0.0-20261016')
+                    raw['ball_calibration_time_shift_s'] = calibration['relative_time_s']
+                    raw['ball_contact_height_m'] = calibration.get('contact_height_m', .0082)
+                    raw['ball_contact_restitution'] = calibration.get('contact_restitution', .67)
+                    if self._axis_refinement_enabled:
+                        raw['ball_axis_refinement'] = True
+                        from pingpong_controller.ball_axis_observation import attach_horizontal_edges
+                        attach_horizontal_edges(self, raw)
+        return result
+
+    def _detect_core_impl(self, rgb_image, ir_image, depth_image, now):
         """混合检测核心（在线/离线共用）：YOLO ROI → IR 定位 → 深度 → 3D。
 
         输入均为 numpy 数组；depth_image 允许为 None（无 sensor 深度时退回
@@ -3544,13 +3892,22 @@ class HybridBallDetector:
             ir_detection = self._detect_in_ir(
                 ir_image, None, depth_image, now)
 
+        if (ir_detection is None
+                and getattr(self, 'depth_assisted_detection_enabled', False)):
+            ir_detection = self._detect_depth_supported_ir(ir_image, depth_image, now)
+            if ir_detection is not None:
+                detection_method = 'depth_supported_ir'
+
         self.ir_time_queue.append((time.time() - t_ir) * 1000)
 
         if ir_detection is None:
             self.ir_tracking_miss_count += 1
-            if not self.yolo_enabled and self.ir_tracking_miss_count >= 2:
+            if (not self.yolo_enabled and self.ir_tracking_miss_count >= 2
+                    and (self.motion_last_trusted_time is None
+                         or now - self.motion_last_trusted_time
+                         > self.SHORT_OBSERVATION_GAP_S)):
                 self.candidate_position_history.clear()
-            self._handle_observation_loss('ir_detection_lost')
+            self._handle_observation_loss('ir_detection_lost', observation_time=now)
             return {
                 'detected': False, 'position': [0, 0, 0],
                 'velocity': [0, 0, 0],
@@ -3603,6 +3960,47 @@ class HybridBallDetector:
                 ir_detection['mask'], ir_detection.get('mask_origin'),
                 prefer_near_surface=(self.depth_mode == 'adaptive'),
                 geometry_hint_mm=geom_depth_mm)
+
+        # A bright background blob can pass the IR shape test while the ball
+        # remains visible elsewhere. Retry before rejecting the entire frame;
+        # the replacement still needs independent same-frame stereo support.
+        if (getattr(self, 'depth_assisted_detection_enabled', False)
+                and not ir_detection.get('depth_assisted', False)
+                and (sensor_depth_mm is None
+                     or sensor_depth_mm > self.ADAPTIVE_SENSOR_MAX_MM
+                     or (geom_depth_mm is not None
+                         and abs(sensor_depth_mm - geom_depth_mm)
+                         > self.ADAPTIVE_SENSOR_GEOMETRY_GAP_MM))):
+            retry_start = time.perf_counter()
+            original_tracking = self._snapshot_ir_tracking_state()
+            self._restore_ir_tracking_state(ir_tracking_snapshot)
+            alternative = self._detect_depth_supported_ir(
+                ir_image, depth_image, now)
+            if alternative is None:
+                self._restore_ir_tracking_state(original_tracking)
+            else:
+                ir_detection = alternative
+                detection_method = 'depth_supported_ir'
+                self.ir_frame_diagnostics['depth_assisted_replaced_bad_depth'] = True
+                geom_depth_raw_mm = self._geometry_depth_mm(
+                    alternative.get('geometry_radius_px', alternative['radius']))
+                geom_depth_corrected_mm = self._apply_depth_correction(geom_depth_raw_mm)
+                geom_depth_mm = (geom_depth_corrected_mm
+                                 if self.depth_mode == 'geometry' else geom_depth_raw_mm)
+                sensor_depth_mm = self._get_depth_from_depthmap(
+                    alternative.get('cx_raw', alternative['cx']),
+                    alternative.get('cy_raw', alternative['cy']), depth_image,
+                    alternative['mask'], alternative.get('mask_origin'),
+                    prefer_near_surface=(self.depth_mode == 'adaptive'),
+                    geometry_hint_mm=geom_depth_mm)
+            self.ir_time_queue[-1] += (time.perf_counter() - retry_start) * 1000
+
+        if (getattr(self, 'observation_quality_enabled', False)
+                and self.depth_mode == 'adaptive'):
+            from pingpong_controller.depth_assisted_ir import range_quality
+            self._current_range_quality = range_quality(
+                ir_detection, depth_image, depth_scale=self.depth_scale,
+                selected_depth_mm=sensor_depth_mm)
 
         # 3b. sensor模式保持原值；adaptive任一异常条件命中时短时接管。
         depth_raw, depth_method = self._select_depth(
@@ -3657,7 +4055,7 @@ class HybridBallDetector:
             self._finalize_adaptive_depth_selection(False)
             self._restore_ir_tracking_state(ir_tracking_snapshot)
             self._handle_observation_loss(
-                'depth_untrusted', preserve_depth_guard=True)
+                'depth_untrusted', preserve_depth_guard=True, observation_time=now)
             return {
                 'detected': False,
                 'position': [0, 0, 0],
@@ -3741,7 +4139,9 @@ class HybridBallDetector:
         use_ir_depth_kalman = bool(
             getattr(self, 'ir_depth_kalman_enabled', False))
         use_synchronized_depth = bool(
-            getattr(self, 'synchronized_depth_enabled', False))
+            getattr(self, 'synchronized_depth_enabled', False)
+            or (getattr(self, 'observation_quality_enabled', False)
+                and self.depth_mode == 'adaptive'))
         # The switch is deliberately independent from the joint KF. This makes
         # all four raw/median-depth and filtered/unfiltered combinations valid.
         # Preview the exact median/Hampel result but defer the history write
@@ -3865,6 +4265,17 @@ class HybridBallDetector:
 
         motion_reacquisition_confirmed = bool(
             self.motion_last_gate_reason == 'reacquisition_confirmed')
+        if motion_reacquisition_confirmed:
+            # Two fresh points have established a new segment. The old
+            # pre-gap velocity is no longer a valid restart prior, especially
+            # when contact occurred during the missing interval.
+            seed = self.motion_reacquisition_seed
+            self.position_history.clear()
+            self._reset_velocity_tracking_state()
+            self.ir_depth_kf.reset()
+            self._flight_segment_reset = True
+            self._flight_segment_age_s = (
+                max(0., float(now-seed[0])) if seed is not None else 0.)
         if not use_synchronized_depth:
             self._depth_for_reconstruction(depth_raw, commit=True)
         self._finalize_adaptive_depth_selection(True)

@@ -110,7 +110,8 @@ class HybridBallDetectorAdapter:
                  camera_fy: Optional[float] = None,
                  camera_cx: Optional[float] = None,
                  camera_cy: Optional[float] = None,
-                 camera_dist_coeffs: Optional[list] = None):
+                 camera_dist_coeffs: Optional[list] = None,
+                 depth_assisted_detection_enabled: bool = False):
         """
         初始化适配器
 
@@ -165,6 +166,7 @@ class HybridBallDetectorAdapter:
 
         # 初始化HybridBallDetector
         self.detector = HybridBallDetector(
+            depth_assisted_detection_enabled=depth_assisted_detection_enabled,
             yolo_model_path=yolo_model_path,
             ball_diameter_mm=ball_diameter_mm,
             width=width,

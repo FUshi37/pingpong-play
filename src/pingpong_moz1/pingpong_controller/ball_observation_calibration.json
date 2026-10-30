@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "geometry_fingerprint": "30297ca1844028f2610c5d70ba18657ccc6f5ed7330f03f9c72f0de7c50808ea",
+  "translation_m": [
+    -0.0021389032435242877,
+    0.00270829911021992,
+    -0.008896545848318203
+  ],
+  "relative_time_s": 0.004100000000000025,
+  "contact_height_m": 0.0082,
+  "contact_restitution": 0.67,
+  "contact_fit_count": 234,
+  "fit_runs": [
+    "213015",
+    "213159",
+    "213510",
+    "213815",
+    "214056"
+  ],
+  "validation_runs": [
+    "214220",
+    "214344",
+    "214430",
+    "214558",
+    "214737"
+  ],
+  "note": "Rigid/time and silhouette coefficients unchanged from v1.1. v1.4 adds bounded horizontal edge evidence, reduced duplicate Z endpoint smoothing and a 3.2 ms contact timing mean. Runtime input is camera and received racket state only; mocap is evaluation only. Independent recordings and hardware acceptance remain pending.",
+  "rotation": [
+    [
+      0.9999942600977039,
+      -0.0006849133554807096,
+      0.0033182322615182922
+    ],
+    [
+      0.0007321536128233053,
+      0.9998981051835465,
+      -0.014256338991481267
+    ],
+    [
+      -0.003308129793875462,
+      0.014258686617226811,
+      0.9998928673279044
+    ]
+  ],
+  "release": "camera-observation-v1.4.0-rc1-20261019",
+  "silhouette_range": {
+    "a": 9.501323788540029,
+    "b": -0.3467915925115067,
+    "sigma_m": 0.012,
+    "ir_params": {
+      "threshold": 150,
+      "use_adaptive": false,
+      "dilate_iterations": 9,
+      "close_kernel_size": 5,
+      "denoise_kernel_size": 3,
+      "min_radius": 10,
+      "max_radius": 70,
+      "circularity_min": 0.7
+    },
+    "camera_settings": {
+      "exposure": 1500,
+      "gain": 16,
+      "laser_power": 360
+    }
+  },
+  "axis_refinement": {
+    "enabled": true,
+    "algorithm_version": "camera-axis-v1.4.0-rc1-20261019"
+  },
+  "observation_tuning": {
+    "enabled": true,
+    "filter_enabled": true,
+    "name": "camera-noise-v1.5.0-rc1-20261020",
+    "measurement_covariance_m2": [
+      [0.000001961101084838788, 0.0, 0.0],
+      [0.0, 0.00000225, 0.0],
+      [0.0, 0.0, 0.000009]
+    ],
+    "process_noise_diagonal_m2_s3": [0.01, 0.0075, 0.0225],
+    "guard_contact": true,
+    "robust_nu": 6.0,
+    "maximum_robust_inflation": 4.0,
+    "output_bias_m": [-0.0002065645635235295, -0.0005282696999817744, -0.00011524282322067805],
+    "calibration_runs": [
+      "20261015_213015", "20261015_213159", "20261015_213510", "20261015_213815", "20261015_214056",
+      "20261015_214220", "20261015_214344", "20261015_214430", "20261015_214558", "20261015_214737"
+    ],
+    "note": "Static output bias; conservative X R refinement and Y Q adjustment; bounded Student-t-style weighting outside contact. CAMERA_OBSERVATION_TUNING=legacy restores the prior observation math. Camera capture/control/receiver rates and validity deadlines are unchanged."
+  }
+}

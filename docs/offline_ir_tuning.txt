@@ -1,0 +1,176 @@
+原始相机录制与共用检测核心的离线调参器
+更新时间：2026-10-15（晚间修复 Record/Stop 桥接路径）
+
+一、录制
+
+在工作区根目录执行：
+
+  bash RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+
+随后在原有页面点击 Record / Stop。原始数据保存在该次录制目录的
+raw_camera/ 中，与 ball_sensor_samples.jsonl 的动捕记录配对。
+启动脚本现在默认开启原始录制；必须使用相机子进程和 direct_realsense。
+可显式设置 ENABLE_RAW_CAMERA_RECORDING=false 关闭。直接调用 Python 后端
+时仍需 --enable-raw-camera-recording。修改只对重启后的进程生效。
+按钮显示 Record + Raw，开始后必须看到“原始 IR/深度 … N saved”且 N 增长。
+未开启、相机不可用、到达限制、尚未落盘均在页面明确显示；普通录制计数
+增长不能替代原始帧已保存。metadata.config.recording.rawCamera 保存开关和限制。
+这条启动命令仍运行原来的 probe，保持其原有控制与操作流程。
+
+默认每次最多录制 60 秒、8 GiB 原始图像载荷，先达到的限制生效。
+达到限制只停止原始相机录制，普通日志和控制继续运行。
+例如需要更短的片段：
+
+  ENABLE_RAW_CAMERA_RECORDING=true RAW_CAMERA_MAX_DURATION_S=20 \
+    RAW_CAMERA_MAX_GB=3 bash RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+
+保存内容：
+  frames/*.npz     uint8 IR、uint16 原始深度；启用 YOLO 时同时保存 BGR。
+  frames.jsonl    帧时间、硬件帧号/时间、时钟同步状态、运行参数、球拍状态。
+  metadata.json   实际检测参数、内外参、深度比例、坐标偏移、源码 SHA256。
+  assets/         存在的深度校正模型和 YOLO 权重副本及其 SHA256。
+  summary.json    写入帧数、载荷、错误和录制丢帧计数、完成状态。
+
+IR 和深度保持原始整数值，NPZ 不压缩，不使用 JPG 代替原始数据。
+YOLO 关闭时不保存 RGB，默认 848×480×90 Hz 的 IR+深度载荷约
+110 MB/s；同时保存同分辨率 RGB 时约 220 MB/s。实际量随检测处理帧率变化。
+容量上限计原始数组载荷，NPZ/JSON 和模型副本另有少量或额外磁盘占用。
+
+录制范围是“正式检测线程处理过的帧”，包括普通漏检、深度拒绝等失败结果。
+采集缓冲中尚未进入检测就被新帧替换的帧、检测过程中抛异常的帧不在范围内。
+录制满载时也允许丢副本，因此不能把保存帧数当成相机接收帧数。
+
+二、控制和接收路径如何隔离
+
+  原有相机采集 → 原有检测 → 发布观测
+                            ↓ 仅交接帧引用
+                    单个最新待录引用
+                            ↓ 后台复制线程
+                    固定 4 槽共享内存
+                            ↓ 独立低优先级写盘进程
+                    NPZ + JSONL
+
+相机采集循环、关节反馈接收循环、动捕接收循环没有添加原始数据写入。
+交接在观测发布之后，offer() 不复制数组、不获取锁、不入队、不读时钟、
+不序列化、不写盘、不等待。该交接发生在相机子进程内。
+控制进程只通过原有管理通道传递录制目录/停止请求和少量状态计数。
+
+后台复制线程使用 nice 10；写盘进程使用 nice 19 和 Linux SCHED_IDLE。
+共享 GIL 的复制线程不使用 SCHED_IDLE，避免持有 GIL 时被长期饿死。
+缓存默认 4 槽，848×480 且 RGB 同分辨率时共享内存约 9.3 MiB，
+另有少量帧引用、进程本身及操作系统文件缓存，不是无限积压图片。
+缓存不足丢弃录制副本；写盘失败、写盘进程退出、容量/时长到限只影响录制。
+Stop 发出异步结束请求；应用关闭时只在相机退出路径有限等待写盘完成。
+
+页面录制状态显示 saved / dropped。summary.producer 中：
+  overwritten       后台复制尚未消费就被最新引用替代的帧。
+  poolFull          共享槽不足而丢弃的帧。
+  copyErrors        复制/交接失败的帧。
+  unprocessedAtStop 停止时尚未消费的帧。
+written 是实际成功保存数，writeErrors 是磁盘错误；sequence 和硬件帧号
+也保留间断。中途被强制终止的录制可能留下 state=recording，离线端会拒绝
+将它当成正常完成的录制。正常 Stop 后等 raw 状态变为 complete 再回放。
+
+这是无同步阻塞依赖的实现；共享 CPU、内存带宽和磁盘仍然有实际资源开销。
+软件压测不能证明实机任意负载下绝对零抖动。实机验收应分别对照录制关闭/
+开启时已有的控制频率、反馈接收频率、相机接收频率和周期 P99/最大值，
+同时查看录制丢帧。不要以强制无损录制替换当前丢副本策略。
+
+三、离线页面
+
+  python3 src/pingpong_moz1/pingpong_controller/tools/offline_ir_tuner.py \
+    --recording /绝对路径/probe_recording_时间 --serve
+
+打开 http://127.0.0.1:8092 。可用 --port 更换端口。
+依赖当前检测器已有的 Python 环境（numpy、opencv、pyrealsense2 等），
+不会启动相机、ROS 或机器人。IR-only 回放不会加载 YOLO 权重或 CUDA。
+界面包括：逐帧/跳帧、IR 候选与动捕投影、实际核心的二值图、拒绝原因、
+参数编辑、恢复录制参数、整段评估、下载候选配置。
+
+绿色圈为相机候选，红色十字为动捕投影。候选出现不代表三维观测已通过。
+正式在线入口和离线入口均调用 HybridBallDetector._detect_core。
+调参或向后跳帧会从录制片段起点按时间重放，保留滤波与轨迹因果关系；
+重复查看同一帧不会重复更新滤波器。长片段重放需要时间。
+记录中的运行配置或时钟周期改变时重建检测器，页面会标记 contextReset。
+录制开始前的历史状态以及录制丢失帧无法恢复，因此“共用算法”不代表
+与历史在线输出逐位相同。保存源码 SHA256 可用于追踪后续算法版本变化。
+
+可调整阈值、自适应阈值、背景亮度分位数、膨胀/闭运算/去噪、半径、
+形状筛选、深度邻域和候选筛选参数。另支持 synchronized_depth_enabled
+（当前帧像素配同帧深度，避开历史深度中值造成的运动错位），以及
+depth_foreground_percentile（adaptive 模式的前景深度分位数，默认仍为 25）。
+降低前景分位数可能增加错误深度，不以检出率单独决定优劣。
+曝光、增益和激光功率不能事后重算，
+需要另录片段比较；离线覆盖参数会拒绝这些硬件选项。
+
+四、动捕评价和批量搜索
+
+动捕只用于投影/评价，不输入检测器；本工具不加入高球预测补帧。
+时钟同步未就绪、真值分段冲突、超出真值时间范围、不合理插值速度或
+插值跨度超过 25 ms 的帧不作准确性评分。真值投影不在 IR 视野内也不计。
+在真值可用且在视野内的全部已保存帧上，计算：
+  correctCoverage：相机三维误差不超过 50 mm 的覆盖率，漏检也在分母中。
+  wrongRate：相机有输出但误差超过 50 mm 或非有限值的比例。
+  rmsMm / p95Mm：相机有效输出的三维误差，必须结合覆盖率一起看。
+  longestObservedBadIntervalS：保存数据中连续失败的时间；较大录制间隙会截断。
+50 mm 是当前固定工程评估容差，不是人工标注的图像误检标签。
+无可用真值时只报告检测统计，不自动推荐“最优”参数。
+相机使用录制时的坐标标定和时间戳，不自动套用旧 14 段的离线拟合校正。
+
+评估输出在 probe_recording_时间/offline_ir_tuning/：
+  evaluation.json：指标、参数、原始录制丢帧情况。
+  evaluation.csv：逐帧相机/动捕 xyz、误差、有效性、拒绝原因，可画轨迹。
+
+仅评估默认参数：
+  python3 src/pingpong_moz1/pingpong_controller/tools/offline_ir_tuner.py \
+    --recording /绝对路径/probe_recording_时间
+
+新建 grid.json，例如：
+  {"ir_threshold":[140,160,180],"dilate_iterations":[0,1],"min_radius":[3,4]}
+
+批量比较：
+  python3 src/pingpong_moz1/pingpong_controller/tools/offline_ir_tuner.py \
+    --recording /绝对路径/probe_recording_时间 --grid grid.json
+
+最多 512 个组合。--limit-frames N 可先小批检查，--output 可指定输出目录。
+每个组合生成 CSV/JSON，grid_results.json 按 (正确数-错误数)/真值有效帧数排序。
+请在不同录制片段上复核，不能把同一段调参集的最好分数当泛化效果。
+
+页面导出两个候选文件：
+  ir_params_candidate.json：与现有 IR 参数入口兼容，包含原录制硬件设置。
+  detector_overrides.json：扁平软件覆盖参数，可传 --params 继续批量评估。
+工具不自动改工作区的 ir_params.json。选定参数后，可用 IR_PARAMS_JSON
+指向候选文件。额外参数对应启动器的 DEPTH_NEIGHBORHOOD_PX、
+ENABLE_HYBRID_CANDIDATE_FILTER、CANDIDATE_MIN_BRIGHTNESS、
+CANDIDATE_MAX_DEPTH_DISAGREEMENT_MM、CANDIDATE_MOTION_SCALE_PX。
+synchronized_depth_enabled 对应 USE_SYNCHRONIZED_IR_DEPTH。
+depth_foreground_percentile 目前供共用核心与离线调参器使用，没有新增启动器
+环境变量；本批试验未推荐改变其默认值。
+ir_params_candidate.json 含硬件项，不能直接作为 --params 软件覆盖文件。
+
+五、已有 14 段及验证范围
+
+probe_recording_20261014_215509 至 234231 没有找到原始 IR/深度数组，
+现存标注 JPG 和标量诊断无法重新运行像素/深度检测。本工具不把这些文件
+冒充原始数据。它们仍可用于已有轨迹和失效分析；新录制用于完整离线调参。
+
+本次无硬件测试、合成示例、慢盘压测和结果见：
+  analysis_results/raw_camera_recording_20261015/report_zh.txt
+
+晚间修复及实机链路验证：
+此前 Record/Stop 错误地从 RosBridge 包装对象直接取 camera_process，
+实际相机进程位于 RosBridge.node.camera_process，导致请求被静默跳过。
+现已改用显式桥接方法，并补上 Record→IPC→写盘→Stop 集成测试。
+短时 D455 验证保存了 33 帧实际 uint8 IR/uint16 深度，Stop 后完成关闭，
+离线共用核心成功回放。该检查只启动相机子进程，不是整套控制频率验收。
+详见 analysis_results/camera_offline_tuning_20261015_new24/report_zh.txt。
+
+六、213015—214737 原始录制调参结果
+
+本批 10 段成功保存 33,439 帧原始 IR/深度。离线曲线与报告：
+  analysis_results/camera_raw_tuning_20261015_213015_214737/index.html
+  analysis_results/camera_raw_tuning_20261015_213015_214737/report_zh.txt
+保守检测覆盖文件 detector_overrides.json 只启用同帧深度，原 IR 筛选保持。
+冻结坐标/时间校正单独保存在 frozen_alignment.json，仅在分析中应用。
+实验配置提高检出率但在测试段增加大误差，保存在 experimental_detector_overrides.json；
+没有自动写入实时参数，没有启动控制、相机或改变录制/接收路径。

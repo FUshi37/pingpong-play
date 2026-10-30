@@ -1,0 +1,177 @@
+{
+  "scope": "Offline real actor + observation/history + original 24-sweep projection; synthetic inputs",
+  "hardwareCommandsSent": 0,
+  "rosInitialized": false,
+  "receiverFrequencyMeasured": false,
+  "fullCameraMocapRecordingLoadMeasured": false,
+  "models": [
+    {
+      "profile": "fplc_gpu1_v172",
+      "actorDim": 72,
+      "checkpointSha256": "96c9b8349fa700402a62d1c34e5f8ed2b968bab47cf2b9d3957a1db6cfccba4a",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.9962061980876,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.4248307789980572,
+        "p99": 0.6308364602728034,
+        "maximum": 0.8379729997614049
+      },
+      "controlIntervalMs": {
+        "p99": 5.061822900133848,
+        "maximum": 5.145064999851456
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    },
+    {
+      "profile": "fplc_gpu1_v223",
+      "actorDim": 72,
+      "checkpointSha256": "ec046d9c5f6502f0be86faa07749ed23f8e7a61d4bf03ac2b82b011846611b76",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.9967106046662,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.44793381499448515,
+        "p99": 0.8411984898566515,
+        "maximum": 1.1361209999449784
+      },
+      "controlIntervalMs": {
+        "p99": 5.102331840043917,
+        "maximum": 5.154061000212096
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    },
+    {
+      "profile": "fplc_gpu0_v224",
+      "actorDim": 117,
+      "checkpointSha256": "8eea9844f0264f8c6cbd27cd55070f505e22e951d6980f954be6c38a8e43fea6",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.99788502738252,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.577426060999187,
+        "p99": 1.0410634098161606,
+        "maximum": 1.392329999816866
+      },
+      "controlIntervalMs": {
+        "p99": 5.079577779879401,
+        "maximum": 5.166529999769409
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    },
+    {
+      "profile": "fplc_gpu1_v224",
+      "actorDim": 117,
+      "checkpointSha256": "1cf8926858d4ddd45686c338458ed92d24dba0eb0b80dbc2202822712bb1b203",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.9978555585428,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.515054867001254,
+        "p99": 0.7240511003055872,
+        "maximum": 0.8349450004061509
+      },
+      "controlIntervalMs": {
+        "p99": 5.0790924996181275,
+        "maximum": 5.1445349999994505
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    },
+    {
+      "profile": "fplc_gpu1_v274_s9",
+      "actorDim": 72,
+      "checkpointSha256": "0fbdedc5a99ee895ebaa06a5e9a7610060de9f045c841391d61110499f0fa40f",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.9978615644113,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.41363557200475043,
+        "p99": 0.5787222401295367,
+        "maximum": 1.0032260001935356
+      },
+      "controlIntervalMs": {
+        "p99": 5.1004631598698325,
+        "maximum": 5.226779999702558
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    },
+    {
+      "profile": "fplc_gpu1_v274_s11",
+      "actorDim": 72,
+      "checkpointSha256": "75504f91ead525200162871eda6c0f27b0f5edb4cbf30ebeba47e7e5332a1144",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.99791321497176,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.39501458700533476,
+        "p99": 0.544959069898141,
+        "maximum": 0.8535409997421084
+      },
+      "controlIntervalMs": {
+        "p99": 5.092684719938916,
+        "maximum": 5.147273000147834
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    },
+    {
+      "profile": "fplc_gpu0_v319",
+      "actorDim": 72,
+      "checkpointSha256": "fc1ae6e78a3b2647a4398708fdeb98cfdc710dd5a6aa1bc04980db09e265185f",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.9963530194469,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.3928348449830992,
+        "p99": 0.5428779102294357,
+        "maximum": 0.6834069999968051
+      },
+      "controlIntervalMs": {
+        "p99": 5.098354060019119,
+        "maximum": 5.122031000155403
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    }
+  ]
+}

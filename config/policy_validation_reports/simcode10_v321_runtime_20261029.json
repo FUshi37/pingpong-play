@@ -1,0 +1,34 @@
+{
+  "scope": "Offline real actor + observation/history + original 24-sweep projection; synthetic inputs",
+  "hardwareCommandsSent": 0,
+  "rosInitialized": false,
+  "receiverFrequencyMeasured": false,
+  "fullCameraMocapRecordingLoadMeasured": false,
+  "models": [
+    {
+      "profile": "fplc_v321_s4_u2097_20261029_r1",
+      "actorDim": 72,
+      "checkpointSha256": "889eb976b18567d607ab9f86f35457c89f901e2ecf221b9391128cb471f0d001",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.99699291804623,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.6655765459781833,
+        "p99": 1.4841324197914219,
+        "maximum": 4.1417750016989885
+      },
+      "controlIntervalMs": {
+        "p99": 5.199530559402774,
+        "maximum": 5.309546000717091
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    }
+  ],
+  "concurrentOfflineRegression": true
+}

@@ -1,7 +1,9 @@
-"""Versioned simcode9 asset and real-workspace contracts (standard library)."""
+"""Versioned simcode9/10 asset and real-workspace contracts (standard library)."""
 from __future__ import annotations
 
 import json
+import math
+import os
 from pathlib import Path
 
 REPO_ROOT = next(
@@ -9,15 +11,40 @@ REPO_ROOT = next(
     if (parent / "config" / "fplc_model_contracts.json").is_file())
 CONTRACT_PATH = REPO_ROOT / "config" / "fplc_model_contracts.json"
 FPLC_CONTRACTS = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
+SIMCODE10_CONTRACT_PATH = REPO_ROOT / "config" / "fplc_simcode10_model_contracts.json"
+SIMCODE10_CONTRACTS = json.loads(SIMCODE10_CONTRACT_PATH.read_text(encoding="utf-8"))
+if FPLC_CONTRACTS.keys() & SIMCODE10_CONTRACTS.keys():
+    raise ValueError("simcode10 must not replace an existing FPLC model identity")
+FPLC_CONTRACTS.update(SIMCODE10_CONTRACTS)
+SIMCODE10_PROFILES = tuple(SIMCODE10_CONTRACTS)
 FPLC_PROFILES = tuple(FPLC_CONTRACTS)
 # Authenticated training bounds; the actor's projection keeps these unchanged.
 FPLC_LOWER_M = (-0.348, -0.700, 1.000)
 FPLC_UPPER_M = (0.348, -0.280, 1.150)
 # Operator-requested real envelope, independent of the training projection.
 # Explicit physical limits may tighten it; reference orientation is unchanged.
-FPLC_REAL_LOWER_M = (-0.100, -0.600, 0.950)
-FPLC_REAL_UPPER_M = (0.100, -0.400, 1.200)
+FPLC_REAL_LOWER_M = (-0.150, -0.600, 0.950)
+FPLC_REAL_UPPER_M = (0.150, -0.350, 1.200)
 FPLC_REAL_ROLL_PITCH_LIMIT_DEG = (4.0, 4.0)
+
+
+# Running feedback tolerates a bounded receiver delay without waiting away a
+# control period. Arming/reset/stop-hold retain their separate 10 ms checks.
+def joint_feedback_max_age_s(value: str | float = "15") -> float:
+    try:
+        milliseconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("FPLC_JOINT_FEEDBACK_MAX_AGE_MS must be between 10 and 20") from exc
+    if not math.isfinite(milliseconds) or not 10.0 <= milliseconds <= 20.0:
+        raise ValueError("FPLC_JOINT_FEEDBACK_MAX_AGE_MS must be between 10 and 20")
+    return milliseconds / 1000.0
+
+
+FPLC_JOINT_FEEDBACK_MAX_AGE_S = joint_feedback_max_age_s(
+    os.environ.get("FPLC_JOINT_FEEDBACK_MAX_AGE_MS", "15"))
+FPLC_JOINT_FEEDBACK_WAIT_S = 0.005
+FPLC_JOINT_FEEDBACK_MAX_GAP_S = (
+    FPLC_JOINT_FEEDBACK_MAX_AGE_S + FPLC_JOINT_FEEDBACK_WAIT_S)
 
 
 def fplc_assets(profile: str, repo_root: Path = REPO_ROOT) -> tuple[Path, Path]:

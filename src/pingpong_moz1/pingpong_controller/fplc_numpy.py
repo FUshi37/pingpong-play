@@ -1,4 +1,4 @@
-"""NumPy port of simcode9 FPLC numerical contracts.
+"""NumPy port of simcode9/10 FPLC numerical contracts.
 
 Sources: fixed_plane_v92/v93/v149, fixed_contact_plane_training and
 cartesian_pose_action_projection_jax. The simulator's 24-sweep weighted
@@ -59,6 +59,8 @@ def fplc_projection_runtime():
 
 
 HISTORY_LAGS_TICKS = tuple(range(8))
+V224_HISTORY_LAGS_TICKS = (10, 20, 40)
+V224_PREFIX_HISTORY_LENGTH = 41
 ACTOR_OBS_DIM = 137
 class CartesianPoseProjectionJaxResult(NamedTuple):
     """Projected batch command and per-lane diagnostics."""
@@ -719,3 +721,34 @@ def make_simple_position_observation(
         np.asarray(target_xy_m),
         np.asarray(ball_position_valid, dtype=np.float32)[:, None],
     ), axis=-1).astype(np.float32)
+
+
+def make_v224_history_context(
+    prefix_history: np.ndarray, *, step_count: int, masked: bool = False,
+) -> np.ndarray:
+    """Build 45-D observed local history after the V149 72-D prefix.
+
+    The current prefix is history[:, 0]. At each 50/100/200 ms lag, use
+    observed ball displacement, observed normal change, past q_ref error,
+    past normalized source age and validity. Both vector differences are
+    expressed in the current observed racket frame; neither is a velocity.
+    See the simcode10 six-model archive report's V224 history contract.
+    """
+    history = np.asarray(prefix_history, dtype=np.float32)
+    if history.ndim != 3 or history.shape[1:] != (V224_PREFIX_HISTORY_LENGTH, 72):
+        raise ValueError("V224 prefix history must have shape (N,41,72)")
+    current = history[:, 0]
+    first_axis, second_axis = current[:, 55:58], current[:, 58:61]
+    normal = np.cross(first_axis, second_axis)
+    rotation = np.stack((first_axis, second_axis, normal), axis=-1)
+    blocks = []
+    for lag in V224_HISTORY_LAGS_TICKS:
+        past = history[:, lag]
+        valid = (not masked and step_count >= lag) & (current[:, 71] > .5) & (past[:, 71] > .5)
+        past_normal = np.cross(past[:, 55:58], past[:, 58:61])
+        delta_ball = np.einsum('nji,nj->ni', rotation, current[:, 28:31] - past[:, 28:31])
+        delta_normal = np.einsum('nji,nj->ni', rotation, normal - past_normal)
+        block = np.concatenate((delta_ball, delta_normal, past[:, 14:21],
+                                past[:, 61:62], valid[:, None].astype(np.float32)), axis=-1)
+        blocks.append(np.where(valid[:, None], block, np.float32(0)))
+    return np.concatenate(blocks, axis=-1).astype(np.float32)

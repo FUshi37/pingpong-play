@@ -228,10 +228,19 @@ def validate_policy_release(
             deployment_ball_observation_rate_hz,
             "requested deployment_ball_observation_rate_hz",
         ))
-    if not math.isclose(actual_deploy_hz, expected_deploy_hz, abs_tol=1e-12):
+    supported_deploy_hz = [expected_deploy_hz]
+    if str(release_id).startswith("fplc_"):
+        raw_rates = release.get("supported_deployment_ball_observation_rates_hz", [expected_deploy_hz])
+        if not isinstance(raw_rates, list) or not raw_rates:
+            raise ReleaseContractError("FPLC supported ball rates must be a non-empty list")
+        supported_deploy_hz = [_finite_positive(v, "supported deployment ball rate") for v in raw_rates]
+        if (expected_deploy_hz not in supported_deploy_hz
+                or any(v not in (90., 120., 200.) for v in supported_deploy_hz)):
+            raise ReleaseContractError("FPLC supported ball rates must contain the default and use 90/120/200 Hz")
+    if actual_deploy_hz not in supported_deploy_hz:
         raise ReleaseContractError(
             f"deployment ball rate mismatch for release {release_id}: "
-            f"manifest={expected_deploy_hz}, requested={actual_deploy_hz}")
+            f"manifest={supported_deploy_hz}, requested={actual_deploy_hz}")
     # This difference is intentional and recorded, never treated as mismatch.
     _finite_positive(
         release["training_ball_observation_rate_hz"],
@@ -299,7 +308,8 @@ def validate_policy_release(
             raise ReleaseContractError("FPLC model configuration missing or invalid") from exc
         if (release["policy_profile"] != release_id
                 or release["observation_dim"] != model_contract["actor_dim"]
-                or release.get("actor_schema") != model_contract["saved_nominal_domain"]["fixed_contact_actor_observation_schema"]
+                or release.get("actor_schema") != model_contract.get(
+                    "actor_schema", model_contract["saved_nominal_domain"]["fixed_contact_actor_observation_schema"])
                 or release["checkpoint_sha256"] != model_contract["sha256"]
                 or release["policy_xml_sha256"] != model_contract["policy_xml_sha256"]
                 or release.get("reset_preset") != model_contract["native_reset_contract"]["preset"]
@@ -314,7 +324,9 @@ def validate_policy_release(
         "explicit_overrides": dict(explicit_overrides or {}),
         "training_ball_observation_rate_hz": float(
             release["training_ball_observation_rate_hz"]),
-        "deployment_ball_observation_rate_hz": expected_deploy_hz,
+        "deployment_ball_observation_rate_hz": actual_deploy_hz,
+        "default_deployment_ball_observation_rate_hz": expected_deploy_hz,
+        "supported_deployment_ball_observation_rates_hz": supported_deploy_hz,
         "ball_rate_override_status": "verified_deployment_override",
     }
     if include_git:

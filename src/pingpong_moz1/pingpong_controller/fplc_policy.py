@@ -1,4 +1,4 @@
-"""Independent 72/156-D FPLC adapter; publishes q_ref to the robot's RMP.
+"""Independent 72/117/156-D FPLC adapters; publish q_ref to the robot's RMP.
 
 MuJoCo is used only for FK/Jacobians and the frozen 0.7 s reference posture.
 No simulated RMP, PD loop, delay queue or actuator compensation executes
@@ -20,10 +20,10 @@ from pingpong_controller.fplc_deployment import (
 from pingpong_controller.fplc_numpy import (
     ContactTargetConfig, advance_position_history, compute_dynamic_contact_target,
     make_history_actor_observation, make_predicted_contact_context,
-    make_simple_position_observation, matrix_to_euler_xyz_numpy,
+    make_simple_position_observation, make_v224_history_context, matrix_to_euler_xyz_numpy,
     project_cartesian_pose_qvel_numpy, propagate_ballistic_state_to_age,
     relative_xyz_euler_rate_jacobian_numpy, rotation_matrix_to_6d,
-    warm_fplc_projection,
+    warm_fplc_projection, V224_PREFIX_HISTORY_LENGTH,
 )
 from pingpong_controller.mjx_rl_policy import MjxRLPolicyController
 from pingpong_controller.policy_release_manifest import sha256_file
@@ -119,7 +119,12 @@ class FPLCPolicyController(MjxRLPolicyController):
         for key in ('episode_target_x_range_m', 'episode_target_y_range_m',
                     'episode_racket_anchor_z_range_m'):
             if tuple(cfg[key]) != (0.0, 0.0):
-                raise RuntimeError('FPLC native reset requires the frozen zero-offset lane')
+                # V319 was trained across target offsets. Hardware reset
+                # deliberately selects its authenticated nominal lane; never
+                # sample training DR or move the episode target implicitly.
+                offsets = self.contract['native_reset_contract'].get('deployment_episode_offsets_m')
+                if offsets != [0.0, 0.0, 0.0] or not cfg[key][0] <= 0.0 <= cfg[key][1]:
+                    raise RuntimeError('FPLC native reset requires the frozen zero-offset lane')
         desired = np.array([*cfg['fixed_contact_workspace_center_xy_m'],
                             cfg['fixed_contact_surface_z_m']], dtype=np.float64)
         qadr = [int(self.mj_model.jnt_qposadr[j]) for j in self._arm_jids]
@@ -167,6 +172,14 @@ class FPLCPolicyController(MjxRLPolicyController):
                 or int(payload.get('act_dim', 0)) != 7):
             raise RuntimeError("FPLC actor/critic/action schema mismatch")
         cfg = payload.get('env_cfg', {})
+        if self.contract['actor_dim'] not in (72, 117, 156):
+            raise RuntimeError("FPLC actor schema is not implemented")
+        if self.contract['actor_dim'] == 117:
+            if (not cfg.get('v224_history_enabled')
+                    or cfg.get('v224_actor_schema') != 'v224_v149_prefix72_observed_local_history45'
+                    or cfg.get('v224_history_masked') is not False
+                    or not cfg.get('fixed_plane_v149_simple_obs_enabled')):
+                raise RuntimeError("FPLC V224 requires its independent 72+45-D history schema")
         for key, expected in self.contract['env_contract'].items():
             actual = cfg.get(key)
             # JSON arrays and checkpoint tuples have identical semantics.
@@ -187,12 +200,20 @@ class FPLCPolicyController(MjxRLPolicyController):
         self.ball_history = None
         self.racket_history = None
         self.age_history = None
+        self.prefix_history = None
         self._held_direct_position = None
         self._held_direct_stamp = None
         self._held_direct_age = 0.0
         self._direct_observed = False
         self._dropout_reference_hold_active = False
         self._fplc_tick = 0
+        self._ball_state_rate_hz = None
+        self._held_state_position = None
+        self._held_state_age = 0.
+        self._held_state_measurement_age = 0.
+        self.ball_state_refresh_count = 0
+        self.last_ball_state_refresh = False
+        self.last_ball_state_predicted = False
         self.last_projection = {}
 
     def invalidate_after_intervention(self):
@@ -307,9 +328,17 @@ class FPLCPolicyController(MjxRLPolicyController):
                 observation_scales=None, confirmed_hit_count=0, ball_observed=None,
                 direct_ball_position_m=None, direct_ball_age_s=None,
                 direct_ball_stamp_s=None, ball_state_already_propagated=False,
+                ball_observation_rate_hz=90., ball_history_position_m=None,
+                ball_history_age_s=None, ball_history_measurement_age_s=None,
                 episode_target_xy_m=None, hold_reference_on_dropout=False,
                 enable_dropout_reference_hold=True):
         del arm_sample_stamp_s  # History advances at 200 Hz, including repeated encoder samples.
+        state_rate = float(ball_observation_rate_hz)
+        if state_rate not in (90., 120., 200.):
+            raise RuntimeError('FPLC ball state rate must be 90, 120 or 200 Hz')
+        if (not self._fplc_requires_measured_reset
+                and self._ball_state_rate_hz != state_rate):
+            raise RuntimeError('FPLC ball state rate change requires an explicit policy reset')
         step_dt = self.dt if dt is None else float(dt)
         age = float(ball_obs_age_s)
         if not np.isclose(step_dt, .005, rtol=0, atol=1e-12):
@@ -332,6 +361,19 @@ class FPLCPolicyController(MjxRLPolicyController):
         direct_age = age if direct_ball_age_s is None else float(direct_ball_age_s)
         if not np.isfinite(direct_age) or direct_age < 0:
             raise RuntimeError('FPLC direct sample age is invalid')
+        history_position = None
+        history_age = None
+        history_measurement_age = None
+        if ball_history_position_m is not None:
+            history_position = _finite(ball_history_position_m, 3, 'predicted history position')
+            history_age = float(ball_history_age_s)
+            history_measurement_age = float(ball_history_measurement_age_s if ball_history_measurement_age_s is not None else history_age)
+            if (not np.isfinite([history_age, history_measurement_age]).all()
+                    or not 0. <= history_age <= self.LOST_BALL_TIMEOUT_S
+                    or not 0. <= history_measurement_age <= self.LOST_BALL_TIMEOUT_S):
+                raise RuntimeError('FPLC predicted history measurement age is invalid or older than 350 ms')
+        use_state_history = bool(state_rate > 90. or history_position is not None)
+        self.last_ball_state_refresh = False
         position, rotation, _, _, _, _ = self._pose(q, with_jacobian=False)
         pose = np.concatenate((position, rotation_matrix_to_6d(rotation[None])[0])).astype(np.float32)
         if self._fplc_requires_measured_reset:
@@ -345,33 +387,64 @@ class FPLCPolicyController(MjxRLPolicyController):
             self._held_direct_position, self._held_direct_age = direct.copy(), direct_age
             self._held_direct_stamp = direct_ball_stamp_s
             self._direct_observed = True
+            self._ball_state_rate_hz = state_rate
+            self._held_state_position = direct.copy()
+            self._held_state_age = direct_age
+            self._held_state_measurement_age = direct_age
+            self.ball_state_refresh_count = 1
+            self.last_ball_state_refresh = True
+            self.last_ball_state_predicted = False
             self._fplc_requires_measured_reset = False
             self._fplc_tick = 0
         else:
-            # Frozen fractional 90 Hz refresh. Repeated source frames keep their
-            # original age; no refresh is fabricated by a 200 Hz history tick.
+            # Raw-source 90 Hz retains its original contract. A camera model
+            # can explicitly supply a bounded current-time history at any
+            # selected rate, keeping real range age separate from state time.
             tick = self._fplc_tick
-            refresh = is_fractional_refresh(tick, 90.0, self.dt)
+            refresh = is_fractional_refresh(tick, state_rate, self.dt)
             self._held_direct_age += self.dt
+            if use_state_history:
+                self._held_state_age += self.dt
+                self._held_state_measurement_age += self.dt
             if refresh:
                 self._direct_observed = observed
                 if observed:
                     self._held_direct_position = direct.copy()
                     self._held_direct_age = direct_age
                     self._held_direct_stamp = direct_ball_stamp_s
+                if use_state_history and (history_position is not None or observed):
+                    self._held_state_position = (history_position if history_position is not None else direct).copy()
+                    self._held_state_age = history_age if history_position is not None else direct_age
+                    self._held_state_measurement_age = history_measurement_age if history_position is not None else direct_age
+                    self.last_ball_state_predicted = history_position is not None
+                self.ball_state_refresh_count += 1
+                self.last_ball_state_refresh = True
             self.ball_history, self.racket_history, self.age_history = advance_position_history(
                 ball_positions=self.ball_history, racket_poses=self.racket_history, ball_ages=self.age_history,
-                ball_position_now=self._held_direct_position[None], racket_pose_now=pose[None],
-                ball_age_now=np.asarray([self._held_direct_age], dtype=np.float32))
+                ball_position_now=(self._held_state_position if use_state_history else self._held_direct_position)[None], racket_pose_now=pose[None],
+                ball_age_now=np.asarray([self._held_state_age if use_state_history else self._held_direct_age], dtype=np.float32))
         self._fplc_tick += 1
         target_xy = self.episode_target_xy if episode_target_xy_m is None else _finite(episode_target_xy_m, 2, 'episode target')
         common = dict(q=q[None], dq=dq[None], q_ref_error=(self.arm_cmd_q-q)[None],
                       previous_action=self.prev_action[None], ball_positions=self.ball_history,
                       ball_ages=self.age_history, target_xy_m=target_xy[None])
-        if self._expected_obs_dim == 72:
+        if self._expected_obs_dim in (72, 117):
             observation = make_simple_position_observation(**common, racket_pose_now=pose[None],
                                                           ball_position_valid=np.asarray([self._direct_observed]))[0]
-        else:
+            if self._expected_obs_dim == 117:
+                # Advance exactly once per policy tick, including held camera
+                # samples and dropout holds. Reset pads the cache, while the
+                # tick count masks all unavailable 50/100/200 ms lags.
+                if self.prefix_history is None:
+                    self.prefix_history = np.broadcast_to(
+                        observation, (1, V224_PREFIX_HISTORY_LENGTH, 72)).copy()
+                else:
+                    self.prefix_history = np.concatenate((
+                        observation[None, None], self.prefix_history[:, :-1]), axis=1)
+                context = make_v224_history_context(
+                    self.prefix_history, step_count=self._fplc_tick - 1)
+                observation = np.concatenate((observation, context[0]))
+        elif self._expected_obs_dim == 156:
             if int(confirmed_hit_count) < 0 or int(confirmed_hit_count) != confirmed_hit_count:
                 raise RuntimeError('FPLC confirmed hit count must be nonnegative and integral')
             cfg = self._checkpoint_env_cfg
@@ -411,7 +484,7 @@ class FPLCPolicyController(MjxRLPolicyController):
             # The clean actors were not trained on low-ball detector loss.
             # Update truthful history/age, but do not infer a new QVEL from an
             # out-of-distribution observed flag. Keep the existing q_ref until
-            # a trusted direct observation reaches the internal 90 Hz sampler.
+            # a trusted direct observation reaches the selected state sampler.
             # This is an explicit zero-QVEL hold, not a rewritten reference.
             if not self.pose_is_safe(self.arm_cmd_q):
                 raise RuntimeError('FPLC dropout reference outside training pose bounds')

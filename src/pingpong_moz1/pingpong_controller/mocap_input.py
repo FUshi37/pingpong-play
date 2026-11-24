@@ -60,6 +60,12 @@ class MocapBallInput:
                 self.marker_id = self.detector.marker_id = marker_id
                 self._resynchronize_locked('marker_changed')
 
+    def set_observation_bounds(self, bounds):
+        if self.detector.set_observation_bounds(bounds):
+            # The clock mapping still belongs to the same UDP source. Fence
+            # recording history without adding a new clock-fit warm-up gap.
+            self._recording_sync_request += 1
+
     def __init__(self,
                  udp_host: str = '0.0.0.0',
                  udp_port: int = 65501,
@@ -81,7 +87,8 @@ class MocapBallInput:
                  clock_sync_window_s: float = 10.0,
                  marker_x_limits_m: Optional[Tuple[float, float]] = None,
                  enable_recording_cache: bool = False,
-                 marker_z_limits_m: Optional[Tuple[float, float]] = (-1.0, 1.0)):
+                 marker_z_limits_m: Optional[Tuple[float, float]] = (-1.0, 1.0),
+                 observation_bounds_m=None):
         self.detector = MocapBallDetector(
             udp_host=udp_host,
             udp_port=udp_port,
@@ -100,6 +107,7 @@ class MocapBallInput:
             clock_sync_window_s=clock_sync_window_s,
             marker_x_limits_m=marker_x_limits_m,
             marker_z_limits_m=marker_z_limits_m,
+            observation_bounds_m=observation_bounds_m,
         )
         self.marker_id = int(marker_id)
         self.position_unit = str(position_unit)
@@ -226,4 +234,5 @@ class MocapBallInput:
             'addr': diagnostics.get('addr'),
             'raw': diagnostics.get('raw'),
             'markerSelection': diagnostics.get('marker_selection', {}),
+            'observationBoundsM': diagnostics.get('observation_bounds_m'),
         }

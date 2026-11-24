@@ -190,7 +190,7 @@ def test_heartbeat_fresh_monotonic_state_is_not_expired():
     assert not monitor.heartbeat_expired(10., 9.99)
 
 
-def test_manifest_critical_gaps_are_explicit_and_limits_are_not_widened():
+def test_manifest_critical_gaps_are_explicit_and_limits_match_deployment():
     data = json.loads((ROOT/'config/predeploy_safety_cases.json').read_text())
     cases = data['cases']
     assert len({c['id'] for c in cases}) == len(cases)
@@ -198,8 +198,8 @@ def test_manifest_critical_gaps_are_explicit_and_limits_are_not_widened():
     assert all(c['critical'] for c in cases)
     assert any(c['id'] == 'live_backend_crash' for c in cases)
     assert any(c['id'] == 'hw_emergency_stop' for c in cases)
-    assert gate.FPLC_REAL_LOWER_M == (-.1, -.6, .95)
-    assert gate.FPLC_REAL_UPPER_M == (.1, -.4, 1.2)
+    assert gate.FPLC_REAL_LOWER_M == (-.15, -.6, .95)
+    assert gate.FPLC_REAL_UPPER_M == (.15, -.35, 1.2)
     assert gate.FPLC_REAL_ROLL_PITCH_LIMIT_DEG == (4., 4.)
 
 

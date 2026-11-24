@@ -39,6 +39,23 @@ def test_explicit_benchmark_rt_optout_does_not_change_scheduler(monkeypatch):
     assert calls==[] and not info['realtimeApplied']
 
 
+def test_feedback_thread_uses_its_own_priority_setting(monkeypatch):
+    calls = mock_scheduler(monkeypatch)
+    monkeypatch.setenv('PROBE_CONTROL_RT_PRIORITY', '5')
+    monkeypatch.setenv('PROBE_JOINT_RT_PRIORITY', '1')
+    info = runtime.configure_joint_feedback_thread()
+    assert calls == [(0, runtime.os.SCHED_RR | getattr(runtime.os, 'SCHED_RESET_ON_FORK', 0), 1)]
+    assert info['realtimeApplied'] and info['feedbackCpus'] == [0, 2]
+    assert 'controlCpus' not in info
+
+
+def test_cadence_reports_tail_latency_alongside_mean_frequency():
+    result = runtime.cadence_summary([.005] * 198 + [.002, .008])
+    assert result['measuredHz'] == pytest.approx(200.)
+    assert result['intervalP99Ms'] == pytest.approx(5.)
+    assert result['maximumIntervalMs'] == pytest.approx(8.)
+
+
 @pytest.mark.parametrize('priority',[-1,21])
 def test_out_of_range_priority_rejected_before_syscalls(monkeypatch,priority):
     calls=mock_scheduler(monkeypatch)

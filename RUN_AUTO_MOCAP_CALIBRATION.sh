@@ -3,6 +3,11 @@
 # Live mode publishes slow right-arm joint commands on /mx_mix_command.
 # Run: ./RUN_AUTO_MOCAP_CALIBRATION.sh
 # Slower: ./RUN_AUTO_MOCAP_CALIBRATION.sh --speed-deg-s 3 --settle-seconds 5
+# Raw mocap rigid-body range (meters, before calibration; blank axis is free):
+# --mocap-observation-x-limits-m=-0.4,0.4 --mocap-observation-y-limits-m=0.5,1.5
+# --mocap-observation-z-limits-m=0.2,2.0
+# Also accepts MOCAP_OBSERVATION_X/Y/Z_LIMITS_M environment variables.
+# Range mode selects one in-range rigid body per packet; UDP slot/id may change.
 # Retries: --max-attempts 50 --retry-seconds 1
 # Points that remain unstable or exhaust sampling attempts are logged and skipped.
 # Missing samples are replaced by intermediate poses inside the V172 position

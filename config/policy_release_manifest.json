@@ -323,7 +323,7 @@
       ],
       "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
       "model_contract_path": "config/fplc_simcode10_model_contracts.json",
-      "model_contract_sha256": "c5cf09ce4173727cdbb70c7b0faa775bff856612bfdb63e1a645b7856ec64588",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
       "reset_preset": "simcode9_native",
       "supported_deployment_ball_observation_rates_hz": [
         90.0,
@@ -359,7 +359,7 @@
       ],
       "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
       "model_contract_path": "config/fplc_simcode10_model_contracts.json",
-      "model_contract_sha256": "c5cf09ce4173727cdbb70c7b0faa775bff856612bfdb63e1a645b7856ec64588",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
       "reset_preset": "simcode9_native",
       "supported_deployment_ball_observation_rates_hz": [
         90.0,
@@ -395,7 +395,7 @@
       ],
       "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
       "model_contract_path": "config/fplc_simcode10_model_contracts.json",
-      "model_contract_sha256": "c5cf09ce4173727cdbb70c7b0faa775bff856612bfdb63e1a645b7856ec64588",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
       "reset_preset": "simcode9_native",
       "supported_deployment_ball_observation_rates_hz": [
         90.0,
@@ -431,7 +431,7 @@
       ],
       "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
       "model_contract_path": "config/fplc_simcode10_model_contracts.json",
-      "model_contract_sha256": "c5cf09ce4173727cdbb70c7b0faa775bff856612bfdb63e1a645b7856ec64588",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
       "reset_preset": "simcode9_native",
       "supported_deployment_ball_observation_rates_hz": [
         90.0,
@@ -467,7 +467,7 @@
       ],
       "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
       "model_contract_path": "config/fplc_simcode10_model_contracts.json",
-      "model_contract_sha256": "c5cf09ce4173727cdbb70c7b0faa775bff856612bfdb63e1a645b7856ec64588",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
       "reset_preset": "simcode9_native",
       "supported_deployment_ball_observation_rates_hz": [
         90.0,
@@ -503,7 +503,7 @@
       ],
       "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
       "model_contract_path": "config/fplc_simcode10_model_contracts.json",
-      "model_contract_sha256": "c5cf09ce4173727cdbb70c7b0faa775bff856612bfdb63e1a645b7856ec64588",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
       "reset_preset": "simcode9_native",
       "supported_deployment_ball_observation_rates_hz": [
         90.0,
@@ -539,13 +539,216 @@
       ],
       "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
       "model_contract_path": "config/fplc_simcode10_model_contracts.json",
-      "model_contract_sha256": "c5cf09ce4173727cdbb70c7b0faa775bff856612bfdb63e1a645b7856ec64588",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
       "reset_preset": "simcode9_native",
       "supported_deployment_ball_observation_rates_hz": [
         90.0,
         120.0,
         200.0
       ]
+    },
+    {
+      "release_id": "fplc_gpu1_v322",
+      "policy_profile": "fplc_gpu1_v322",
+      "checkpoint_path": "simcode10/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/fplc_v322_gpu1_late_center_precision_20261103_r1/training_qualified_inherited1200s.pkl",
+      "checkpoint_sha256": "d35ea68508cbdfbaddfb3766f21c3f4e82f6f127e3caab8262d9e69a9ad307bc",
+      "policy_xml_path": "simcode10/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+      "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+      "observation_dim": 72,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "fixed_plane_v149_position_only_contiguous_72d",
+      "training_workspace_lower_m": [
+        -0.145,
+        -0.595,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.145,
+        -0.355,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_simcode10_model_contracts.json",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
+      "reset_preset": "simcode9_native",
+      "supported_deployment_ball_observation_rates_hz": [
+        90.0,
+        120.0,
+        200.0
+      ]
+    },
+    {
+      "release_id": "fplc_gpu0_v323",
+      "policy_profile": "fplc_gpu0_v323",
+      "checkpoint_path": "simcode10/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/fplc_v323_gpu0_training_quality_20261105_r4/training_qualified_u00003075.pkl",
+      "checkpoint_sha256": "126fd19f6e9f93ccb6b57b675c6f7a6ed55fb3e22134ce556a5711bd40e57d55",
+      "policy_xml_path": "simcode10/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+      "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+      "observation_dim": 72,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "fixed_plane_v149_position_only_contiguous_72d",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_simcode10_model_contracts.json",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
+      "reset_preset": "simcode9_native",
+      "supported_deployment_ball_observation_rates_hz": [
+        90.0,
+        120.0,
+        200.0
+      ]
+    },
+    {
+      "release_id": "fplc_gpu1_v324",
+      "policy_profile": "fplc_gpu1_v324",
+      "checkpoint_path": "simcode10/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/fplc_v324_gpu1_training_quality_20261105_r3/training_qualified_u00002947.pkl",
+      "checkpoint_sha256": "d1197b4024377c3e73927e75d91fff47411db5cdb1088c30a6c2cda86b4a9679",
+      "policy_xml_path": "simcode10/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+      "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+      "observation_dim": 72,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "fixed_plane_v149_position_only_contiguous_72d",
+      "training_workspace_lower_m": [
+        -0.145,
+        -0.595,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.145,
+        -0.355,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_simcode10_model_contracts.json",
+      "model_contract_sha256": "15c5dd1d1fda313242745161eeb5b2fade58d0133c2943c6dd8c7ecbe31a30b4",
+      "reset_preset": "simcode9_native",
+      "supported_deployment_ball_observation_rates_hz": [
+        90.0,
+        120.0,
+        200.0
+      ]
+    },
+    {
+      "release_id": "fplc_gpu0_v325",
+      "policy_profile": "fplc_gpu0_v325",
+      "checkpoint_path": "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/fplc_v325_gpu0_reference_center_20261118_r2/converged_s15_u00014400.pkl",
+      "checkpoint_sha256": "fd9def8f5fdb511e1543cbcca264e0021738ff07c6425e8d393cb1c240918e97",
+      "policy_xml_path": "simcode11/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+      "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+      "observation_dim": 114,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "fixed_plane_v149_position72_observed_ball_history42_wind_v1",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_simcode11_model_contracts.json",
+      "model_contract_sha256": "1c50937ff95e6a98c06f5977c52fcaefc0b4c84eb6761704f5a9d62cfd13f764",
+      "reset_preset": "simcode9_native",
+      "supported_deployment_ball_observation_rates_hz": [
+        90.0,
+        120.0,
+        200.0
+      ]
+    },
+    {
+      "release_id": "fplc_gpu0_v325_u416",
+      "policy_profile": "fplc_gpu0_v325_u416",
+      "checkpoint_path": "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_provisional416_20261124_r1/model.pkl",
+      "checkpoint_sha256": "97c89251fe8a54b193f7a9348799cf3fab58b487322a5cdfc27cc51fe2a49dce",
+      "policy_xml_path": "simcode11/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+      "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+      "observation_dim": 120,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "single5_windfeature120_high_v2",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_simcode11_u416_model_contracts.json",
+      "model_contract_sha256": "fc005a017288c3be1123041ff1a8781c8754a1219b343c1011ef34d99bd9e037",
+      "reset_preset": "simcode9_native",
+      "supported_deployment_ball_observation_rates_hz": [
+        90.0,
+        120.0,
+        200.0
+      ],
+      "training_status": {
+        "user_accepted_provisional": true,
+        "original_composite_assessment_passed": false,
+        "final1200s99accepted": false,
+        "source_model_physics_ball_upper_m": 1.5,
+        "height155_recovery_evidence_separate": true,
+        "current_training_continues": true
+      },
+      "actor_layers": [
+        120,
+        282,
+        282,
+        282,
+        7
+      ],
+      "real_roll_pitch_limit_deg": [
+        7.0,
+        7.0
+      ],
+      "checkpoint_metadata_path": "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_provisional416_20261124_r1/MANIFEST.json",
+      "checkpoint_metadata_sha256": "93106b1bfc2f54a7be30939ba54ed1ac1f600419909142d2152cfd175cd61dde",
+      "actor_ball_age_mode": "native_refresh_clock",
+      "deployment_revision": "u416_native_age_v2"
     }
   ]
 }

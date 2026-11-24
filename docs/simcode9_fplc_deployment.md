@@ -227,6 +227,13 @@ simcode9 的球边界 done 同样撤销 Send，发布一次新鲜实测位置保
 可用 `FPLC_JOINT_FEEDBACK_MAX_AGE_MS=10|15|20` 启动对照，合法范围为 10–20 ms。
 启动使能、复位使能及停止位置保持仍要求 10 ms，GPU0/V153 门限保持 10 ms。
 JointState 订阅深度由 10 改为 1，调度恢复后直接读取最新原子 q/dq，避免排空旧反馈。
+2026-11-02 实测原生 MCMessageNode 的可靠深度 1 订阅只有约 60–71 Hz；同源同时
+对照中，可靠深度 10 和 BEST_EFFORT 深度 1/10 均约 200 Hz。独立关节接收器现显式
+使用 KEEP_LAST / depth=1 / BEST_EFFORT，保留最新状态语义；修复后的生产接收器只读
+复测为 200.08 Hz，最大接收年龄 5.32 ms。反馈年龄、源序列和超时检查保持原门限。
+原始证据位于 `analysis_results/runtime_frequency_retest_20261102/native_qos.json` 和
+`native_bridge_fixed.json`。状态快照即使因控制预算推迟，也消耗本次 30 Hz 诊断时隙，
+避免在后续每个 200 Hz 周期重试准备相机/反馈诊断；下一诊断时隙再尝试。
 年龄在配置门限内时直接执行本拍，不增加等待、不改写接收时间、不外推关节状态。
 超过门限时，只在当前控制周期剩余预算内释放锁/GIL 等待新回调；推理前预留 3 ms，
 发令前预留 0.5 ms，单次等待最多 5 ms，绝对等待界限为旧样本接收时刻加“门限 + 5 ms”。
@@ -238,6 +245,20 @@ JointState 订阅深度由 10 改为 1，调度恢复后直接读取最新原子
 `receiptIntervalsOver10ms` 始终统计原始 10 ms 长尾，`receiptIntervalsOverLimit` 统计配置门限；
 `lastWait` 记录最近一次等待的起始年龄、实际可用预算、耗时、结束年龄及恢复结果。
 故障帧即使没有推理 trace，也保存同一控制 tick 捕获的关节时间信息。
+2026-11-02 修复等待结果与最终取样之间的竞态：等待超时后若新回调已经到达，
+推理和发令按最终原子 q/dq 样本的实际年龄、一致性及当前控制周期截止时间判断；
+不会仅因先前等待返回 false 就拒绝新鲜样本，也不延长等待或放宽反馈年龄上限。
+重复 header 下只要 q 或有效 dq 改变，就按已有接收时钟回退规则生成新的完整样本，
+避免沿用旧序号却替换 dq 导致 `same_sequence_dq_changed`。
+“仅记录球轨迹”现在额外保留 `reason`、`controlStatus` 和 `racketSource`：包含实际发送状态、
+重使能原因、取样年龄/错误、等待恢复状态及实际模型名称，不增加关节向量或策略输入输出。
+旧精简记录缺失的触发原因无法补回；`policy_feedback_hold` 仍可能表示真实反馈故障或推理拒绝。
+针对 `20261102_212003` 的启动欠频，镜像模型切换提前到复位/等待阶段准备，正式策略
+起点仍使用当拍测量单独重置episode。完整录制的向量舍入及相机字段格式化由录制进程
+完成，控制侧冻结原始数值，保持落盘字段和舍入一致。镜像reset入队不阻塞控制线程。
+`policy_control_timing_fault` 后锁存 `policy_timing_hold`，不继续执行未发送actor，
+保留首发故障事件与重使能详情；停止后的工作空间检查继续参考实测关节FK，独立复位仍可用。
+80周期、185.185Hz最低频率和25ms最大间隔规则保持不变。
 `backendControlLoop.cadence` 与 `backendControlLoop.policyPublications` 分别统计
 控制周期及实际策略发令间隔，不能将平均 200 Hz 单独作为稳定性结论。
 硬停止的 `holdAttempted` 表示已尝试保持，`holdSent` 只在保持指令实际发送成功时为 true。

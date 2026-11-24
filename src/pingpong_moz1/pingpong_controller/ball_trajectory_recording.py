@@ -11,15 +11,23 @@ TRAJECTORY_FIELDS = (
     "mode", "ballSource", "ballObservationSeq", "cameraStampS",
     "rawValid", "valid", "age", "rawBall", "measuredBall", "measuredVelocity",
     "observedBall", "observedVelocity", "predictedBall", "predictedVelocity",
-    "predictedBallIsPredicted", "racket",
+    "predictedBallIsPredicted", "racket", "racketSource", "reason",
+)
+CONTROL_STATUS_FIELDS = (
+    "policyExecuted", "commandPublished", "publishCommands", "rearmRequired", "rearmReason",
+    "activePolicyProfile", "activePolicyModel", "jointFeedbackAgeS", "maximumJointFeedbackAgeS",
+    "jointSampleControlError", "jointFeedbackWaitSucceeded", "jointFeedbackRecoveredBeforeRead",
 )
 SYNC_FIELDS = ("ready", "generation", "epoch", "sourceDomain", "receiverDomain")
 MEASUREMENT_FIELDS = ("markerId", "ball_calibration_applied", "ball_calibration_time_shift_s")
 
 
 def compact_trajectory_sample(row):
-    """Whitelist ball fields; do not mutate the live sample or sensor caches."""
+    """Keep ball data and scalar stop evidence without mutating live samples."""
     output = {key: row[key] for key in TRAJECTORY_FIELDS if key in row}
+    if isinstance(row.get("controlStatus"), dict):
+        output["controlStatus"] = {key: row["controlStatus"][key]
+                                   for key in CONTROL_STATUS_FIELDS if key in row["controlStatus"]}
     for key, fields in (("ballClockSync", SYNC_FIELDS), ("cameraMeasurement", MEASUREMENT_FIELDS)):
         if isinstance(row.get(key), dict):
             output[key] = {name: row[key][name] for name in fields if name in row[key]}

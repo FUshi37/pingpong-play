@@ -87,6 +87,8 @@ EXPECTED_OBS_DIM_WITH_DELAY = 67  # 50 base + 17 delay conditioning
 EXPECTED_OBS_DIM_GPU0_REAL_RMP = 57
 EXPECTED_OBS_DIM_FPLC_GPU1 = 72
 EXPECTED_OBS_DIM_FPLC_V224 = 117
+EXPECTED_OBS_DIM_FPLC_WIND = 114
+EXPECTED_OBS_DIM_FPLC_SINGLE5 = 120
 EXPECTED_OBS_DIM_FPLC_GPU0 = 156
 
 # Observation contracts are explicit because the deployed legacy checkpoint was
@@ -288,6 +290,8 @@ class RLPolicyController:
                 EXPECTED_OBS_DIM_GPU0_REAL_RMP,
                 EXPECTED_OBS_DIM_FPLC_GPU1,
                 EXPECTED_OBS_DIM_FPLC_V224,
+                EXPECTED_OBS_DIM_FPLC_WIND,
+                EXPECTED_OBS_DIM_FPLC_SINGLE5,
                 EXPECTED_OBS_DIM_FPLC_GPU0}:
             raise ValueError(
                 f"unsupported expected_obs_dim={self._expected_obs_dim}")

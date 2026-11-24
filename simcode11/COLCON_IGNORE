@@ -1,0 +1,1 @@
+# Training snapshots and policy assets are loaded by path, not built by colcon.

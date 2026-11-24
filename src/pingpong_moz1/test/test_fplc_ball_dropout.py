@@ -116,6 +116,33 @@ def test_predictor_expiry_does_not_gain_another_350ms_hold(holder):
     assert not sample(p, valid=False, observed=False, propagated=False)[2]
 
 
+def test_velocity_only_bridge_preserves_but_ages_measured_backup(holder):
+    p, clock = holder
+    trusted = sample(p, age=.01)
+    p.last_high_ball_occlusion_info = {'positionPredicted': False, 'velocityPredicted': True}
+    clock.now = .03
+    assert sample(p, observed=True, propagated=True, age=.001)[2]
+    assert p.policy_ball_sample_has_valid
+    assert p.policy_ball_sample_source_stamp_s == 1.
+    clock.now = .04
+    held = sample(p, valid=False, age=.6)
+    assert held[2] and held[3] == pytest.approx(.05)
+    np.testing.assert_array_equal(held[0], trusted[0])
+    clock.now = .36
+    assert not sample(p, valid=False)[2]
+
+
+def test_repeated_velocity_bridges_cannot_refresh_measured_backup(holder):
+    p, clock = holder
+    sample(p, age=.01)
+    p.last_high_ball_occlusion_info = {'positionPredicted': False, 'velocityPredicted': True}
+    for n in range(1, 81):
+        clock.now = n * .005
+        sample(p, observed=True, propagated=True, age=0.)
+    assert not p.policy_ball_sample_has_valid
+    assert not sample(p, valid=False)[2]
+
+
 @pytest.mark.parametrize('hold', [True, False])
 def test_reference_mode_applies_to_valid_prediction_without_extending_prediction_expiry(holder, hold):
     p, _clock = holder
@@ -172,9 +199,13 @@ def test_both_actor_layouts_keep_the_direct_observed_flag_false_during_dropout(c
                            direct_ball_position_m=pos, direct_ball_age_s=age,
                            direct_ball_stamp_s=1.,
                            hold_reference_on_dropout=p.fplc_direct_ball_input['hold_reference_on_dropout'])
-    observed_index = 71 if controller._expected_obs_dim == 72 else 135
+    observed_index = 71 if controller._expected_obs_dim in (72, 114, 117, 120) else 135
     assert controller.last_obs[observed_index] == 0.
-    assert np.all(controller.age_history[0] >= .01)
+    if controller.contract.get('actor_ball_age_mode') == 'native_refresh_clock':
+        np.testing.assert_allclose(controller.age_history[0, :5], [.005, 0., .010, .005, 0.], atol=1e-8)
+        assert controller.last_ball_observation_ages['heldRawMeasurementAgeS'] >= .01
+    else:
+        assert np.all(controller.age_history[0] >= .01)
 
 
 def test_dropout_never_calls_actor_or_moves_reference_and_waits_for_sampled_recovery(controller, holder, monkeypatch):
@@ -411,7 +442,7 @@ def test_switch_can_resume_actor_immediately_and_return_to_hold(controller, hold
     tick(2, False, False)
     tick(3, False, False)
     assert len(calls) == 3 and not controller._dropout_reference_hold_active
-    observed_index = 71 if controller._expected_obs_dim == 72 else 135
+    observed_index = 71 if controller._expected_obs_dim in (72, 114, 117, 120) else 135
     assert calls[-1][observed_index] == 0.
     target = controller.arm_cmd_q.copy()
     tick(4, False, True)

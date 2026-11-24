@@ -1,0 +1,112 @@
+{
+  "date": "2026-11-10",
+  "scope": "Localhost synthetic UDP only; no robot/camera/mocap hardware",
+  "hardwareCommandsSent": 0,
+  "baselineSha256": "05e1cda1bcbab892174a80fcc54e7df4e94733045d3837cabf2450563602f51a",
+  "controlScheduler": {
+    "unchangedMethods": [
+      "_backend_control_loop",
+      "_start_backend_control_loop",
+      "_backend_control_timer_callback"
+    ],
+    "passed": true,
+    "sensorWorkerPollSeconds": 0.002,
+    "sensorConfigPumpSeconds": 0.01,
+    "backendControlHz": 200,
+    "backendSnapshotHz": 30,
+    "browserRequestHz": 60,
+    "unchangedFrequencyArgumentDefinitions": [
+      "--control-rate-hz",
+      "--backend-snapshot-rate-hz",
+      "--browser-step-rate-hz"
+    ]
+  },
+  "streamComparisons": [
+    {
+      "mode": "baseline",
+      "nominalUdpHz": 120,
+      "seconds": 2,
+      "sent": 240,
+      "received": 240,
+      "accepted": 240,
+      "measuredSendHz": 120.00567420973508,
+      "measuredReceiveHz": 120.02252936374477,
+      "controlCachePolls": 400,
+      "measuredControlCachePollHz": 200.00082546710047,
+      "cacheReadMicroseconds": {
+        "p99": 68.86339042466714,
+        "maximum": 123.34700022620382
+      }
+    },
+    {
+      "mode": "updated",
+      "nominalUdpHz": 120,
+      "seconds": 2,
+      "sent": 240,
+      "received": 240,
+      "accepted": 240,
+      "measuredSendHz": 120.000867902477,
+      "measuredReceiveHz": 120.0169529218771,
+      "controlCachePolls": 400,
+      "measuredControlCachePollHz": 200.00781002930836,
+      "cacheReadMicroseconds": {
+        "p99": 63.60674046845815,
+        "maximum": 85.2149996717344
+      }
+    },
+    {
+      "mode": "baseline",
+      "nominalUdpHz": 240,
+      "seconds": 2,
+      "sent": 480,
+      "received": 480,
+      "accepted": 480,
+      "measuredSendHz": 240.00449376602194,
+      "measuredReceiveHz": 240.0349698979304,
+      "controlCachePolls": 400,
+      "measuredControlCachePollHz": 200.00693908784623,
+      "cacheReadMicroseconds": {
+        "p99": 52.547580025930074,
+        "maximum": 69.74600000830833
+      }
+    },
+    {
+      "mode": "updated",
+      "nominalUdpHz": 240,
+      "seconds": 2,
+      "sent": 480,
+      "received": 480,
+      "accepted": 480,
+      "measuredSendHz": 240.0023786190284,
+      "measuredReceiveHz": 240.04721475139834,
+      "controlCachePolls": 400,
+      "measuredControlCachePollHz": 200.01569225872217,
+      "cacheReadMicroseconds": {
+        "p99": 82.733479594026,
+        "maximum": 187.85700012813322
+      }
+    }
+  ],
+  "actualSensorSubprocessRangeUpdate": {
+    "passed": true,
+    "selectedBefore": 1,
+    "selectedAfter": 2,
+    "oldCacheInvalidated": true,
+    "syncRequests": 1,
+    "clockFitEpochPreserved": true,
+    "clockSyncRequests": 0,
+    "received": 160,
+    "clockReady": true
+  },
+  "regressions": {
+    "relatedCasesPassed": 352,
+    "skippedLocalSocketCase": 1,
+    "preExistingClockCalibrationFailures": 8,
+    "sameFailuresReproducedWithPreEditReceiverAndAdapter": true
+  },
+  "syntaxChecks": {
+    "bash": true,
+    "python": true,
+    "embeddedBrowserJavaScript": true
+  }
+}

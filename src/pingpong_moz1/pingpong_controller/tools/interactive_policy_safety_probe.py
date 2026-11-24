@@ -44,6 +44,7 @@ try:
     from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
     from rclpy.executors import MultiThreadedExecutor, SingleThreadedExecutor
     from rclpy.node import Node
+    from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import CameraInfo, CompressedImage, Image, JointState
     from mc_core_interface.msg import (
         MechUnitCmd,
@@ -67,6 +68,7 @@ except Exception as exc:  # noqa: BLE001 - ROS bridge is optional.
     MechUnitStateArray = None
     _ROS_AVAILABLE = False
     _ROS_IMPORT_ERROR = exc
+    HistoryPolicy = QoSProfile = ReliabilityPolicy = None
 
 
 SCRIPT_PATH = Path(__file__).resolve()
@@ -74,6 +76,10 @@ PACKAGE_ROOT = SCRIPT_PATH.parents[2]
 REPO_ROOT = SCRIPT_PATH.parents[4]
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
+
+from pingpong_controller.mocap_observation_range import (
+    normalize_observation_bounds, parse_observation_bounds,
+)
 
 from pingpong_controller.ball_state_estimator import (
     BallStateEstimator,
@@ -103,6 +109,7 @@ from pingpong_controller.done_condition_monitor import (
 )
 from pingpong_controller.fplc_deployment import (
     FPLC_CONTRACTS, FPLC_PROFILES, fplc_assets, fplc_workspace_intersection,
+    fplc_workspace_for_profile,
     FPLC_JOINT_FEEDBACK_MAX_AGE_S, FPLC_JOINT_FEEDBACK_WAIT_S,
     FPLC_JOINT_FEEDBACK_MAX_GAP_S,
 )
@@ -116,6 +123,9 @@ from pingpong_controller.probe_ball_recording import (
     make_sensor_recording_sample, complete_ball_sensor_recording_snapshot,
 )
 from pingpong_controller.juggle_recording import RecordingJuggleCounter
+from pingpong_controller.recording_payload import (
+    RecordingVector, recording_camera_measurement, finish_recording_payload,
+)
 from pingpong_controller.mjx_rl_policy import (
     Gpu1QaccFtV153PolicyController,
     Gpu0QvelRealRmpV85PolicyController,
@@ -1096,6 +1106,7 @@ class ProbeConfig:
     mocap_clock_sync_min_span_s: float = 0.05
     mocap_clock_sync_window_s: float = 10.0
     mocap_marker_z_limits_m: tuple[float, float] | None = (-1.0, 1.0)
+    mocap_observation_bounds_m: tuple | None = None
     enable_depth_assisted_ir: bool = False
 
     @property
@@ -1259,6 +1270,9 @@ _CAMERA_MEASUREMENT_SCALAR_KEYS += (
     'observation_compute_ms',
 ) + tuple('observation_position_'+k+'_m' for k in 'xyz') + tuple('observation_velocity_'+k+'_m_s' for k in 'xyz')
 _CAMERA_MEASUREMENT_SCALAR_KEYS += tuple('observation_bounce_position_'+k+'_m' for k in 'xyz') + tuple('observation_bounce_velocity_'+k+'_m_s' for k in 'xyz')
+
+
+_CAMERA_MEASUREMENT_SCALAR_KEY_SET = frozenset(_CAMERA_MEASUREMENT_SCALAR_KEYS)
 
 
 def _camera_measurement_payload(raw_measurement: Any) -> dict[str, Any] | None:
@@ -1526,6 +1540,7 @@ def _recording_writer_main(
                     elif kind == "control":
                         sample = dict(item.get("sample", {}))
                         sensor_snapshot = sample.pop("_ballSensorSnapshot", None)
+                        sample = finish_recording_payload(sample, _camera_measurement_payload)
                         if sensor_snapshot is not None:
                             sample["ballSensors"] = complete_ball_sensor_recording_snapshot(sensor_snapshot)
                         if trajectory_only:
@@ -2384,7 +2399,7 @@ def _write_policy_trace_csv(samples: list[dict[str, Any]], analysis_dir: Path) -
                 row.get("predictedVelocity") or estimator.get("velocityMps"))
             real_ee = row.get("racket") or ros.get("jointEe")
             if real_ee is None and isinstance(obs, list) and len(obs) >= 29:
-                real_ee = obs[52:55] if len(obs) in (72, 117, 156) else obs[26:29]
+                real_ee = obs[52:55] if len(obs) in (72, 114, 117, 120, 156) else obs[26:29]
             put_point(out_row, "real_ee", real_ee)
             put_point(out_row, "command_ee", row.get("commandRacket"))
             put_point(out_row, "ros_cart", ros.get("cartPosition"))
@@ -2533,7 +2548,7 @@ def _sample_ball_state_6d(sample: dict[str, Any]) -> np.ndarray | None:
         sample.get("observedBall"), sample.get("observedVelocity")))
     policy_obs = sample.get("policyObs")
     if (isinstance(policy_obs, (list, tuple)) and len(policy_obs) >= 26
-            and len(policy_obs) not in (72, 117, 156)):
+            and len(policy_obs) not in (72, 114, 117, 120, 156)):
         candidates.append(policy_obs[20:26])
 
     for candidate in candidates:
@@ -3425,13 +3440,13 @@ def _analyze_sim_real_gap(
          _numeric_array(sim_rows, "sim.policyCommand"),
          list(RIGHT_ARM_JOINTS), "rad"),
     ]
-    fplc_observation = len(obs_names) in (72, 117, 156)
+    fplc_observation = len(obs_names) in (72, 114, 117, 120, 156)
     if fplc_observation:
         # Keep only fields actually present in these independent actor schemas.
         group_specs = [spec for spec in group_specs if spec[0] in {
             "policy_obs", "joint_position", "joint_velocity", "joint_acceleration",
             "policy_action", "executed_action", "command_position"}]
-        age_start = 61 if len(obs_names) in (72, 117) else 124
+        age_start = 61 if len(obs_names) in (72, 114, 117, 120) else 124
         for name, start, stop, unit in (
                 ("ball_observation", 28, 31, "m"),
                 ("ball_position_history", 28, 52, "m"),
@@ -4260,13 +4275,13 @@ window.addEventListener('resize', draw); draw();
 
 
 def _obs_names(width: int) -> list[str]:
-    if width in (72, 117, 156):
+    if width in (72, 114, 117, 120, 156):
         prefix = [*(f"arm_q[{i}]" for i in range(7)),
                   *(f"arm_dq[{i}]" for i in range(7)),
                   *(f"q_ref_error[{i}]" for i in range(7)),
                   *(f"projected_previous_action[{i}]" for i in range(7)),
                   *(f"held_ball_history[{tick}].{axis}" for tick in range(8) for axis in "xyz")]
-        if width in (72, 117):
+        if width in (72, 114, 117, 120):
             names = prefix + [*(f"racket_pose[{i}]" for i in range(9)),
                              *(f"ball_age_history[{i}]/0.25" for i in range(8)),
                              "episode_target_x", "episode_target_y", "ball_observed"]
@@ -4276,6 +4291,16 @@ def _obs_names(width: int) -> list[str]:
                               *(f"history_{lag_ms}ms.local_normal_delta_{axis}" for axis in "xyz"),
                               *(f"history_{lag_ms}ms.q_ref_error[{i}]" for i in range(7)),
                               f"history_{lag_ms}ms.ball_age/0.25", f"history_{lag_ms}ms.valid"]
+            elif width in (114, 120):
+                lags_ms = (0, 50, 100, 150, 200, 300, 400, 500)
+                names += [f"wind_history_{lag}ms.delta_{axis}" for lag in lags_ms for axis in "xyz"]
+                names += [f"wind_history_{lag}ms.age/0.6" for lag in lags_ms]
+                names += [f"wind_history_{lag}ms.valid" for lag in lags_ms]
+                names += (["roll_authority/20deg", "pitch_authority/20deg"] if width == 114 else [
+                    "acquisition_progress_3s", "acquisition_fast_phase",
+                    "estimated_wind_x/1.6", "estimated_wind_y/1.6",
+                    "wind_estimate_age/0.6", "wind_estimate_valid",
+                    "high_wind_feature_x", "high_wind_feature_y"])
             return names
         return prefix + [*(f"racket_pose_history[{tick}][{i}]" for tick in range(8) for i in range(9)),
                          *(f"ball_age_history[{i}]/0.25" for i in range(8)),
@@ -5350,7 +5375,7 @@ class AsyncProbeRecorder:
     def record_event(self, event: dict[str, Any]) -> None:
         if not event:
             return
-        if getattr(self, "trajectory_only", False) and event.get("event") not in ("start", "stop"):
+        if getattr(self, "trajectory_only", False) and event.get("event") not in ("start", "stop", "control_safety_stop"):
             return
         self._put({"kind": "event", "event": dict(event)})
 
@@ -6866,7 +6891,7 @@ class SimMirrorSubprocess:
             "ball_obs_age_s": max(0.0, float(ball_obs_age_s)),
         }
         try:
-            self.command_q.put(reset_cmd, timeout=1.0)
+            self.command_q.put_nowait(reset_cmd)
         except Full:
             self.command_drops += 1
             self.stream_valid = False
@@ -7070,7 +7095,7 @@ def _policy_observation_feature(obs, feature):
         "TrackingErrorObs": (42, 49), "NominalVelocityObs": (51, 58),
         "DelayedTrackingErrorObs": (58, 65), "ContactPhaseObs": (65, 67),
     }
-    if len(obs) in (72, 117, 156):
+    if len(obs) in (72, 114, 117, 120, 156):
         slices = {"BallObservationObs": (28, 31), "RacketPositionObs": (52, 55),
                   "TrackingErrorObs": (14, 21)}
     bounds = slices.get(feature)
@@ -7134,13 +7159,13 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             {"name": "contact_time_margin", "start": 66, "stop": 67,
              "unit": "s"},
         ])
-    if expected_obs_dim in (72, 117, 156):
+    if expected_obs_dim in (72, 114, 117, 120, 156):
         segments = [("joint_position", 0, 7, "rad"), ("joint_velocity", 7, 14, "rad/s"),
                     ("persistent_qref_error", 14, 21, "rad"), ("projected_previous_action", 21, 28, "normalized"),
                     ("held_ball_history", 28, 52, "m")]
         segments += ([("current_racket_pose", 52, 61, "m,rotation6d"),
                       ("ball_age_history", 61, 69, "age/0.25"), ("episode_target_xy", 69, 71, "m"),
-                      ("ball_observed", 71, 72, "bool")] if expected_obs_dim in (72, 117) else
+                      ("ball_observed", 71, 72, "bool")] if expected_obs_dim in (72, 114, 117, 120) else
                      [("racket_pose_history", 52, 124, "m,rotation6d"), ("ball_age_history", 124, 132, "age/0.25"),
                       ("desired_apex", 132, 133, "m"), ("episode_target_xy", 133, 135, "m"),
                       ("ball_valid", 135, 136, "bool"), ("confirmed_hits", 136, 137, "hits/4"),
@@ -7152,6 +7177,18 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
                 dict(name=f"observed_local_history_{lag_ms}ms", start=start, stop=start + 15,
                      unit="m,normal_delta,rad,age/0.25,bool")
                 for lag_ms, start in ((50, 72), (100, 87), (200, 102))]
+        elif expected_obs_dim in (114, 120):
+            observation_segments += [
+                dict(name=name, start=start, stop=stop, unit=unit) for name, start, stop, unit in (
+                    ('observed_ball_history_delta', 72, 96, 'm'),
+                    ('observed_ball_history_age', 96, 104, 'age/0.6'),
+                    ('observed_ball_history_valid', 104, 112, 'bool'),
+                    *([('roll_pitch_authority', 112, 114, 'deg/20')] if expected_obs_dim == 114 else [
+                        ('acquisition_phase', 112, 114, 'sin_squared_3s,clipped_72x'),
+                        ('causal_estimated_wind_xy', 114, 116, 'm/s/1.6'),
+                        ('wind_estimate_age', 116, 117, 'age/0.6'),
+                        ('wind_estimate_valid', 117, 118, 'bool'),
+                        ('high_wind_features', 118, 120, 'normalized')]))]
     contract = {
         "observationDim": expected_obs_dim,
         "actionDim": action_dim,
@@ -7177,7 +7214,7 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             controller, "action_jerk_limit", 0.0)),
         "actionClipAbs": float(getattr(
             controller, "action_acc_limit", 1.0)),
-        "armActionLimiter": bool(expected_obs_dim not in (72, 117, 156) and getattr(
+        "armActionLimiter": bool(expected_obs_dim not in (72, 114, 117, 120, 156) and getattr(
             controller, "arm_action_limiter", False)),
         "controlDtS": float(getattr(controller, "dt", 0.0)),
         "delayConditioning": bool(getattr(
@@ -7189,7 +7226,7 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
         "positionIntegrationCount": 1 if action_mode == "velocity" else 2,
         "observationSegments": observation_segments,
     }
-    if expected_obs_dim in (72, 117, 156):
+    if expected_obs_dim in (72, 114, 117, 120, 156):
         contract["fplc"] = {
             "runningJointFeedbackMaxAgeS": FPLC_JOINT_FEEDBACK_MAX_AGE_S,
             "armHoldJointFeedbackMaxAgeS": 0.010,
@@ -7202,7 +7239,17 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             "positionUpperM": controller.position_upper.tolist(),
             "relativeRollPitchLimitDeg": np.rad2deg(controller.rp_outer).tolist(),
             "realRelativeRollPitchLimitDeg": np.rad2deg(controller.real_rp_outer).tolist(),
+            "activeRelativeRollPitchLimitDeg": np.rad2deg(controller._active_pose_limits()[0]).tolist(),
+            "windStartup": dict(getattr(controller, 'last_wind_startup', {})),
+            "actorLayers": controller.contract.get('actor_layers', [expected_obs_dim, 256, 256, 7]),
+            "actorNetworkCount": 2 if expected_obs_dim == 114 else 1,
+            "fixedPose": expected_obs_dim == 120,
+            "checkpointMetadataSha256": controller.contract.get('checkpoint_metadata_sha256'),
+            "deploymentRevision": controller.contract.get('deployment_revision'),
+            "actorBallAgeMode": controller.contract.get('actor_ball_age_mode', 'measurement_age'),
+            "ballObservationAges": dict(getattr(controller, 'last_ball_observation_ages', {})),
             "yawConstrained": False,
+            "windTraining": controller.contract.get('training_acceptance') if expected_obs_dim in (114, 120) else None,
             "safetyLimiterEntered": False,
             "intervention": "measured_hold_disarm_discard_history_explicit_rearm",
             "nativeReset": {
@@ -9484,6 +9531,7 @@ class RosBridgeNode(CameraSource, Node):
             marker_id=int(self.cfg.mocap_marker_id),
             marker_x_limits_m=getattr(self.cfg, 'mocap_marker_x_limits_m', None),
             marker_z_limits_m=getattr(self.cfg, 'mocap_marker_z_limits_m', (-1.0, 1.0)),
+            observation_bounds_m=getattr(self.cfg, 'mocap_observation_bounds_m', None),
             enable_recording_cache=not bool(getattr(self.cfg, 'mocap_subprocess', False)),
             position_unit=str(self.cfg.mocap_position_unit),
             timestamp_unit=str(self.cfg.mocap_timestamp_unit),
@@ -9529,6 +9577,10 @@ class RosBridgeNode(CameraSource, Node):
             self.mocap_input.marker_id = marker_id
             self.mocap_input.detector.marker_id = marker_id
         self.get_logger().info(f'Mocap ball marker id updated to {marker_id}')
+
+    def set_mocap_observation_bounds(self, bounds):
+        if self.cfg.enable_mocap_ball and self.mocap_input is not None:
+            self.mocap_input.set_observation_bounds(bounds)
 
     def resynchronize_ball_clock(self, source):
         if source == 'camera' and self.cfg.enable_camera_ball:
@@ -9599,12 +9651,16 @@ class RosBridgeNode(CameraSource, Node):
                 and header_stamp_s == previous_header_stamp
                 and previous_q is not None
                 and np.array_equal(q, previous_q)
+                and (not np.all(np.isfinite(dq))
+                     or (previous_dq is not None
+                         and np.array_equal(dq, previous_dq)))
             )
             if repeated_sample:
                 # A duplicated source frame is still the same encoder sample.
                 # Preserve its effective stamp so policy ticks hold rvel. A
-                # reused header with changed positions is *not* a repeat: it
-                # falls back to the receipt interval below.
+                # reused header with changed q OR dq is a new atomic sample:
+                # it falls back to the receipt interval below. Keeping the
+                # sequence while replacing dq violates PolicyJointSample.
                 sample_stamp_s = previous_sample_stamp
                 if sample_stamp_s is None:
                     sample_stamp_s = (
@@ -10229,9 +10285,13 @@ class RosBridge:
             self.joint_node = Node("interactive_policy_joint_feedback", context=self.node.context)
             self.joint_node.create_subscription(
                 # Feedback is a latest-state input. Do not drain a ten-frame
-                # backlog after a scheduling stall; source dt still measures
-                # skipped frames and the atomic q/dq contract is unchanged.
-                JointState, cfg.joint_state_topic, self.node._joint_state_callback, 1)
+                # backlog after a scheduling stall. Explicit BEST_EFFORT avoids
+                # reliable depth-1 reception stalls with the native SDK
+                # publisher (measured ~60 Hz vs 200 Hz with BEST_EFFORT).
+                # Source dt and receipt age still reject missing/stale data.
+                JointState, cfg.joint_state_topic, self.node._joint_state_callback,
+                QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                           reliability=ReliabilityPolicy.BEST_EFFORT))
             self.joint_executor = SingleThreadedExecutor(context=self.node.context)
             self.joint_executor.add_node(self.joint_node)
             self.joint_thread = threading.Thread(
@@ -10373,6 +10433,9 @@ class RosBridge:
 
     def set_mocap_marker_id(self, marker_id: int) -> None:
         self.node.set_mocap_marker_id(marker_id)
+
+    def set_mocap_observation_bounds(self, bounds):
+        self.node.set_mocap_observation_bounds(bounds)
 
     def resynchronize_ball_clock(self, source):
         self.node.resynchronize_ball_clock(source)
@@ -11442,7 +11505,8 @@ class PolicySafetyProbe:
         if self.active_policy_profile in FPLC_PROFILES:
             q = self.controller.native_reset_arm_q.astype(np.float64).copy()
             limits = fplc_workspace_intersection((
-                self.cfg.ee_x_limits_m, self.cfg.ee_y_limits_m, self.cfg.ee_z_limits_m))
+                self.cfg.ee_x_limits_m, self.cfg.ee_y_limits_m, self.cfg.ee_z_limits_m),
+                profile=self.active_policy_profile)
             if not self.controller.pose_is_safe(q, limits):
                 raise RuntimeError("simcode9 native reset lies outside the configured real safety workspace")
             return RESET_INITIAL_POSE_FPLC, q
@@ -12121,7 +12185,7 @@ class PolicySafetyProbe:
         """Select from the original envelope, never the previous policy's box."""
         limits = self.base_ee_limits_m
         if profile in FPLC_PROFILES:
-            limits = fplc_workspace_intersection(limits)
+            limits = fplc_workspace_for_profile(profile, limits)
         self.cfg.ee_x_limits_m, self.cfg.ee_y_limits_m, self.cfg.ee_z_limits_m = limits
         # Reset/profile selection can produce a snapshot before the next
         # control tick. Keep its done monitor on the same envelope immediately.
@@ -12622,6 +12686,23 @@ class PolicySafetyProbe:
         if not bool(policy_active):
             self._mark_policy_paused()
             try:
+                # A selected actor can spend seconds in reset/release gates.
+                # Build its mirror during that idle time, rather than loading
+                # a new model concurrently with the first 200 Hz actor ticks.
+                # Keep the real episode reset pending: the active transition
+                # must still seed the exact measured q and ball for that tick.
+                if (isinstance(self.sim_mirror, SimMirrorSubprocess)
+                        and (getattr(self.sim_mirror, "policy_profile", self.active_policy_profile) != self.active_policy_profile
+                             or getattr(self.sim_mirror, "policy_model", self.active_policy_model) != self.active_policy_model
+                             or getattr(self.sim_mirror, "policy_generation", self.policy_generation) != self.policy_generation)):
+                    self.sim_mirror.reset(
+                        arm_q=getattr(self, "policy_reentry_reset_q", None),
+                        ball_pos=ball_pos, ball_vel=ball_vel,
+                        ball_valid=bool(ball_valid), ball_obs_age_s=float(max(0.0, age_s)),
+                        policy_profile=self.active_policy_profile,
+                        policy_model=self.active_policy_model,
+                        policy_generation=self.policy_generation,
+                    )
                 if hasattr(self.sim_mirror, "drain_completed_samples"):
                     self.recorder.record_sim_control_samples(
                         self.sim_mirror.drain_completed_samples())
@@ -16083,7 +16164,8 @@ class PolicySafetyProbe:
         if (getattr(self, "active_policy_profile", profile_name) in FPLC_PROFILES
                 and publish_profile_name != "reset"):
             limits = fplc_workspace_intersection((
-                self.cfg.ee_x_limits_m, self.cfg.ee_y_limits_m, self.cfg.ee_z_limits_m))
+                self.cfg.ee_x_limits_m, self.cfg.ee_y_limits_m, self.cfg.ee_z_limits_m),
+                profile=getattr(self, "active_policy_profile", profile_name))
             try:
                 feedback_wait_ok = self._wait_for_fplc_joint_feedback(reserve_s=0.0005)
                 measured_q, _measured_dq, feedback_age, _source = (
@@ -16096,10 +16178,12 @@ class PolicySafetyProbe:
             actor_command = bool(
                 publish_profile_name == "normal"
                 and str(getattr(options, "control_mode", "policy")) == "policy")
+            feedback_recovery_on_time = self._fplc_feedback_recovery_on_time(feedback_wait_ok)
             feedback_fresh = bool(
-                feedback_wait_ok and measured_q is not None and feedback_age is not None
+                measured_q is not None and feedback_age is not None
                 and math.isfinite(float(feedback_age))
-                and 0.0 <= float(feedback_age) <= FPLC_JOINT_FEEDBACK_MAX_AGE_S)
+                and 0.0 <= float(feedback_age) <= FPLC_JOINT_FEEDBACK_MAX_AGE_S
+                and feedback_recovery_on_time)
             command_delta = (
                 None if actor_target is None
                 else float(np.max(np.abs(safe - actor_target))))
@@ -16121,6 +16205,7 @@ class PolicySafetyProbe:
                         and math.isfinite(float(feedback_age)) else None),
                     "maximumJointFeedbackAgeS": FPLC_JOINT_FEEDBACK_MAX_AGE_S,
                     "feedbackWaitSucceeded": feedback_wait_ok,
+                    "feedbackRecoveryWithinDeadline": feedback_recovery_on_time,
                     "actorCommandDeltaMaxAbsRad": command_delta,
                     "positionLimitsM": [list(pair) for pair in limits],
                     "relativeRollPitchLimitDeg": np.rad2deg(self.controller.real_rp_outer).tolist(),
@@ -16456,6 +16541,15 @@ class PolicySafetyProbe:
                 if hasattr(self.controller, 'invalidate_after_intervention'):
                     self.controller.invalidate_after_intervention()
                 held = self._publish_hold_on_command_disable()
+                recorder = getattr(self, "recorder", None)
+                if recorder is not None:
+                    recorder.record_event({
+                        "event": "control_safety_stop", "reason": "policy_control_timing_fault",
+                        "details": dict(deadline_fault),
+                        "sourceSeq": int(getattr(self, "control_loop_tick", 0)),
+                        "sourceTimeS": float(getattr(self, "now_s", 0.0)),
+                        "wallTimeS": time.time(),
+                    })
                 self.latest_snapshot_payload = self.snapshot(
                     'policy_timing_hold', 'policy_control_timing_fault',
                     {'policy_control_timing_fault': True},
@@ -16486,14 +16580,18 @@ class PolicySafetyProbe:
                 self.last_camera_runtime_options = options.camera
             now_wall = time.perf_counter()
             make_snapshot = now_wall >= self.backend_next_snapshot_wall
+            if make_snapshot:
+                # A budget-deferred snapshot still consumes this diagnostic
+                # slot. Retrying its camera/feedback preparation at every
+                # 200 Hz tick would turn a 30 Hz load into a continuous load.
+                self.backend_next_snapshot_wall = (
+                    now_wall + self.backend_snapshot_period_s)
             snapshot = self._run_control_tick_locked(
                 drag_pos, drag_vel, drag_valid, noise_std_m, options,
                 make_snapshot=make_snapshot)
             if snapshot is not None:
                 self.latest_snapshot_payload = snapshot
                 self.recorder.record_snapshot(snapshot)
-                self.backend_next_snapshot_wall = (
-                    now_wall + self.backend_snapshot_period_s)
 
     def _racket_pos(self) -> tuple[np.ndarray, bool]:
         pos, ok = self.controller._compute_racket_pose_base(self.controller.arm_cmd_q)
@@ -16532,7 +16630,10 @@ class PolicySafetyProbe:
         source = "command_fk" if command_ok else "unavailable"
         feedback_age_s: float | None = None
 
-        if bool(getattr(options, "publish_commands", False)):
+        timing_stop = bool(
+            getattr(self, "publish_rearm_required", False)
+            and getattr(self, "publish_rearm_reason", "") == "policy_control_timing_fault")
+        if bool(getattr(options, "publish_commands", False)) or timing_stop:
             source = "command_fk_fallback_no_joint_state"
             q_feedback = None
             if self.ros_bridge is not None:
@@ -18248,6 +18349,11 @@ class PolicySafetyProbe:
                 0.0, deadline - time.perf_counter() - reserve_s))
         return bool(wait_for_feedback(timeout_s=timeout_s))
 
+    def _fplc_feedback_recovery_on_time(self, wait_succeeded: bool) -> bool:
+        """A sample arriving after a wait timeout must still meet this tick's deadline."""
+        deadline = getattr(self, "control_tick_deadline_perf", None)
+        return bool(wait_succeeded or deadline is None or time.perf_counter() <= deadline)
+
     def _joint_feedback_for_policy(
         self,
     ) -> tuple[
@@ -18297,8 +18403,12 @@ class PolicySafetyProbe:
         previous = getattr(self, "last_policy_joint_sample", None)
         sample = None
         error = str(timing.get("jointSourceFault", "") or "") or None
-        if not feedback_wait_ok:
-            error = error or "joint_feedback_wait_timeout"
+        # A callback may arrive after the bounded wait returns, before this
+        # atomic read. Validate the q/dq/time actually consumed, rather than
+        # latching an earlier wait result as a fault on a now-fresh sample.
+        # No timeout, timestamp, freshness bound or control deadline changes.
+        timing["jointFeedbackWaitSucceeded"] = bool(feedback_wait_ok)
+        timing["jointReceiptAgeS"] = age_s
         if (q is None or dq is None or age_s is None
                 or sample_stamp_s is None):
             error = error or "joint_state_uninitialized"
@@ -18368,7 +18478,11 @@ class PolicySafetyProbe:
                     "jointObservationCoherent": True,
                 })
         self.current_policy_joint_sample = sample
+        if error is None and not self._fplc_feedback_recovery_on_time(feedback_wait_ok):
+            error = "joint_feedback_wait_deadline"
         self.policy_joint_sample_error = error
+        timing["jointFeedbackRecoveredBeforeRead"] = bool(
+            not feedback_wait_ok and sample is not None and error is None)
         timing["jointSampleControlError"] = error
         # A rejected sample has no inference trace. Preserve its timing for
         # this exact tick so recordings still explain the original stop.
@@ -19168,6 +19282,23 @@ class PolicySafetyProbe:
                 "done_failsafe", reason,
                 dict(self.done_failsafe_conditions), latched_age_s, False,
             )
+
+        if (bool(getattr(self, "publish_rearm_required", False))
+                and getattr(self, "publish_rearm_reason", "") == "policy_control_timing_fault"):
+            # A stopped hardware episode must not run an uncommanded actor
+            # whose local q_ref later hits a workspace bound and hides the
+            # original stop. Physical preflight and operator reset above still
+            # run; explicit rearm clears this latch through the existing path.
+            self.last_policy_execution_trace = None
+            self.current_policy_joint_sample = None
+            self.current_policy_joint_feedback_timing = (int(getattr(self, "control_loop_tick", -1)), {})
+            self._mark_policy_paused()
+            self.last_control_mode = "policy_timing_hold"
+            held_age_s = (
+                max(0.0, float(age_override_s)) if age_override_s is not None
+                else (0.0 if valid else self.cfg.ball_lost_timeout_s))
+            return ("policy_timing_hold", "policy_control_timing_fault; explicit rearm required",
+                    {"policy_control_timing_fault": True}, held_age_s, False)
 
         if (options.control_mode == "policy"
                 and options.enable_ball_capture_gate
@@ -21733,9 +21864,35 @@ class PolicySafetyProbe:
             obs = (trace.get("obs") if isinstance(trace, dict) else
                    getattr(self.controller, "last_obs", None))
             width = len(obs) if obs is not None else 0
-            racket = obs[52:55] if width in (72, 117, 156) else obs[26:29] if width >= 29 else None
+            racket = obs[52:55] if width in (72, 114, 117, 120, 156) else obs[26:29] if width >= 29 else None
+            racket_source = "policy_observation"
             if getattr(self, "last_workspace_safety_fk_ok", False):
                 racket = getattr(self, "last_workspace_safety_ee_pos", racket)
+                racket_source = str(getattr(self, "last_workspace_safety_pose_source", "workspace_fk"))
+            timing_tick, feedback_timing = getattr(
+                self, "current_policy_joint_feedback_timing", (-1, {}))
+            if timing_tick != int(source_seq):
+                feedback_timing = {}
+            effective_options = getattr(self, "runtime_options", None) or options
+            # Small scalar stop evidence remains available in trajectory-only
+            # mode. Reuse this tick's captured data; never read feedback/FK or
+            # build policy observations, actions or joint telemetry here.
+            control_status = {
+                "policyExecuted": bool(policy_executed),
+                "commandPublished": bool(command_published),
+                "publishCommands": bool(getattr(effective_options, "publish_commands", False)),
+                "rearmRequired": bool(getattr(self, "publish_rearm_required", False)),
+                "rearmReason": str(getattr(self, "publish_rearm_reason", "")),
+                "activePolicyProfile": str(getattr(self, "active_policy_profile", "")),
+                "activePolicyModel": str(getattr(self, "active_policy_model", "")),
+                "jointFeedbackAgeS": feedback_timing.get("jointReceiptAgeS"),
+                "maximumJointFeedbackAgeS": (
+                    FPLC_JOINT_FEEDBACK_MAX_AGE_S
+                    if getattr(self, "active_policy_profile", "") in FPLC_PROFILES else None),
+                "jointSampleControlError": feedback_timing.get("jointSampleControlError"),
+                "jointFeedbackWaitSucceeded": feedback_timing.get("jointFeedbackWaitSucceeded"),
+                "jointFeedbackRecoveredBeforeRead": feedback_timing.get("jointFeedbackRecoveredBeforeRead"),
+            }
             high = getattr(self, "last_high_ball_occlusion_info", {}) or {}
             prediction = high if high.get("predicted") else (getattr(self, "last_estimator_info", {}) or {})
             self.recorder.record_control_sample({
@@ -21743,6 +21900,7 @@ class PolicySafetyProbe:
                 "sourceSeq": int(source_seq), "sourceTimeS": round(float(source_time_s), 9),
                 "wallTimeS": round(time.time(), 6), "time": round(float(self.now_s), 6),
                 "tick": int(self.control_loop_tick), "mode": str(mode), "ballSource": str(ball_source),
+                "reason": str(reason), "controlStatus": control_status,
                 "ballObservationSeq": int(ball_observation_seq), "cameraStampS": camera_stamp_s,
                 "ballClockSync": (camera_measurement or {}).get("clockSync", {}),
                 "cameraMeasurement": {key: (camera_measurement or {}).get(key) for key in ("markerId",)},
@@ -21756,6 +21914,7 @@ class PolicySafetyProbe:
                 "predictedVelocity": _point_or_none(prediction.get("velocityMps")),
                 "predictedBallIsPredicted": bool(prediction.get("predicted", False)),
                 "racket": _rounded_vector(racket) if racket is not None else None,
+                "racketSource": racket_source,
                 "_ballSensorSnapshot": (
                     self.ros_bridge.ball_sensor_recording_snapshot() if self.ros_bridge is not None else
                     (None, time.monotonic(), None, None, self.cfg.enable_camera_ball, self.cfg.enable_mocap_ball)),
@@ -21796,7 +21955,7 @@ class PolicySafetyProbe:
             )
             policy_cmd = cmd
         policy_racket = (
-            np.asarray(policy_obs[52:55] if policy_obs.shape[0] in (72, 117, 156) else policy_obs[26:29], dtype=np.float32)
+            np.asarray(policy_obs[52:55] if policy_obs.shape[0] in (72, 114, 117, 120, 156) else policy_obs[26:29], dtype=np.float32)
             if policy_obs.shape[0] >= 29 else None
         )
         estimator_payload = (
@@ -21850,12 +22009,14 @@ class PolicySafetyProbe:
                 "jointFeedbackWaitRecoveries",
                 "jointFeedbackWaitTimeouts",
                 "jointFeedbackLastWait",
+                "jointFeedbackWaitSucceeded",
+                "jointFeedbackRecoveredBeforeRead",
             ):
                 ros_light[key] = feedback_timing.get(key)
             joint_sample = getattr(self, "current_policy_joint_sample", None)
             if joint_sample is not None:
-                ros_light["jointPosition"] = _rounded_vector(joint_sample.q_raw)
-                ros_light["jointVelocity"] = _rounded_vector(joint_sample.dq_raw)
+                ros_light["jointPosition"] = RecordingVector(joint_sample.q_raw)
+                ros_light["jointVelocity"] = RecordingVector(joint_sample.dq_raw)
                 ros_light["jointSampleStampS"] = joint_sample.source_stamp_s
                 ros_light["jointSourceSequence"] = joint_sample.source_sequence
                 ros_light["jointReceiptAgeS"] = joint_sample.receipt_age_s
@@ -21877,12 +22038,12 @@ class PolicySafetyProbe:
                 "inputPosition": (
                     None if getattr(
                         self, "last_servo_planner_input_q", None) is None
-                    else _rounded_vector(self.last_servo_planner_input_q)),
+                    else RecordingVector(self.last_servo_planner_input_q)),
                 "outputPosition": (
                     None if getattr(
                         self, "last_servo_planner_output_q", None) is None
-                    else _rounded_vector(self.last_servo_planner_output_q)),
-                "outputVelocity": _rounded_vector(getattr(
+                    else RecordingVector(self.last_servo_planner_output_q)),
+                "outputVelocity": RecordingVector(getattr(
                     self.servo_target_planner, "last_vel",
                     np.zeros(7, dtype=np.float64))),
                 "feasible": bool(getattr(
@@ -21894,8 +22055,8 @@ class PolicySafetyProbe:
             "sourceTimeS": round(float(source_time_s), 9),
             "ballObservationSeq": int(ball_observation_seq),
             "cameraStampS": camera_stamp_s,
-            "cameraMeasurement": _camera_measurement_payload(
-                camera_measurement),
+            "cameraMeasurement": recording_camera_measurement(
+                camera_measurement, _CAMERA_MEASUREMENT_SCALAR_KEY_SET),
             "ballClockSync": dict((camera_measurement or {}).get('clockSync') or {}),
             "wallTimeS": round(float(time.time()), 6),
             "time": round(float(self.now_s), 6),
@@ -21903,11 +22064,16 @@ class PolicySafetyProbe:
             "mode": str(mode),
             "policyExecuted": bool(policy_executed),
             "reason": str(reason),
+            "commandRearm": {
+                "required": bool(getattr(self, "publish_rearm_required", False)),
+                "reason": str(getattr(self, "publish_rearm_reason", "")),
+                "details": dict(getattr(self, "publish_rearm_details", {}) or {}),
+            },
             "conditions": {k: bool(v) for k, v in conditions.items()},
             "workspaceSafety": self._workspace_safety_pose_payload(),
             "doneBall": {
                 "source": "raw_measurement",
-                "position": _rounded_vector(self.last_done_ball_pos),
+                "position": RecordingVector(self.last_done_ball_pos),
                 "valid": bool(self.last_done_ball_valid),
                 "rawConditions": dict(self.ball_done_raw_conditions),
                 "streaks": dict(self.ball_done_streaks),
@@ -21922,24 +22088,24 @@ class PolicySafetyProbe:
                 if self.ros_bridge is not None else
                 (None, time.monotonic(), None, None,
                  self.cfg.enable_camera_ball, self.cfg.enable_mocap_ball)),
-            "rawBall": _rounded_vector(raw_ball_pos),
-            "measuredBall": _rounded_vector(measured_ball_pos),
-            "measuredVelocity": _rounded_vector(measured_ball_vel),
-            "observedBall": _rounded_vector(observed_ball_pos),
-            "observedVelocity": _rounded_vector(observed_ball_vel),
+            "rawBall": RecordingVector(raw_ball_pos),
+            "measuredBall": RecordingVector(measured_ball_pos),
+            "measuredVelocity": RecordingVector(measured_ball_vel),
+            "observedBall": RecordingVector(observed_ball_pos),
+            "observedVelocity": RecordingVector(observed_ball_vel),
             "ballState6D": _float32_vector(
                 np.concatenate((observed_ball_pos, observed_ball_vel))
-                if policy_obs.size in (72, 117, 156) else policy_obs[20:26]),
+                if policy_obs.size in (72, 114, 117, 120, 156) else policy_obs[20:26]),
             "ballStateSource": (
                 "runtime_context_state_not_actor_velocity"
-                if policy_obs.size in (72, 117, 156) else "actor_ball_state_slice"),
+                if policy_obs.size in (72, 114, 117, 120, 156) else "actor_ball_state_slice"),
             "predictedBall": _point_or_none(prediction_payload.get("positionM")),
             "predictedVelocity": _point_or_none(
                 prediction_payload.get("velocityMps")),
             "predictedBallIsPredicted": bool(
                 prediction_payload.get("predicted", False)),
             "racket": (
-                _rounded_vector(policy_racket)
+                RecordingVector(policy_racket)
                 if policy_racket is not None else None),
             "commandRacket": command_racket,
             "commandRacketFkOk": command_racket_fk_ok,
@@ -21954,7 +22120,7 @@ class PolicySafetyProbe:
             "valid": bool(control_valid),
             "age": round(float(age_s), 6),
             "noiseStdM": round(float(noise_std_m), 6),
-            "policyObs": _rounded_vector(policy_obs),
+            "policyObs": RecordingVector(policy_obs),
             "policyDqAdapter": _compact_inactive_diagnostic(
                 trace.get("policyDqAdapter", self.last_policy_dq_adapter_info)
                 if trace is not None
@@ -21963,10 +22129,10 @@ class PolicySafetyProbe:
                 None if getattr(self, "current_policy_joint_sample", None) is None
                 else self.current_policy_joint_sample.payload()),
             "policyBallObservation": _float32_vector(
-                policy_obs[28:52] if policy_obs.size in (72, 117, 156) else policy_obs[20:26]),
+                policy_obs[28:52] if policy_obs.size in (72, 114, 117, 120, 156) else policy_obs[20:26]),
             "fplcProjection": dict(getattr(self.controller, "last_projection", {})),
-            "policyAction": _rounded_vector(policy_action),
-            "policyExecutedAction": _rounded_vector(
+            "policyAction": RecordingVector(policy_action),
+            "policyExecutedAction": RecordingVector(
                 policy_executed_action),
             # Contact kinematics are derived offline from policyJointSample.
             # Computing two Jacobians plus FK here previously ran inside every
@@ -21984,33 +22150,33 @@ class PolicySafetyProbe:
                 "kinematics": "offline_from_policyJointSample",
             },
             "rawPolicyCommand": {
-                "position": _rounded_vector(
+                "position": RecordingVector(
                     trace.get("rawPosition", policy_cmd["position"])
                     if trace is not None else policy_cmd["position"]),
-                "velocity": _rounded_vector(
+                "velocity": RecordingVector(
                     trace.get("rawVelocity", policy_cmd["velocity"])
                     if trace is not None else policy_cmd["velocity"]),
             },
             "policyCommand": {
-                "position": _rounded_vector(policy_cmd["position"]),
-                "velocity": _rounded_vector(policy_cmd["velocity"]),
-                "acceleration": _rounded_vector(policy_cmd["acceleration"]),
+                "position": RecordingVector(policy_cmd["position"]),
+                "velocity": RecordingVector(policy_cmd["velocity"]),
+                "acceleration": RecordingVector(policy_cmd["acceleration"]),
             },
             "command": {
-                "position": _rounded_vector(cmd["position"]),
-                "velocity": _rounded_vector(cmd["velocity"]),
-                "acceleration": _rounded_vector(cmd["acceleration"]),
-                "policyNominalPosition": _rounded_vector(getattr(
+                "position": RecordingVector(cmd["position"]),
+                "velocity": RecordingVector(cmd["velocity"]),
+                "acceleration": RecordingVector(cmd["acceleration"]),
+                "policyNominalPosition": RecordingVector(getattr(
                     self, "last_policy_nominal_reference",
                     policy_cmd["position"])),
-                "compensatedReferencePosition": _rounded_vector(getattr(
+                "compensatedReferencePosition": RecordingVector(getattr(
                     self, "last_compensated_reference",
                     policy_cmd["position"])),
-                "matcherShadowPosition": _rounded_vector(getattr(
+                "matcherShadowPosition": RecordingVector(getattr(
                     self, "last_matcher_shadow_q", policy_cmd["position"])),
-                "preSafetyPosition": _rounded_vector(getattr(
+                "preSafetyPosition": RecordingVector(getattr(
                     self, "last_matcher_pre_safety_q", policy_cmd["position"])),
-                "publishedSafePosition": _rounded_vector(getattr(
+                "publishedSafePosition": RecordingVector(getattr(
                     self, "last_published_safe_reference",
                     policy_cmd["position"])),
                 "published": bool(command_published),
@@ -22050,7 +22216,8 @@ class PolicySafetyProbe:
                     self, "last_incoherent_dq_ablation_gate", {})),
                 "resetInitialPose": str(self.reset_initial_pose_id),
                 "useRosState": bool(options.use_ros_state),
-                "publishCommands": bool(options.publish_commands),
+                "publishCommands": bool(getattr(
+                    getattr(self, "runtime_options", None) or options, "publish_commands", False)),
                 "enableCompensation": bool(options.enable_compensation),
                 "compensationParameterTarget": str(
                     options.compensation_parameter_target),
@@ -22100,7 +22267,7 @@ class PolicySafetyProbe:
             ]
             sample["runtime"]["policyObservationScaleIndices"] = scale_indices
         if not np.array_equal(policy_obs_unscaled, policy_obs):
-            sample["policyObsUnscaled"] = _rounded_vector(
+            sample["policyObsUnscaled"] = RecordingVector(
                 policy_obs_unscaled)
         self.recorder.record_control_sample(sample)
 
@@ -22196,6 +22363,7 @@ class PolicySafetyProbe:
         self.last_high_ball_occlusion_info = high_ball_occlusion_info
         self.fplc_direct_ball_input = {
             "direct_ball_position_m": measured_p.copy(),
+            "direct_ball_velocity_m_s": measured_v.copy(),
             "direct_ball_age_s": self._raw_measurement_age_s(valid, ball_stamp_s, options),
             "direct_ball_stamp_s": ball_stamp_s,
             "ball_observed": bool(valid),
@@ -22359,6 +22527,15 @@ class PolicySafetyProbe:
             ball_source=ball_source,
             camera_feedback=camera_feedback)
 
+    def _update_mocap_observation_bounds(self, payload):
+        if (self.ros_bridge is None or not self.cfg.enable_mocap_ball
+                or 'mocapObservationBoundsM' not in payload):
+            return
+        bounds = normalize_observation_bounds(payload['mocapObservationBoundsM'])
+        if bounds != getattr(self.cfg, 'mocap_observation_bounds_m', None):
+            self.ros_bridge.set_mocap_observation_bounds(bounds)
+            self.cfg.mocap_observation_bounds_m = bounds
+
     def step(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("reset"):
             return self.reset(payload)
@@ -22391,6 +22568,7 @@ class PolicySafetyProbe:
                 max_value=999,
             )
             self.ros_bridge.set_mocap_marker_id(marker_id)
+            self._update_mocap_observation_bounds(payload)
         options = self._runtime_options_from_payload(payload)
         dt = float(payload.get("dt", self.cfg.control_dt))
         if not math.isfinite(dt) or dt <= 0.0:
@@ -23880,6 +24058,10 @@ class PolicySafetyProbe:
                 "markerXLimitsM": getattr(self.cfg, 'mocap_marker_x_limits_m', None),
                 "markerZLimitsM": getattr(self.cfg, 'mocap_marker_z_limits_m', (-1.0, 1.0)),
                 "markerSelectionFrame": "mocap_raw_m",
+                "observationBoundsM": (
+                    self.cfg.mocap_observation_bounds_m
+                    if self.cfg.mocap_observation_bounds_m is not None else
+                    (self.cfg.mocap_marker_x_limits_m, None, self.cfg.mocap_marker_z_limits_m)),
                 "rigidBodySlot": int(self.cfg.mocap_rigid_body_slot),
                 "rigidBodyId": int(self.cfg.mocap_rigid_body_id),
                 "rigidBodyName": self.cfg.mocap_rigid_body_name,
@@ -23963,9 +24145,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     overflow: hidden;
   }
   header {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    gap: 16px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 16px;
     align-items: center;
     padding: 12px 16px;
     border-bottom: 1px solid #d7dee8;
@@ -23974,12 +24156,16 @@ HTML_TEMPLATE = r"""<!doctype html>
   h1 { margin: 0; font-size: 18px; font-weight: 650; }
   .titlebar {
     display: flex;
+    flex: 1 1 620px;
+    flex-wrap: wrap;
     align-items: center;
     gap: 10px;
     min-width: 0;
   }
   .recording-control {
     display: flex;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     min-width: 0;
@@ -24002,6 +24188,13 @@ HTML_TEMPLATE = r"""<!doctype html>
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  #recordingJuggleCount {
+    max-width: 100%;
+    font-size: 18px;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
   .mini-check {
     display: inline-flex;
     align-items: center;
@@ -24014,8 +24207,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     color: #0f766e;
   }
   .status {
-    display: grid;
-    grid-auto-flow: column;
+    display: flex;
+    flex-wrap: wrap;
+    max-width: 100%;
     gap: 10px;
     align-items: center;
     font-size: 13px;
@@ -24029,6 +24223,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     padding: 6px 9px;
     background: #ffffff;
     color: #243244;
+    overflow-wrap: anywhere;
   }
   .badge.warn { border-color: #f59e0b; color: #92400e; background: #fff8eb; }
   .badge.stop { border-color: #ef4444; color: #991b1b; background: #fff1f2; }
@@ -24109,6 +24304,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     border-left: 1px solid #d7dee8;
   }
   .row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .row.mocap-range-row { grid-template-columns: 72px minmax(0, 1fr) minmax(0, 1fr); }
   label { font-size: 13px; color: #526173; }
   input[type="number"], select {
     width: 100%;
@@ -24344,8 +24540,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     #analysisReplay3d { grid-row: auto; }
     .view3d { grid-row: auto; }
     canvas { min-height: 260px; }
-    header { grid-template-columns: 1fr; }
-    .status { grid-auto-flow: row; }
+    .status { width: 100%; }
   }
   @media (max-height: 760px) and (min-width: 901px) {
     header { padding: 8px 12px; }
@@ -24364,6 +24559,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   <header>
     <div class="titlebar">
       <h1>Policy Safety Probe</h1>
+      <div id="recordingJuggleCount" class="badge" role="status" aria-live="polite" aria-atomic="true" title="本次录制的实测颠球次数；停止录制后保留结果">颠球 0 次</div>
       <div class="recording-control">
         <button id="liveViewButton" class="nav-button active" type="button">Live</button>
         <button id="analysisViewButton" class="nav-button" type="button">Analysis</button>
@@ -24556,6 +24752,14 @@ HTML_TEMPLATE = r"""<!doctype html>
         <label for="mocapMarkerId">mocap ball marker YY</label>
         <input id="mocapMarkerId" type="number" min="0" max="999" step="1">
       </div>
+      <div class="section-title">动捕有效观测范围</div>
+      <div class="section-note">原始动捕坐标，单位 m（标定前）。只接收范围内唯一的球；空白轴不限。应用后替代旧 X/Z 边界。</div>
+      <div class="toggle"><label for="mocapRangeEnabled">启用范围过滤</label><input id="mocapRangeEnabled" type="checkbox"></div>
+      <div class="row mocap-range-row"><label for="mocapRangeXMin">X min / max m</label><input id="mocapRangeXMin" type="number" step="0.01" placeholder="不限"><input id="mocapRangeXMax" aria-label="X max m" type="number" step="0.01" placeholder="不限"></div>
+      <div class="row mocap-range-row"><label for="mocapRangeYMin">Y min / max m</label><input id="mocapRangeYMin" type="number" step="0.01" placeholder="不限"><input id="mocapRangeYMax" aria-label="Y max m" type="number" step="0.01" placeholder="不限"></div>
+      <div class="row mocap-range-row"><label for="mocapRangeZMin">Z min / max m</label><input id="mocapRangeZMin" type="number" step="0.01" placeholder="不限"><input id="mocapRangeZMax" aria-label="Z max m" type="number" step="0.01" placeholder="不限"></div>
+      <button id="mocapRangeApply" type="button">应用动捕范围</button>
+      <div id="mocapRangeStatus" class="hint"></div>
       <div class="section-title">Runtime</div>
       <div class="row">
         <label for="controlMode">controller</label>
@@ -24588,12 +24792,19 @@ HTML_TEMPLATE = r"""<!doctype html>
           <option value="fplc_gpu1_v274_s11">simcode10 V274 S11 相机AR1 (72D)</option>
           <option value="fplc_gpu0_v319">simcode10 V319 S17 位置/动量恢复 (72D)</option>
           <option value="fplc_v321_s4_u2097_20261029_r1">simcode10 V321 S4 u2097 长回合候选 (72D)</option>
+          <option value="fplc_gpu1_v322">simcode10 V322 S4 u31361 长回合居中 (72D)</option>
+          <option value="fplc_gpu0_v323">simcode10 V323 S2 u3075 / V321 相机AR1 (72D)</option>
+          <option value="fplc_gpu1_v324">simcode10 V324 S2 u2947 / V322 相机AR1 (72D)</option>
+          <option value="fplc_gpu0_v325">V325 S15 u14400 恒风扰动 1.6 m/s (114D)</option>
+          <option value="fplc_gpu0_v325_u416">V325 u416 固定±5° 单MLP (120D，临时版本)</option>
         </select>
       </div>
       <div class="row" id="policyModelRow">
         <label for="policyModel">RL model</label>
         <select id="policyModel"></select>
       </div>
+      <div id="fplcWindNote" class="section-note" hidden>V325：1.6 m/s 恒风训练，114D 观测含 500 ms 实测球历史。起球策略 roll/pitch 权限为 ±2°，确认 5 次合格起球后用 1 秒放开到 ±20°；实机外层边界为 ±20°（相对训练参考姿态），yaw 不限。</div>
+      <div id="fplcSingle5Note" class="section-note" hidden>V325 u416：单个 MLP，120D 观测；策略目标 roll/pitch 从复位起固定 ±5°，实物外层姿态保护 ±7°，yaw 不限。确认第 5 次合格起球后只更新时间特征，策略目标边界不变。策略年龄按训练缓存刷新时钟计算，原始测量年龄用于有效性检查和记录。风估计来自实测球历史。临时训练版本，完整 1200 秒验收尚未通过。</div>
       <div class="section-title">Policy Observation Scale</div>
       <div class="section-note">每个维度独立保存：实际 actor 输入 = 原始观测 × 对应 scale。切换维度不会清除已设置的其他 scale。</div>
       <div class="row">
@@ -24874,6 +25085,7 @@ const liveViewButtonEl = document.getElementById('liveViewButton');
 const analysisViewButtonEl = document.getElementById('analysisViewButton');
 const recordingButtonEl = document.getElementById('recordingButton');
 const recordingStatusEl = document.getElementById('recordingStatus');
+const recordingJuggleCountEl = document.getElementById('recordingJuggleCount');
 const analyzeAfterRecordEl = document.getElementById('analyzeAfterRecord');
 const saveCameraImagesEl = document.getElementById('saveCameraImages');
 const recordingTrajectoryOnlyEl = document.getElementById('recordingTrajectoryOnly');
@@ -24913,6 +25125,34 @@ const visibleEl = document.getElementById('visible');
 const ballSourceEl = document.getElementById('ballSource');
 const mocapMarkerIdEl = document.getElementById('mocapMarkerId');
 const mocapMarkerRowEl = document.getElementById('mocapMarkerRow');
+const mocapRangeEnabledEl = document.getElementById('mocapRangeEnabled');
+const mocapRangeApplyEl = document.getElementById('mocapRangeApply');
+const mocapRangeStatusEl = document.getElementById('mocapRangeStatus');
+const mocapRangeInputs = ['X', 'Y', 'Z'].map(axis =>
+  ['Min', 'Max'].map(edge => document.getElementById(`mocapRange${axis}${edge}`)));
+let mocapObservationBounds = (CONFIG.mocapBall && CONFIG.mocapBall.observationBoundsM) || [null, null, null];
+let mocapRangeError = '';
+function mocapRangeDescription(bounds) {
+  return bounds.map((pair, i) => `${'XYZ'[i]}=${pair ? pair.join(' ~ ') : '不限'}`).join('，');
+}
+function readMocapObservationBounds() {
+  if (!mocapRangeEnabledEl.checked) return [null, null, null];
+  return mocapRangeInputs.map((fields, i) => {
+    const values = fields.map(field => field.value.trim());
+    if (values.every(value => value === '')) return null;
+    const pair = values.map(Number);
+    if (values.some(value => value === '') || !pair.every(Number.isFinite) || pair[0] >= pair[1])
+      throw new Error(`${'XYZ'[i]} 轴需要填写有限的上下限，且 min < max；不限时请同时留空。`);
+    return pair;
+  });
+}
+mocapRangeApplyEl.addEventListener('click', () => {
+  try {
+    mocapObservationBounds = readMocapObservationBounds();
+    mocapRangeError = '';
+    mocapRangeStatusEl.textContent = `待应用：${mocapRangeDescription(mocapObservationBounds)}`;
+  } catch (err) { mocapRangeError = err.message; mocapRangeStatusEl.textContent = mocapRangeError; }
+});
 const controlModeEl = document.getElementById('controlMode');
 const policyProfileEl = document.getElementById('policyProfile');
 const policyModelEl = document.getElementById('policyModel');
@@ -25170,6 +25410,10 @@ function setControlDisabled(el, disabled) {
 }
 function syncPolicyModelControl() {
   const fplc = policyProfileEl.value.startsWith('fplc_');
+  const windNote = document.getElementById('fplcWindNote');
+  if (windNote) windNote.hidden = policyProfileEl.value !== 'fplc_gpu0_v325';
+  const single5Note = document.getElementById('fplcSingle5Note');
+  if (single5Note) single5Note.hidden = policyProfileEl.value !== 'fplc_gpu0_v325_u416';
   if (fplc) inputs.obsHz.value = String((CONFIG.policy?.defaultProfile || '').startsWith('fplc_') ? (CONFIG.defaultBallObservationRateHz || 90) : 90);
   setControlDisabled(inputs.obsHz, fplc);
   if (fplc) inputs.workspaceSafetyMode.value = 'position';
@@ -25670,6 +25914,13 @@ function setRuntimeDefaults() {
   const mocapMarkerEnabled = !!(mocapEnabled && mocapAvailable);
   inputs.mocapMarkerId.disabled = !mocapMarkerEnabled;
   mocapMarkerRowEl.classList.toggle('disabled', !mocapMarkerEnabled);
+  mocapRangeEnabledEl.checked = mocapObservationBounds.some(pair => pair !== null);
+  mocapRangeEnabledEl.disabled = mocapRangeApplyEl.disabled = !mocapMarkerEnabled;
+  mocapRangeInputs.forEach((fields, i) => fields.forEach((field, edge) => {
+    field.value = mocapObservationBounds[i] ? mocapObservationBounds[i][edge] : '';
+    field.disabled = !mocapMarkerEnabled;
+  }));
+  mocapRangeStatusEl.textContent = mocapRangeDescription(mocapObservationBounds);
   cameraFlowEls.detect.checked = cameraDefaults.detect !== false;
   cameraFlowEls.visualize.checked = cameraDefaults.visualize !== false;
   cameraFlowEls.yolo.checked = !!cameraDefaults.yolo;
@@ -26624,7 +26875,10 @@ function updateRecordingUi(status) {
     : ['idle'];
   if (status.dropped) pieces.push(`drop ${status.dropped}`);
   if (status.juggle) {
-    pieces.push(`颠球 ${status.juggle.count || 0} 次`);
+    const incomplete = status.juggle.status === 'partial';
+    const unavailable = status.juggle.status === 'no_valid_observations';
+    recordingJuggleCountEl.textContent = `颠球 ${status.juggle.count ?? 0} 次${incomplete ? '（可能不完整）' : unavailable ? '（无有效观测）' : ''}`;
+    recordingJuggleCountEl.className = incomplete || unavailable ? 'badge warn' : 'badge';
     if (status.juggle.status === 'no_valid_observations') pieces.push('无有效球观测，无法统计');
     if (status.juggle.status === 'partial') pieces.push('录制丢帧，计数可能不完整');
   }
@@ -27712,6 +27966,7 @@ async function step() {
       noiseStdM: Math.max(0, Number(inputs.noise.value) || 0) * 0.001,
       ballObservationRateHz: Math.max(1, Math.min(240, Number(inputs.obsHz.value) || 90)),
       ballSource: ballSourceEl.value,
+      mocapObservationBoundsM: mocapObservationBounds,
       mocapMarkerId: readInt(
         inputs.mocapMarkerId,
         (CONFIG.mocapBall && CONFIG.mocapBall.markerId) ?? 1,
@@ -27993,6 +28248,10 @@ async function step() {
     const ros = latest.ros || {};
     const camera = latest.camera || {};
     const mocap = latest.mocap || CONFIG.mocapBall || {};
+    if (mocap.observationBoundsM && !mocapRangeError) {
+      const matching = JSON.stringify(mocap.observationBoundsM) === JSON.stringify(mocapObservationBounds);
+      mocapRangeStatusEl.textContent = `${matching ? '已应用' : '等待接收端应用'}：${mocapRangeDescription(mocapObservationBounds)}`;
+    }
     const sim = latest.sim || {};
     const est = latest.estimator || {};
     const highPrediction = latest.highBallOcclusionPrediction || {};
@@ -28139,6 +28398,8 @@ async function step() {
 	      `controller: selected=${controlModeEl.value || 'policy'} applied=${runtime.controlMode || 'waiting'}${latest.controlModePending ? ' (PENDING)' : ''}`,
 	      `RL profile: selected=${policyProfileEl.value || 'legacy_bug_compatible'} active=${runtime.activePolicyProfile || 'waiting'} model=${policyModelEl.value || 'v85'}/${runtime.activePolicyModel || 'waiting'} generation=${runtime.policyGeneration ?? 0}`,
           runtime.policyContract?.fplc ? `FPLC: ${runtime.policyContract.observationDim}D real roll/pitch≤${runtime.policyContract.fplc.realRelativeRollPitchLimitDeg?.map(v => fmt(v, 1)).join('/')}° training roll/pitch≤${runtime.policyContract.fplc.relativeRollPitchLimitDeg?.map(v => fmt(v, 1)).join('/')}° yaw=free projection=${runtime.policyContract.fplc.projection?.accepted === true ? 'accepted' : (runtime.policyContract.fplc.projection?.fallbackToHold ? 'hold' : 'waiting')} linear_violation=${fmt(runtime.policyContract.fplc.projection?.maxLinearViolation, 6)} dropout=${runtime.enableBallDropoutReferenceHold ? 'hold q_ref' : 'update q_ref'} safety_limiter=disabled` : null,
+          runtime.policyContract?.fplc?.windStartup?.confirmationMethod ? `V325 合格起球=${runtime.policyContract.fplc.windStartup.confirmedHits}/5；当前 roll/pitch 权限=${runtime.policyContract.fplc.activeRelativeRollPitchLimitDeg?.map(v => fmt(v, 2)).join('/')}°；实机外层边界=${runtime.policyContract.fplc.realRelativeRollPitchLimitDeg?.map(v => fmt(v, 1)).join('/')}°${runtime.policyContract.fplc.fixedPose ? '；固定姿态；单 MLP' : ''}` : null,
+          runtime.policyContract?.fplc?.actorBallAgeMode === 'native_refresh_clock' ? `球历史年龄：策略缓存=${fmt(runtime.policyContract.fplc.ballObservationAges?.actorSampleAgeS * 1000, 2)} ms；原始测量=${fmt(runtime.policyContract.fplc.ballObservationAges?.inputRawMeasurementAgeS * 1000, 2)} ms（独立有效性判断）` : null,
 	      `obs scale: editing=obs[${selectedScaleIndex}] × ${selectedScaleIndex >= 0 ? fmt(policyObservationScales[selectedScaleIndex], 3) : 'none'} configured={${configuredScaleBits.join(', ') || 'all 1'}} applied={${appliedScaleValues.length ? (appliedScaleBits.join(', ') || 'all 1') : 'waiting'}}`,
 	      `policy dq adapter: selected=${flowEls.enablePolicyDqAdapter.checked && !flowEls.enablePolicyDqAdapter.disabled ? 'on' : 'off'} applied=${dqAdapterBits}`,
 	      `reset pose: selected=${resetInitialPoseEl.value || 'default_1'} applied=${resetPose}`,
@@ -28165,6 +28426,7 @@ async function step() {
       `ball source: ${latest.ballSource || ballSourceEl.value}`,
       mocap.enabled ? `mocap: marker_YY=${Number.isFinite(mocap.markerId) ? mocap.markerId : readInt(inputs.mocapMarkerId, (CONFIG.mocapBall && CONFIG.mocapBall.markerId) ?? 1, 0, 999)} / ${mocap.detected ? 'detected' : (mocap.ready === false ? 'not-ready' : 'lost')} clock=${mocap.clockSync && mocap.clockSync.ready ? 'synced' : ((mocap.clockSync && mocap.clockSync.status) || 'waiting')} age=${Number.isFinite(mocap.measurementAgeS) ? fmt(mocap.measurementAgeS) : 'none'}s udp=${mocap.udpHost || '?'}:${mocap.udpPort || '?'}` : null,
       mocap.enabled && mocap.udp ? `mocap UDP: recv=${mocap.udp.received_count ?? 0} decoded=${mocap.udp.decoded_count ?? 0} accepted=${mocap.udp.accepted_count ?? 0} parse_errors=${mocap.udp.parse_error_count ?? 0} filtered=${mocap.udp.selection_reject_count ?? 0} clock_rejected=${mocap.udp.clock_reject_count ?? 0} status=${mocap.udp.status || 'waiting'} source=${(mocap.udp.last_packet_addr || []).join(':') || 'none'} bytes=${mocap.udp.last_packet_bytes ?? 0}` : null,
+      mocap.enabled && mocap.observationBoundsM ? `动捕范围 (mocap_raw_m)：${mocapRangeDescription(mocap.observationBoundsM)}` : null,
       mocap.enabled && mocap.markerSelection ? `mocap selection: ${mocap.markerSelection.status || 'waiting'} candidates=${mocap.markerSelection.eligible_marker_count ?? 0}/${mocap.markerSelection.total_marker_count ?? 0} z_rejected=${mocap.markerSelection.z_rejected_marker_count ?? 0}` : null,
       `camera: ${camera.enabled ? `${cameraSource} / ${camera.cameraInfoReceived ? 'info' : 'no-info'} / ${camera.detectorReady ? 'detector' : 'no-detector'} / ${camera.detected ? 'detected' : 'lost'} age=${Number.isFinite(camera.ageS) ? fmt(camera.ageS) : 'none'}s hz=${Number.isFinite(camera.callbackHz) ? fmt(camera.callbackHz, 1) : '0.0'} frame=${camera.frame || 'none'}` : 'off'}`,
       camera.enabled ? `camera path: ${cameraPath}` : null,
@@ -28849,7 +29111,14 @@ class ControlSubprocessProxy:
         self._drain_status()
         with self.lock:
             if self.latest_config is not None:
-                return dict(self.latest_config)
+                config = dict(self.latest_config)
+                mocap = (self.latest_snapshot or {}).get('mocap') or {}
+                if mocap.get('observationBoundsM') is not None:
+                    config['mocapBall'] = {
+                        **config.get('mocapBall', {}),
+                        'observationBoundsM': mocap['observationBoundsM'],
+                    }
+                return config
         raise RuntimeError("control subprocess config unavailable")
 
     def _step_payload_key(self, payload: dict[str, Any]) -> str:
@@ -29764,7 +30033,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=DEFAULT_SIMCODE8_POLICY_XML)
     p.add_argument("--robot-xml-path", type=Path, default=DEFAULT_ROBOT_XML)
     p.add_argument(
-        "--policy-obs-dim", type=int, choices=(50, 57, 67, 72, 117, 156), default=67)
+        "--policy-obs-dim", type=int, choices=(50, 57, 67, 72, 114, 117, 120, 156), default=67)
     p.add_argument(
         "--reset-initial-pose",
         default=RESET_INITIAL_POSE_DEFAULT,
@@ -30613,6 +30882,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--mocap-marker-z-limits-m", default="-1.0,1.0",
         help="Exclude raw mocap scatter points outside Z=MIN,MAX meters before ball selection.")
+    for axis in 'xyz':
+        p.add_argument(f'--mocap-observation-{axis}-limits-m', default=None,
+                       help='Raw mocap observation range MIN,MAX in meters; blank leaves this axis free. '
+                            'Any observation-range option replaces both legacy X/Z filters.')
     p.add_argument(
         "--mocap-rigid-body-slot",
         type=int,
@@ -31461,6 +31734,9 @@ def config_from_args(args: argparse.Namespace) -> ProbeConfig:
         mocap_marker_id=int(args.mocap_marker_id),
         mocap_marker_x_limits_m=parse_limits(args.mocap_marker_x_limits_m),
         mocap_marker_z_limits_m=parse_limits(args.mocap_marker_z_limits_m),
+        mocap_observation_bounds_m=parse_observation_bounds([
+            args.mocap_observation_x_limits_m, args.mocap_observation_y_limits_m,
+            args.mocap_observation_z_limits_m]),
         mocap_rigid_body_slot=int(mocap_rigid_body_slot),
         mocap_rigid_body_id=int(args.mocap_rigid_body_id),
         mocap_rigid_body_name=str(args.mocap_rigid_body_name),

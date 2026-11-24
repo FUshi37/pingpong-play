@@ -1,0 +1,83 @@
+{
+  "date": "2026-11-06",
+  "scope": "Offline actor + observation/history + original 24-sweep projection; synthetic inputs",
+  "hardwareCommandsSent": 0,
+  "rosInitialized": false,
+  "receiverFrequencyMeasured": false,
+  "fullCameraMocapRecordingLoadMeasured": false,
+  "concurrentOfflineRegression": true,
+  "models": [
+    {
+      "profile": "fplc_gpu1_v322",
+      "actorDim": 72,
+      "checkpointSha256": "d35ea68508cbdfbaddfb3766f21c3f4e82f6f127e3caab8262d9e69a9ad307bc",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.9934491435073,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.553082151997387,
+        "p99": 1.2205721998975605,
+        "maximum": 1.4639269998042437
+      },
+      "controlIntervalMs": {
+        "p99": 5.130235759893367,
+        "maximum": 5.428906999895844
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    },
+    {
+      "profile": "fplc_gpu0_v323",
+      "actorDim": 72,
+      "checkpointSha256": "126fd19f6e9f93ccb6b57b675c6f7a6ed55fb3e22134ce556a5711bd40e57d55",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.99596072222712,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.521706495995204,
+        "p99": 1.2483201403119892,
+        "maximum": 1.4229980001800868
+      },
+      "controlIntervalMs": {
+        "p99": 5.160574840101617,
+        "maximum": 5.307247000018833
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    },
+    {
+      "profile": "fplc_gpu1_v324",
+      "actorDim": 72,
+      "checkpointSha256": "d1197b4024377c3e73927e75d91fff47411db5cdb1088c30a6c2cda86b4a9679",
+      "controlTicks": 1000,
+      "actorCalls": 1000,
+      "projectionCalls": 1000,
+      "observedControlHz": 199.9979171388088,
+      "nominalBallStateHz": 90.0,
+      "ballStateRefreshes": 450,
+      "nominalControlHz": 200.0,
+      "nominalHistoryAdvanceHz": 200.0,
+      "predictMs": {
+        "mean": 0.47480448399846864,
+        "p99": 0.9391245200049523,
+        "maximum": 1.2062979999427625
+      },
+      "controlIntervalMs": {
+        "p99": 5.108775719809273,
+        "maximum": 5.157831999895279
+      },
+      "changedReferenceCount": 1000,
+      "unchangedReferenceCount": 0
+    }
+  ]
+}

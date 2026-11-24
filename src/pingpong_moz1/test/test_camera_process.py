@@ -16,6 +16,7 @@ def fake_camera_worker(cfg, input_q, state_q, frame_q, stop, parent_pid):
     stamp = 1791811426.308056
     wall = time.time()
     pending = {}
+    racket_model_id = None
     while not stop.is_set():
         try:
             pending = input_q.get(timeout=.01)
@@ -23,10 +24,15 @@ def fake_camera_worker(cfg, input_q, state_q, frame_q, stop, parent_pid):
             pass
         if pending.get('options', {}).get('yolo_enabled'):
             return
+        if pending.get('racketModel') is not None:
+            racket_model_id=pending['racketModel']['id']
         feedback = {'stampS': stamp, 'measurement': {'observation_state': 'tracking'},
                     'ready': True, 'detected': True, 'options': pending.get('options'),
-                    'racketStamp': pending.get('viz', {}).get('stamp')}
+                    'racketStamp': pending.get('viz', {}).get('stamp'),
+                    'racketFeedback':pending.get('racketFeedback')}
         replace_latest(state_q, {'kind': 'sample', 'position': [0., -.49, 1.1],
+            'racketModelId':racket_model_id,
+            'rawRecording': {'directory': pending.get('rawRecording')},
             'velocity': [0., 0., -.5], 'valid': pending.get('options',{}).get('detect',True), 'feedback': feedback,
             'observationWallS': wall, 'frameStatus': (True, 'base_link'),
             'rotation': np.eye(3)})
@@ -76,11 +82,16 @@ def test_options_survive_visualization_updates_and_worker_death_invalidates():
     try:
         options = source.camera_options
         client.set_options(options)
+        client.set_raw_recording('/tmp/synthetic-raw-request-only')
         stamp = time.time()-.2
         client.set_viz((np.zeros(3), np.zeros(3), True, np.zeros(3), np.zeros(3)), True, stamp)
         wait_until(lambda: client._sample is not None and client.state()[3].get('racketStamp') == stamp)
         assert client.state()[3]['options']['detect'] == options.detect
         assert client.state()[3]['racketStamp'] == stamp
+        wait_until(lambda:client.raw_recording_status().get('directory') == '/tmp/synthetic-raw-request-only')
+        client.set_raw_recording(None)
+        client.set_viz((np.zeros(3), np.zeros(3), True, np.zeros(3), np.zeros(3)), True, stamp)
+        wait_until(lambda:client.raw_recording_status().get('directory') is None)
         from dataclasses import replace
         client.set_options(replace(options, yolo_enabled=True))
         wait_until(lambda: not client.process.is_alive())
@@ -128,4 +139,17 @@ def test_resynchronize_fences_old_cache_even_before_worker_ack():
         assert not client.measurement()[4]['clockSync']['ready']
         assert not client.state()[3]['clockSync']['ready']
         assert client.measurement()[3]==old
+    finally:client.close()
+
+
+def test_racket_context_pump_does_not_need_viz_and_preserves_source_time():
+    client=CameraProcess(SimpleNamespace(),worker_target=fake_camera_worker)
+    try:
+        packet=dict(stamp=123.,sequence=5,q=[0.]*7)
+        client.set_racket_context_source(dict(id='model'),lambda:packet)
+        wait_until(lambda:client._sample is not None and client._sample.get('racketModelId')=='model')
+        wait_until(lambda:client.state()[3].get('racketFeedback')==packet)
+        client.set_viz((np.zeros(3),np.zeros(3),True,np.zeros(3),np.zeros(3)),True,999.)
+        wait_until(lambda:client.state()[3].get('racketStamp')==999.)
+        assert client.state()[3]['racketFeedback']['stamp']==123.
     finally:client.close()

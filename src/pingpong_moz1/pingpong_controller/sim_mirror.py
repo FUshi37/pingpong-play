@@ -718,6 +718,13 @@ class RealBallSimMirror:
         if self._real_rmp_profile:
             self._initialize_recovered_rmp()
 
+        if self._fplc_profile:
+            # The checkpoint changes the ball from 2.7 g to 4 g, and the RMP
+            # setup changes joint armatures. MuJoCo caches simple-body mass
+            # terms (dof_M0) at compilation: body_mass edits alone otherwise
+            # give the free ball an incorrect 4/2.7 gravity multiplier.
+            mj.mj_setConst(self.model, self.data)
+
         self.default_ctrl = self._make_default_ctrl()
         self.renderer = None
         self.render_error: str | None = None

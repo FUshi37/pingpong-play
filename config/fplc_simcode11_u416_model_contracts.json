@@ -1,0 +1,375 @@
+{
+  "fplc_gpu0_v325_u416": {
+    "label": "V325-U416-SINGLE5-120D",
+    "title": "V325 u416 固定±5° 单MLP (120D，临时版本)",
+    "path": "pingpong_controller/outputs/rl_sim/v325_single5_provisional416_20261124_r1/model.pkl",
+    "checkpoint_path": "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_provisional416_20261124_r1/model.pkl",
+    "sha256": "97c89251fe8a54b193f7a9348799cf3fab58b487322a5cdfc27cc51fe2a49dce",
+    "size_bytes": 4555842,
+    "policy_xml_path": "simcode11/pingpong_moz1-main/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+    "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+    "profile": "fixed_plane_v325_u416_single5_windfeature120",
+    "stage_name": "single5_provisional_u416",
+    "global_update": 416,
+    "true_step": 4819255296,
+    "actor_dim": 120,
+    "critic_dim": 453,
+    "action_dim": 7,
+    "actor_schema": "single5_windfeature120_high_v2",
+    "real_workspace_mode": "training",
+    "real_workspace_margin_m": 0.05,
+    "saved_nominal_domain": {
+      "ball_obs_pos_noise_std": 0.0,
+      "ball_obs_vel_noise_std": 0.0,
+      "dr_randomize_ball_obs_frame": false,
+      "dr_randomize_pd": false,
+      "dr_randomize_recovered_rmp": false,
+      "dr_ball_mass_range": [
+        0.004,
+        0.004
+      ],
+      "dr_rmp_target_update_hold_probability": 0.0,
+      "fixed_contact_actor_observation_schema": "fixed_plane_v149_position_only_contiguous_72d"
+    },
+    "collision_version": "ball_racket_contact_real11_static_1ms_v1",
+    "contact_target_config": {
+      "target_apex_z_m": 1.425,
+      "max_post_ball_vxy_m_s": 0.15,
+      "max_lateral_displacement_per_bounce_m": 0.05,
+      "max_tilt_deg": 2.0,
+      "max_time_to_contact_s": 1.0,
+      "gravity_m_s2": 9.8
+    },
+    "native_reset_contract": {
+      "preset": "simcode9_native",
+      "source_function": "mjx_juggle_env.solve_follow_xy_pose",
+      "target_position_m": [
+        0.0,
+        -0.49,
+        1.025
+      ],
+      "warm_seed_role": "reference_orientation_only",
+      "reference_orientation": "unchanged_700_step_warm",
+      "posture_weight": 0.0002,
+      "damping": 2e-05,
+      "max_iterations": 240,
+      "max_delta_norm_rad": 0.1
+    },
+    "env_contract": {
+      "action_command_mode": "velocity",
+      "action_filter_tau_ms": 0.0,
+      "action_velocity_scale": 1.0,
+      "actor_previous_action_scale": 1.0,
+      "arm_action_limiter": true,
+      "arm_vel_limit_deg_s": [
+        210.0,
+        210.0,
+        240.0,
+        240.0,
+        300.0,
+        300.0,
+        300.0
+      ],
+      "ball_obs_fractional_rate": true,
+      "ball_obs_rate_hz": 90.0,
+      "ball_racket_pair_solimp": [
+        0.04,
+        0.7,
+        0.014298,
+        0.04,
+        8.021856
+      ],
+      "ball_racket_pair_solref": [
+        0.006836,
+        0.228086
+      ],
+      "ball_reset_mode": "racket_launch",
+      "cartesian_pose_orientation_cbf_gain_s": 20.0,
+      "cartesian_pose_orientation_margin_deg": 0.1,
+      "cartesian_pose_pitch_limit_deg": 5.0,
+      "cartesian_pose_position_cbf_gain_s": 20.0,
+      "cartesian_pose_position_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "cartesian_pose_position_margin_m": 0.0005,
+      "cartesian_pose_position_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "cartesian_pose_projection_enabled": true,
+      "cartesian_pose_projection_penalty_weight": 0.01,
+      "cartesian_pose_projection_sweeps": 24,
+      "cartesian_pose_projection_tolerance": 2e-05,
+      "cartesian_pose_require_reset_reference_safe": false,
+      "cartesian_pose_roll_limit_deg": 5.0,
+      "cartesian_pose_rpy_axis_enabled": [
+        true,
+        true,
+        false
+      ],
+      "enable_delay_conditioning": false,
+      "episode_racket_anchor_z_range_m": [
+        0.0,
+        0.0
+      ],
+      "episode_target_x_range_m": [
+        0.0,
+        0.0
+      ],
+      "episode_target_y_range_m": [
+        0.0,
+        0.0
+      ],
+      "falling_reset_racket_follow_episode_target_xy_blend": 1.0,
+      "falling_reset_racket_follow_episode_target_xy_blend_choices": null,
+      "falling_reset_racket_follow_episode_target_xy_blend_range": null,
+      "falling_reset_racket_follow_ik_orientation_weight": 0.08,
+      "falling_reset_racket_follow_max_error_m": 0.015,
+      "falling_reset_racket_follow_xy_canonical_ik": true,
+      "fixed_contact_actor_obs_dim": 72,
+      "fixed_contact_actor_observation_schema": "fixed_plane_v149_position_only_contiguous_72d",
+      "fixed_contact_cartesian_reset_blend_enabled": false,
+      "fixed_contact_propagate_held_ball_state_to_query_time": false,
+      "fixed_contact_racket_surface_size_axis": 0,
+      "fixed_contact_racket_x_bounds_m": [
+        -0.348,
+        0.348
+      ],
+      "fixed_contact_racket_y_bounds_m": [
+        -0.7,
+        -0.28
+      ],
+      "fixed_contact_racket_z_bounds_m": [
+        1.0,
+        1.15
+      ],
+      "fixed_contact_surface_frame_mode": "mesh_axes_v1",
+      "fixed_contact_surface_z_m": 1.025,
+      "fixed_contact_workspace_center_xy_m": [
+        0.0,
+        -0.49
+      ],
+      "fixed_plane_limit_cycle_apex_schedule_z_m": [
+        1.14,
+        1.249,
+        1.4,
+        1.425
+      ],
+      "fixed_plane_v149_simple_obs_enabled": true,
+      "fixed_plane_v92_history_obs_enabled": true,
+      "fixed_plane_v93_contact_context_enabled": true,
+      "fixed_plane_v98_coarse_contact": true,
+      "fixed_plane_v99_contiguous_history_obs_enabled": true,
+      "frame_skip": 5,
+      "high_latency_obs": false,
+      "horizon_sec": 1200.0,
+      "policy_integration_feedback_source": "measured",
+      "racket_launch_racket_follow_episode_target_xy": true,
+      "racket_launch_racket_follow_fixed_contact_surface_z": true,
+      "recovered_rmp_acceleration_feedforward_s2": [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "recovered_rmp_acceleration_weight": 0.001,
+      "recovered_rmp_bounded_qvel_reference": true,
+      "recovered_rmp_command_feedback_ablation": false,
+      "recovered_rmp_direct_qvel_target": true,
+      "recovered_rmp_dof_armature_scale_per_joint": [
+        0.4524,
+        1.65,
+        0.92,
+        1.22,
+        0.58,
+        0.5336,
+        0.58
+      ],
+      "recovered_rmp_dof_damping_scale_per_joint": [
+        0.6084,
+        0.9984,
+        0.9984,
+        1.92,
+        0.58,
+        1.17,
+        0.78
+      ],
+      "recovered_rmp_estimator_joint_measure_var": 0.0001,
+      "recovered_rmp_estimator_joint_process_var": 50.0,
+      "recovered_rmp_jerk_limit_deg_s3": [
+        35000.0,
+        35000.0,
+        45000.0,
+        60000.0,
+        60000.0,
+        60000.0,
+        60000.0
+      ],
+      "recovered_rmp_jnt_kd_scale_per_joint": [
+        1.0,
+        1.0,
+        0.92,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "recovered_rmp_jnt_kp_scale_per_joint": [
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "recovered_rmp_joint_acceleration_feedforward": 0.0,
+      "recovered_rmp_joint_velocity_feedforward": 0.5,
+      "recovered_rmp_motion_mode": true,
+      "recovered_rmp_output_delay_steps_per_joint": [
+        18,
+        19,
+        19,
+        18,
+        18,
+        18,
+        18
+      ],
+      "recovered_rmp_output_filter_length": 35,
+      "recovered_rmp_period_s": 0.001,
+      "recovered_rmp_physics_substeps_per_tick": 1,
+      "recovered_rmp_qvel_reference_error_horizon_s": 0.0,
+      "recovered_rmp_qvel_reference_error_horizon_s_per_joint": [
+        10.0,
+        10.0,
+        10.0,
+        10.0,
+        10.0,
+        10.0,
+        10.0
+      ],
+      "recovered_rmp_qvel_target_lead_s": 0.0,
+      "recovered_rmp_target_filter_length": 10,
+      "recovered_rmp_target_update_delay_steps": 3,
+      "recovered_rmp_use_jerk_limit": false,
+      "recovered_rmp_use_safety_bounds": true,
+      "right_arm_reset_degrees": [
+        5.736,
+        -44.399,
+        30.683,
+        97.142,
+        49.323,
+        -12.269,
+        14.214
+      ],
+      "simulation_base_mode": "aligned_fixed",
+      "wind_config": {
+        "enabled": true,
+        "max_speed_m_s": 1.6,
+        "mode_weights": [
+          0.1,
+          0.9,
+          0.0,
+          0.0
+        ],
+        "ou_tau_s": 2.0,
+        "gust_duration_s": [
+          0.5,
+          1.5
+        ],
+        "gust_wait_s": [
+          2.0,
+          6.0
+        ],
+        "air_density_kg_m3": 1.2,
+        "drag_coefficient": 0.47,
+        "radius_m": 0.02,
+        "force_limit_n": 0.02,
+        "model": "quadratic_wind_increment_v1",
+        "startup_no_wind_hits": 5,
+        "startup_ramp_s": 1.0,
+        "peak_wind_fraction": 0.25,
+        "wind_y_nonpositive": true
+      },
+      "wind_history": {
+        "enabled": true,
+        "revision": "observed_ball_500ms_age_valid_bound_20261113"
+      },
+      "wind_pose": {
+        "start_deg": 5.0,
+        "target_deg": 5.0,
+        "ramp_updates": 0,
+        "origin_steps": 0,
+        "elapsed_steps_offset": 0,
+        "flatness_start_deg": 0.25,
+        "flatness_target_deg": 0.35,
+        "quality_start_scale": 1.0,
+        "quality_target_scale": 1.0,
+        "objective_version": 325,
+        "quality_gated": false,
+        "strong_wind_reward": true
+      },
+      "dr_gravity_z_range": [
+        -9.81,
+        -9.81
+      ],
+      "hit_confirm_rel_height": 0.05,
+      "hit_confirm_max_steps": 30,
+      "fixed_plane_v107_first_confirm_rel_height_m": 0.04,
+      "fixed_plane_v107_first_confirm_max_steps": 60,
+      "hit_rearm_distance": 0.035,
+      "hit_min_count_interval": 0.16,
+      "fixed_plane_limit_cycle_hit_quality_apex_margin_m": 0.025,
+      "fixed_contact_ball_z_bounds_m": [
+        0.98,
+        1.5
+      ]
+    },
+    "parent_sha256": "fd9def8f5fdb511e1543cbcca264e0021738ff07c6425e8d393cb1c240918e97",
+    "training_acceptance": {
+      "user_accepted_provisional": true,
+      "original_composite_assessment_passed": false,
+      "final1200s99accepted": false,
+      "source_model_physics_ball_upper_m": 1.5,
+      "height155_recovery_evidence_separate": true,
+      "current_training_continues": true
+    },
+    "final_acceptance_passed": false,
+    "status": "Provisional baseline; full1200s99qualification still incomplete",
+    "source_references": {
+      "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/single5_runtime.py": "7ca619f8218ef58dc1137787becc01f5a8816ffaf4333579116c4aedda54226e",
+      "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/observed_force.py": "9c004054d77844c0b52766b31f1536ff002cd89e55531a928782920f69c12d23",
+      "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/randomized_onset.py": "d379b06c4a06ca08b3ff57e6a74564eb4929ac2c1a37d29ed58d86a8317ca9c8",
+      "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/wind_features.py": "770b20d5ae9026f189394f54c2d66c4cc42af84620159ac2e235a3241be8c92c",
+      "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/TRAIN_PLAN.json": "98522c4fa8ecce66c67df64bb3e4eff2cbc83fdddcf7dcf4f4a3700b62fceafe",
+      "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/CODE_MANIFEST.json": "bd8d6cbf8af948ab1c2199e503bf424d83c6895d79b75c107ae1ef3b247f939f",
+      "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single_actor_ablation_20261120_r1/single_actor.py": "8af798fc9bb02107711d3602f67b020982ab4209069f1050153fd460825331c3"
+    },
+    "real_roll_pitch_limit_deg": [
+      7.0,
+      7.0
+    ],
+    "checkpoint_metadata_path": "simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/v325_single5_provisional416_20261124_r1/MANIFEST.json",
+    "checkpoint_metadata_sha256": "93106b1bfc2f54a7be30939ba54ed1ac1f600419909142d2152cfd175cd61dde",
+    "required_actor_runtime": "single5_windfeature120_high_v2",
+    "actor_layers": [
+      120,
+      282,
+      282,
+      282,
+      7
+    ],
+    "fixed_pose_override_deg": 5.0,
+    "acquisition_phase_s": 3.0,
+    "simulation_only": true,
+    "normal_path_promoted": false,
+    "actor_ball_age_mode": "native_refresh_clock",
+    "deployment_revision": "u416_native_age_v2"
+  }
+}

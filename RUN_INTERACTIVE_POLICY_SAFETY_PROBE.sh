@@ -34,6 +34,21 @@ while (( $# )); do
         --no-save-camera-images) PROBE_RECORDING_SAVE_CAMERA_IMAGES=false; shift ;;
         --recording-trajectory-only) PROBE_RECORDING_TRAJECTORY_ONLY=true; shift ;;
         --no-recording-trajectory-only) PROBE_RECORDING_TRAJECTORY_ONLY=false; shift ;;
+        --mocap-observation-[xyz]-limits-m|--mocap-observation-[xyz]-limits-m=*)
+            _MOCAP_RANGE_AXIS="${1#--mocap-observation-}"
+            _MOCAP_RANGE_AXIS="${_MOCAP_RANGE_AXIS%%-*}"
+            if [[ "$1" == *=* ]]; then
+                _MOCAP_RANGE_VALUE="${1#*=}"
+                shift
+            else
+                if (( $# < 2 )); then
+                    echo "ERROR: $1 requires MIN,MAX meters (or an empty value)" >&2; exit 2
+                fi
+                _MOCAP_RANGE_VALUE="$2"
+                shift 2
+            fi
+            printf -v "MOCAP_OBSERVATION_${_MOCAP_RANGE_AXIS^^}_LIMITS_M" '%s' "$_MOCAP_RANGE_VALUE"
+            ;;
         *) _PROBE_EXTRA_ARGS+=("$1"); shift ;;
     esac
 done
@@ -65,8 +80,14 @@ POLICY_RELEASE_ID="${POLICY_RELEASE_ID:-fplc_gpu1_v172}"
 # simcode10: fplc_gpu1_v223 (72D), fplc_gpu0_v224/fplc_gpu1_v224 (117D),
 # fplc_gpu1_v274_s9/fplc_gpu1_v274_s11 (72D), fplc_gpu0_v319 (72D).
 # V321 S4/u2097 (72D): POLICY_RELEASE_ID=fplc_v321_s4_u2097_20261029_r1
+# V322 S4/u31361: POLICY_RELEASE_ID=fplc_gpu1_v322 (72D, inherited 1200s).
+# V323 S2/u3075: POLICY_RELEASE_ID=fplc_gpu0_v323 (72D, camera AR1).
+# V324 S2/u2947: POLICY_RELEASE_ID=fplc_gpu1_v324 (72D, camera AR1).
+# V325 u416: POLICY_RELEASE_ID=fplc_gpu0_v325_u416 (120D, fixed ±5°, single MLP).
+# V325 S15/u14400: POLICY_RELEASE_ID=fplc_gpu0_v325 (114D, 1.6 m/s wind).
 # Select with POLICY_RELEASE_ID; model/XML/schema are resolved together from
-# the authenticated contracts. simcode10/COLCON_IGNORE excludes the snapshot.
+# the authenticated contracts. V325 assets are loaded from simcode11;
+# simcode11/COLCON_IGNORE excludes its training snapshot from colcon.
 SETUP_FILE="${SETUP_FILE:-$WORKSPACE_DIR/install/setup.bash}"
 CONFIG_DONE_MONITORING_YAML="${CONFIG_DONE_MONITORING_YAML:-$WORKSPACE_DIR/config_done_monitoring.yaml}"
 LOAD_CONFIG_DONE_MONITORING="${LOAD_CONFIG_DONE_MONITORING:-true}"
@@ -223,8 +244,10 @@ DONE_EE_X_LIMITS_M="${DONE_EE_X_LIMITS_M--0.298,0.163}"
 DONE_EE_Y_LIMITS_M="${DONE_EE_Y_LIMITS_M--0.502,-0.290}"
 DONE_EE_Z_LIMITS_M="${DONE_EE_Z_LIMITS_M-0.692,1.462}"
 # Preserve the configured envelope for runtime switches out of FPLC. The
-# FPLC preset below narrows DONE_EE_* for validation and launch diagnostics;
-# the backend receives the original limits and selects the active envelope.
+# FPLC preset below selects DONE_EE_* for validation and launch diagnostics.
+# V325 uses its training box plus the configured outer safety margin; older
+# FPLC releases intersect these
+# general limits. The backend retains the originals for runtime switches.
 _PROBE_BASE_EE_X_LIMITS_M="$DONE_EE_X_LIMITS_M"
 _PROBE_BASE_EE_Y_LIMITS_M="$DONE_EE_Y_LIMITS_M"
 _PROBE_BASE_EE_Z_LIMITS_M="$DONE_EE_Z_LIMITS_M"
@@ -508,7 +531,9 @@ case "$COMPENSATION_PRESET" in
                 FPLC_MODEL_PATH) FPLC_MODEL_PATH="$_FPLC_VALUE" ;;
                 FPLC_POLICY_XML_PATH) FPLC_POLICY_XML_PATH="$_FPLC_VALUE" ;;
                 FPLC_OBS_DIM) FPLC_OBS_DIM="$_FPLC_VALUE" ;;
+                FPLC_ACTOR_AGE_MODE) FPLC_ACTOR_AGE_MODE="$_FPLC_VALUE" ;;
                 FPLC_REAL_ROLL_PITCH_LIMITS_DEG) FPLC_REAL_ROLL_PITCH_LIMITS_DEG="$_FPLC_VALUE" ;;
+                FPLC_TRAINING_ROLL_PITCH_LIMITS_DEG) FPLC_TRAINING_ROLL_PITCH_LIMITS_DEG="$_FPLC_VALUE" ;;
                 DONE_EE_X_LIMITS_M) DONE_EE_X_LIMITS_M="$_FPLC_VALUE" ;;
                 DONE_EE_Y_LIMITS_M) DONE_EE_Y_LIMITS_M="$_FPLC_VALUE" ;;
                 DONE_EE_Z_LIMITS_M) DONE_EE_Z_LIMITS_M="$_FPLC_VALUE" ;;
@@ -836,6 +861,37 @@ MOCAP_MARKER_ID="${MOCAP_MARKER_ID:-1}"
 # Filter all scatter points in the original mocap frame before calibration.
 MOCAP_MARKER_X_LIMITS_M="${MOCAP_MARKER_X_LIMITS_M:--2.0,2.0}"
 MOCAP_MARKER_Z_LIMITS_M="${MOCAP_MARKER_Z_LIMITS_M:--1.0,1.0}"
+# Any new axis option replaces the legacy X/Z filters, including explicit
+# blanks. Unspecified/blank axes are unrestricted in the original mocap frame.
+# Example: --mocap-observation-x-limits-m=-0.4,0.4
+#          --mocap-observation-y-limits-m=0.5,1.5 --mocap-observation-z-limits-m=0.2,2
+_MOCAP_RANGE_ARGS=()
+_MOCAP_RANGE_CONFIGURED=false
+for _MOCAP_RANGE_AXIS in X Y Z; do
+    _MOCAP_RANGE_VARIABLE="MOCAP_OBSERVATION_${_MOCAP_RANGE_AXIS}_LIMITS_M"
+    if [[ -v "$_MOCAP_RANGE_VARIABLE" ]]; then _MOCAP_RANGE_CONFIGURED=true; fi
+done
+if [ "$_MOCAP_RANGE_CONFIGURED" = true ]; then
+    MOCAP_OBSERVATION_X_LIMITS_M="${MOCAP_OBSERVATION_X_LIMITS_M-}"
+    MOCAP_OBSERVATION_Y_LIMITS_M="${MOCAP_OBSERVATION_Y_LIMITS_M-}"
+    MOCAP_OBSERVATION_Z_LIMITS_M="${MOCAP_OBSERVATION_Z_LIMITS_M-}"
+    if ! python3 - "$WORKSPACE_DIR/src/pingpong_moz1" \
+        "$MOCAP_OBSERVATION_X_LIMITS_M" "$MOCAP_OBSERVATION_Y_LIMITS_M" \
+        "$MOCAP_OBSERVATION_Z_LIMITS_M" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+from pingpong_controller.mocap_observation_range import parse_observation_bounds
+try:
+    parse_observation_bounds(sys.argv[2:])
+except ValueError as exc:
+    print(f"ERROR: invalid mocap observation range: {exc}", file=sys.stderr)
+    sys.exit(2)
+PY
+    then exit 2; fi
+    _MOCAP_RANGE_ARGS+=(--mocap-observation-x-limits-m="$MOCAP_OBSERVATION_X_LIMITS_M"
+        --mocap-observation-y-limits-m="$MOCAP_OBSERVATION_Y_LIMITS_M"
+        --mocap-observation-z-limits-m="$MOCAP_OBSERVATION_Z_LIMITS_M")
+fi
 MOCAP_RIGID_BODY_ID="${MOCAP_RIGID_BODY_ID:-1}"
 MOCAP_RIGID_BODY_SLOT="${MOCAP_RIGID_BODY_SLOT:-$MOCAP_RIGID_BODY_ID}"
 MOCAP_RIGID_BODY_NAME="${MOCAP_RIGID_BODY_NAME:-}"
@@ -1016,7 +1072,13 @@ if [[ "$POLICY_PROFILE" == fplc_* ]]; then
 fi
 echo "[ProbeConfig] policy dq_mode=$POLICY_DQ_MODE coherence=$([ "$POLICY_DQ_MODE" = raw_coherent ] && echo coherent || echo incoherent_legacy_ablation) adapter=$ENABLE_POLICY_DQ_ADAPTER allow_incoherent=$ALLOW_INCOHERENT_DQ_ABLATION impact_limit=$INCOHERENT_DQ_ABLATION_MAX_IMPACTS dq_obs_scale=$POLICY_DQ_OBSERVATION_SCALE"
 if [[ "$POLICY_PROFILE" == fplc_* ]]; then
-    echo "[ProbeConfig] FPLC persistent_qref=true horizon=10s projection=training_24_sweeps training_roll_pitch=2deg real_roll_pitch=${FPLC_REAL_ROLL_PITCH_LIMITS_DEG}deg yaw=free reset=simcode9_native_XY_surface_Z_follow_IK safety_intervention=measured_hold_disarm_history_reset"
+    echo "[ProbeConfig] actor_ball_age_mode=$FPLC_ACTOR_AGE_MODE raw_measurement_age=safety_and_recording timeout=350ms"
+    echo "[ProbeConfig] FPLC persistent_qref=true horizon=10s projection=training_24_sweeps training_roll_pitch=${FPLC_TRAINING_ROLL_PITCH_LIMITS_DEG}deg real_roll_pitch=${FPLC_REAL_ROLL_PITCH_LIMITS_DEG}deg yaw=free reset=simcode9_native_XY_surface_Z_follow_IK safety_intervention=measured_hold_disarm_history_reset"
+    if [ "$POLICY_PROFILE" = fplc_gpu0_v325 ]; then
+        echo "[ProbeConfig] V325 startup_roll_pitch=2deg qualified_launches=5 authority_ramp=1s full_roll_pitch=20deg observation_gate_projection=synchronized"
+    elif [ "$POLICY_PROFILE" = fplc_gpu0_v325_u416 ]; then
+        echo "[ProbeConfig] V325_u416 actor=120/282/282/282/7 networks=1 fixed_target_roll_pitch=5deg real_stop_roll_pitch=${FPLC_REAL_ROLL_PITCH_LIMITS_DEG}deg acquisition_features_after_launches=5 phase=3s causal_wind_estimator=history_only high_wind_deadband=1.25m/s high_wind_width=0.35m/s provisional=true final1200s99accepted=false"
+    fi
 fi
 echo "[ProbeConfig] command safety limiter=hard-disabled all_paths=true independent_slow_reset=true"
 echo "[ProbeConfig] plant_matcher mode=$POLICY_PLANT_MATCHER_MODE apply_allowed=$ALLOW_POLICY_PLANT_MATCHER_APPLY real_config=$POLICY_PLANT_MATCHER_REAL_CONFIG"
@@ -1033,7 +1095,11 @@ echo "[ProbeConfig] contact_action_shield=$ENABLE_CONTACT_ACTION_SHIELD window=$
 echo "[ProbeConfig] vertical_contact_energy_shield=$ENABLE_VERTICAL_CONTACT_ENERGY_SHIELD pre=${VERTICAL_CONTACT_PRE_CONTACT_WINDOW_S}s target_apex_delta=${VERTICAL_CONTACT_TARGET_APEX_HEIGHT_M}m restitution=$VERTICAL_CONTACT_RESTITUTION hard_racket_vz=${VERTICAL_CONTACT_MAX_RACKET_UPWARD_SPEED_M_S}m/s"
 echo "[ProbeConfig] mocap=${ENABLE_MOCAP_BALL} udp=${MOCAP_UDP_HOST}:${MOCAP_UDP_PORT} ball_marker=${MOCAP_MARKER_ID} rb_slot=${MOCAP_RIGID_BODY_SLOT} rb_id=${MOCAP_RIGID_BODY_ID} calibration=${MOCAP_CALIBRATION_PATH}"
 echo "[ProbeConfig] recording ball_sensors=camera:${ENABLE_CAMERA_BALL},mocap:${ENABLE_MOCAP_BALL} rate=${PROBE_RECORDING_CONTROL_RATE_HZ}Hz file=ball_sensor_samples.jsonl trigger=browser_Record control_read=cache_references formatting=sensor_producer_and_writer"
-echo "[ProbeConfig] mocap ball_selection=unique_raw_XZ_in_range x_limits_m=${MOCAP_MARKER_X_LIMITS_M} z_limits_m=${MOCAP_MARKER_Z_LIMITS_M} frame=mocap_raw_m"
+if [ "$_MOCAP_RANGE_CONFIGURED" = true ]; then
+    echo "[ProbeConfig] mocap ball_selection=unique_raw_XYZ_in_range x_limits_m=${MOCAP_OBSERVATION_X_LIMITS_M:-unrestricted} y_limits_m=${MOCAP_OBSERVATION_Y_LIMITS_M:-unrestricted} z_limits_m=${MOCAP_OBSERVATION_Z_LIMITS_M:-unrestricted} frame=mocap_raw_m legacy_filters=replaced"
+else
+    echo "[ProbeConfig] mocap ball_selection=unique_raw_XZ_in_range x_limits_m=${MOCAP_MARKER_X_LIMITS_M} z_limits_m=${MOCAP_MARKER_Z_LIMITS_M} frame=mocap_raw_m"
+fi
 if [ "$ENABLE_MOCAP_BALL" = "true" ]; then
     echo "[ProbeConfig] mocap timestamp_sync=required receiver_clock=ROS min_samples=$MOCAP_CLOCK_SYNC_MIN_SAMPLES min_span=${MOCAP_CLOCK_SYNC_MIN_SPAN_S}s window=${MOCAP_CLOCK_SYNC_WINDOW_S}s unsynchronized_observation=invalid"
 else
@@ -1693,6 +1759,7 @@ exec python3 "$PROBE_SCRIPT" \
     "${ROS_BRIDGE_ARGS[@]}" \
     "${CAMERA_ARGS[@]}" \
     "${MOCAP_ARGS[@]}" \
+    "${_MOCAP_RANGE_ARGS[@]}" \
     --mocap-udp-host "$MOCAP_UDP_HOST" \
     --mocap-udp-port "$MOCAP_UDP_PORT" \
     --mocap-calibration-path "$MOCAP_CALIBRATION_PATH" \

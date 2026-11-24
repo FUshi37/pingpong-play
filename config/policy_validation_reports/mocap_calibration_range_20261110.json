@@ -1,0 +1,52 @@
+{
+  "date": "2026-11-10",
+  "scope": "Rigid-body range parser/calibration/resume/launcher; offline only",
+  "hardwareCommandsSent": 0,
+  "liveCalibrationExecuted": false,
+  "regressions": {
+    "passed": 193,
+    "skipped": 1,
+    "skippedReason": "Existing UDP socket test blocked by sandbox"
+  },
+  "dryRun": {
+    "passed": true,
+    "waypointCount": 50,
+    "supplementalCandidatePreparation": "default enabled",
+    "speedDegS": 3,
+    "settleSeconds": 5,
+    "maxAttempts": 50,
+    "rawObservationBoundsM": [
+      [
+        0.3,
+        2.0
+      ],
+      null,
+      null
+    ],
+    "rosInitialized": false,
+    "udpOpened": false
+  },
+  "unchangedFunctionAst": [
+    "AutoNode._control_tick",
+    "ArmMotion.tick",
+    "collect_sequence",
+    "LiveSequence.settle",
+    "LiveSequence.sample",
+    "LiveSequence.retry_wait"
+  ],
+  "behavior": {
+    "uniqueInRangeRigidBody": true,
+    "selectionMode": "unique_raw_xyz",
+    "udpSlotAndIdAreTransient": true,
+    "allowsTargetRenumbering": true,
+    "persistsRangeAndLatestUdpNumber": true,
+    "resumeRequiresSameRange": true,
+    "acceptsFullUdpDatagram": true,
+    "physicalBodyIdentityLockedToSlotId": false
+  },
+  "syntax": {
+    "python": true,
+    "bash": true
+  },
+  "currentFourBodyEvidence": "config/policy_validation_reports/mocap_4k_range_20261110.json"
+}

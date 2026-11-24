@@ -1,4 +1,4 @@
-"""Independent 72/117/156-D FPLC adapters; publish q_ref to the robot's RMP.
+"""Independent 72/114/117/120/156-D FPLC adapters; publish q_ref to the robot's RMP.
 
 MuJoCo is used only for FK/Jacobians and the frozen 0.7 s reference posture.
 No simulated RMP, PD loop, delay queue or actuator compensation executes
@@ -8,6 +8,7 @@ state and requires an explicit reentry reset; it never rewrites q_ref silently.
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import numpy as np
 try:
     import mujoco as mj
@@ -15,7 +16,7 @@ except ImportError:
     mj = None
 
 from pingpong_controller.fplc_deployment import (
-    FPLC_CONTRACTS, FPLC_REAL_ROLL_PITCH_LIMIT_DEG, fplc_assets,
+    FPLC_CONTRACTS, fplc_real_roll_pitch_limit_deg, fplc_assets,
 )
 from pingpong_controller.fplc_numpy import (
     ContactTargetConfig, advance_position_history, compute_dynamic_contact_target,
@@ -26,6 +27,10 @@ from pingpong_controller.fplc_numpy import (
     warm_fplc_projection, V224_PREFIX_HISTORY_LENGTH,
 )
 from pingpong_controller.mjx_rl_policy import MjxRLPolicyController
+from pingpong_controller.fplc_wind_numpy import WindBallHistory, WindStartupAuthority, wind_policy_mean
+from pingpong_controller.fplc_single5_numpy import (
+    FixedWindAcquisition, encode_single5, single5_policy_mean,
+)
 from pingpong_controller.policy_release_manifest import sha256_file
 from pingpong_controller.policy_ball_handover import is_fractional_refresh
 from pingpong_controller.simcode2_xml import build_simcode2_training_xml
@@ -47,6 +52,9 @@ class FPLCPolicyController(MjxRLPolicyController):
         if observation_profile not in FPLC_CONTRACTS:
             raise RuntimeError(f"unknown FPLC profile {observation_profile!r}")
         self.contract = FPLC_CONTRACTS[observation_profile]
+        if self.contract.get('actor_ball_age_mode', 'measurement_age') not in (
+                'measurement_age', 'native_refresh_clock'):
+            raise RuntimeError('FPLC actor ball-age mode is not implemented')
         self.projection_runtime = warm_fplc_projection(require_compiled=True)
         self.policy_model_id = observation_profile
         self.fplc_profile = observation_profile
@@ -87,7 +95,8 @@ class FPLCPolicyController(MjxRLPolicyController):
         self.rp_outer = np.deg2rad(np.array([cfg['cartesian_pose_roll_limit_deg'],
                                           cfg['cartesian_pose_pitch_limit_deg']], dtype=np.float32))
         self.rp_inner = self.rp_outer - np.deg2rad(np.float32(cfg['cartesian_pose_orientation_margin_deg']))
-        self.real_rp_outer = np.deg2rad(np.asarray(FPLC_REAL_ROLL_PITCH_LIMIT_DEG, dtype=np.float32))
+        self.real_rp_outer = np.deg2rad(np.asarray(
+            fplc_real_roll_pitch_limit_deg(observation_profile), dtype=np.float32))
         # right_arm_reset_degrees seeds the reference warm-up, not the actual
         # racket-launch episode reset. The frozen environment then solves a
         # pose-preserving XY/surface-Z follow IK before installing q_ref.
@@ -172,7 +181,7 @@ class FPLCPolicyController(MjxRLPolicyController):
                 or int(payload.get('act_dim', 0)) != 7):
             raise RuntimeError("FPLC actor/critic/action schema mismatch")
         cfg = payload.get('env_cfg', {})
-        if self.contract['actor_dim'] not in (72, 117, 156):
+        if self.contract['actor_dim'] not in (72, 114, 117, 120, 156):
             raise RuntimeError("FPLC actor schema is not implemented")
         if self.contract['actor_dim'] == 117:
             if (not cfg.get('v224_history_enabled')
@@ -185,14 +194,58 @@ class FPLCPolicyController(MjxRLPolicyController):
             # JSON arrays and checkpoint tuples have identical semantics.
             if isinstance(expected, list):
                 equal = actual is not None and np.array_equal(np.asarray(actual), np.asarray(expected))
+            elif isinstance(expected, dict):
+                equal = json.loads(json.dumps(actual)) == expected
             else:
                 equal = actual == expected
             if not equal:
                 raise RuntimeError(f"FPLC checkpoint configuration mismatch: {key}")
-        if vars(cfg['fixed_contact_target']) != self.contract['contact_target_config']:
+        target = cfg['fixed_contact_target']
+        if (target if isinstance(target, dict) else vars(target)) != self.contract['contact_target_config']:
             raise RuntimeError("FPLC contact target configuration mismatch")
-        if self._pi_weights['l1_w'].shape != (self.contract['actor_dim'], 256):
-            raise RuntimeError("FPLC requires its frozen 256/256 actor")
+        hidden = 282 if self.contract['actor_dim'] == 120 else 256
+        if self._pi_weights['l1_w'].shape != (self.contract['actor_dim'], hidden):
+            raise RuntimeError("FPLC actor width does not match the selected frozen release")
+        if self.contract['actor_dim'] == 120:
+            if (set(payload['params']) != {'pi', 'v', 'log_std'}
+                    or set(payload['params']['pi']) != {'l1', 'l2', 'l3', 'out'}
+                    or self._pi_weights['l3_w'].shape != (282, 282)
+                    or self.contract['fixed_pose_override_deg'] != 5.):
+                raise RuntimeError('FPLC u416 requires its single 120/282/282/282/7 actor')
+        if self.contract['actor_dim'] == 114:
+            # The saved curriculum target is20 degrees; per-episode startup
+            # authority is separately scheduled by WindStartupAuthority.
+            expected = self.contract['wind_actor_contract']
+            params = payload['params']
+            if (set(params) != {'log_std', 'pi', 'teacher_pi', 'v',
+                                'residual_action_scale', 'wind_pose_bound_gate_v1'}
+                    or not np.array_equal(params['residual_action_scale'], expected['residual_action_scale'])
+                    or float(params['wind_pose_bound_gate_v1']) != expected['gate_span_deg']):
+                raise RuntimeError('FPLC V325 residual/gate contract mismatch')
+            self._wind_teacher_weights = {}
+            for layer, sizes in (('l1', (114, 256)), ('l2', (256, 256)), ('out', (256, 7))):
+                weights = params['teacher_pi'][layer]
+                if weights['w'].shape != sizes or weights['b'].shape != (sizes[1],):
+                    raise RuntimeError('FPLC V325 teacher weight shape mismatch')
+                self._wind_teacher_weights[layer] = {
+                    key: np.ascontiguousarray(weights[key], dtype=np.float32) for key in ('w', 'b')}
+            self._wind_residual_scale = np.asarray(params['residual_action_scale'], dtype=np.float32)
+            self._wind_gate_span_deg = np.float32(params['wind_pose_bound_gate_v1'])
+
+    def _policy_action(self, obs):
+        if self.contract['actor_dim'] == 120:
+            return single5_policy_mean(self._pi_weights, obs)
+        residual_or_mean = super()._policy_action(obs)
+        if self.contract['actor_dim'] != 114:
+            return residual_or_mean
+        teacher = np.asarray(obs, dtype=np.float32)
+        for layer in ('l1', 'l2', 'out'):
+            weights = self._wind_teacher_weights[layer]
+            teacher = teacher @ weights['w'] + weights['b']
+            if layer != 'out':
+                teacher = np.tanh(teacher)
+        return wind_policy_mean(obs, teacher, residual_or_mean,
+                                self._wind_residual_scale, self._wind_gate_span_deg)
 
     def reset(self):
         super().reset()
@@ -201,6 +254,14 @@ class FPLCPolicyController(MjxRLPolicyController):
         self.racket_history = None
         self.age_history = None
         self.prefix_history = None
+        self.wind_history = WindBallHistory() if self.contract['actor_dim'] in (114, 120) else None
+        self.wind_startup = (WindStartupAuthority(self._checkpoint_env_cfg)
+                             if self.contract['actor_dim'] == 114 else None)
+        if self.contract['actor_dim'] == 120:
+            self.wind_startup = FixedWindAcquisition(self._checkpoint_env_cfg)
+        self.last_wind_startup = {}
+        self._held_actor_age = 0.0
+        self.last_ball_observation_ages = {}
         self._held_direct_position = None
         self._held_direct_stamp = None
         self._held_direct_age = 0.0
@@ -268,7 +329,8 @@ class FPLCPolicyController(MjxRLPolicyController):
             if np.any(q < self.arm_q_low) or np.any(q > self.arm_q_high):
                 return False
             _, _, p, rpy, _, _ = self._pose(q, with_jacobian=False)
-            lower, upper, rp_limit = self.position_lower, self.position_upper, self.rp_outer
+            lower, upper = self.position_lower, self.position_upper
+            rp_limit = self._active_pose_limits()[0]
             if limits is not None:
                 # The real stop envelope may extend beyond training Z.  The
                 # actor projection below still uses its authenticated box.
@@ -287,6 +349,7 @@ class FPLCPolicyController(MjxRLPolicyController):
 
     def _project_reference(self, measured_q, nominal_dq):
         cfg = self._checkpoint_env_cfg
+        rp_outer, rp_inner = self._active_pose_limits()
         _, _, position, rpy, jacp, jacr = self._pose(self.arm_cmd_q)
         horizon = np.asarray(cfg['recovered_rmp_qvel_reference_error_horizon_s_per_joint'], dtype=np.float32)
         error = self.arm_vel_limit_rad_s * horizon
@@ -299,7 +362,7 @@ class FPLCPolicyController(MjxRLPolicyController):
             nominal_qvel=nominal_dq[None], position_m=position[None],
             relative_rpy_rad=rpy[None], translation_jacobian=jacp[None],
             relative_rpy_jacobian=jacr[None], position_lower_m=self.position_lower + margin,
-            position_upper_m=self.position_upper - margin, roll_pitch_limit_rad=self.rp_inner,
+            position_upper_m=self.position_upper - margin, roll_pitch_limit_rad=rp_inner,
             velocity_lower=lower[None], velocity_upper=upper[None], velocity_scale=self.arm_vel_limit_rad_s,
             position_gain_s=cfg['cartesian_pose_position_cbf_gain_s'],
             orientation_gain_s=cfg['cartesian_pose_orientation_cbf_gain_s'],
@@ -309,7 +372,7 @@ class FPLCPolicyController(MjxRLPolicyController):
         tolerance = cfg['cartesian_pose_projection_tolerance']
         def safe(p, angles):
             return bool(max(np.max(np.maximum(self.position_lower - p, p - self.position_upper)),
-                            np.max(np.abs(angles[:2]) - self.rp_outer), 0.0) <= tolerance)
+                            np.max(np.abs(angles[:2]) - rp_outer), 0.0) <= tolerance)
         current_safe, candidate_safe = safe(position, rpy), safe(candidate_position, candidate_rpy)
         accepted = current_safe and candidate_safe and float(projection.max_violation[0]) <= tolerance
         q_next = candidate if accepted else self.arm_cmd_q.copy()
@@ -321,12 +384,26 @@ class FPLCPolicyController(MjxRLPolicyController):
             'maxLinearViolation': float(projection.max_violation[0]),
             'correctionNormRadS': float(np.linalg.norm(dq - nominal_dq)),
         }
+        if self.wind_startup is not None:
+            self.last_projection['windStartup'] = dict(self.last_wind_startup)
+        if self.last_ball_observation_ages:
+            self.last_projection['ballObservationAges'] = dict(self.last_ball_observation_ages)
         return q_next.astype(np.float32), dq.astype(np.float32)
+
+    def _active_pose_limits(self):
+        if self.wind_startup is None:
+            return self.rp_outer, self.rp_inner
+        # Observation and projection must use the same pre-action clock.
+        tick = max(0, self._fplc_tick - 1)
+        outer = np.deg2rad(self.wind_startup.limits_deg(tick))
+        margin = np.deg2rad(np.float32(self._checkpoint_env_cfg['cartesian_pose_orientation_margin_deg']))
+        return outer, outer - margin
 
     def predict(self, ball_pos_m, ball_vel_m_s, *, ball_valid, ball_obs_age_s=0.0,
                 dt=None, arm_q=None, arm_dq=None, arm_sample_stamp_s=None,
                 observation_scales=None, confirmed_hit_count=0, ball_observed=None,
                 direct_ball_position_m=None, direct_ball_age_s=None,
+                direct_ball_velocity_m_s=None,
                 direct_ball_stamp_s=None, ball_state_already_propagated=False,
                 ball_observation_rate_hz=90., ball_history_position_m=None,
                 ball_history_age_s=None, ball_history_measurement_age_s=None,
@@ -361,6 +438,10 @@ class FPLCPolicyController(MjxRLPolicyController):
         direct_age = age if direct_ball_age_s is None else float(direct_ball_age_s)
         if not np.isfinite(direct_age) or direct_age < 0:
             raise RuntimeError('FPLC direct sample age is invalid')
+        native_age = self.contract.get('actor_ball_age_mode') == 'native_refresh_clock'
+        if native_age and observed and direct_age > self.LOST_BALL_TIMEOUT_S:
+            self.invalidate_after_intervention()
+            raise RuntimeError('FPLC direct measurement is older than 350 ms')
         history_position = None
         history_age = None
         history_measurement_age = None
@@ -383,8 +464,9 @@ class FPLCPolicyController(MjxRLPolicyController):
             self.ball_history = np.broadcast_to(direct, (1, 8, 3)).copy()
             self.racket_history = np.broadcast_to(pose, (1, 8, 9)).copy()
             self.age_history = np.ones((1, 8), dtype=np.float32)
-            self.age_history[0, 0] = direct_age
+            self.age_history[0, 0] = 0.0 if native_age else direct_age
             self._held_direct_position, self._held_direct_age = direct.copy(), direct_age
+            self._held_actor_age = 0.0
             self._held_direct_stamp = direct_ball_stamp_s
             self._direct_observed = True
             self._ball_state_rate_hz = state_rate
@@ -403,10 +485,14 @@ class FPLCPolicyController(MjxRLPolicyController):
             tick = self._fplc_tick
             refresh = is_fractional_refresh(tick, state_rate, self.dt)
             self._held_direct_age += self.dt
+            self._held_actor_age += self.dt
             if use_state_history:
                 self._held_state_age += self.dt
                 self._held_state_measurement_age += self.dt
             if refresh:
+                # Native _observe_ball updates last_ball_obs_step on refresh,
+                # separately from the physical sensor packet's capture age.
+                self._held_actor_age = 0.0
                 self._direct_observed = observed
                 if observed:
                     self._held_direct_position = direct.copy()
@@ -422,13 +508,21 @@ class FPLCPolicyController(MjxRLPolicyController):
             self.ball_history, self.racket_history, self.age_history = advance_position_history(
                 ball_positions=self.ball_history, racket_poses=self.racket_history, ball_ages=self.age_history,
                 ball_position_now=(self._held_state_position if use_state_history else self._held_direct_position)[None], racket_pose_now=pose[None],
-                ball_age_now=np.asarray([self._held_state_age if use_state_history else self._held_direct_age], dtype=np.float32))
+                ball_age_now=np.asarray([self._held_actor_age if native_age else
+                    (self._held_state_age if use_state_history else self._held_direct_age)], dtype=np.float32))
+        if native_age:
+            self.last_ball_observation_ages = {
+                'mode': 'native_refresh_clock',
+                'actorSampleAgeS': float(self._held_actor_age),
+                'heldRawMeasurementAgeS': float(self._held_direct_age),
+                'inputRawMeasurementAgeS': float(direct_age),
+            }
         self._fplc_tick += 1
         target_xy = self.episode_target_xy if episode_target_xy_m is None else _finite(episode_target_xy_m, 2, 'episode target')
         common = dict(q=q[None], dq=dq[None], q_ref_error=(self.arm_cmd_q-q)[None],
                       previous_action=self.prev_action[None], ball_positions=self.ball_history,
                       ball_ages=self.age_history, target_xy_m=target_xy[None])
-        if self._expected_obs_dim in (72, 117):
+        if self._expected_obs_dim in (72, 114, 117, 120):
             observation = make_simple_position_observation(**common, racket_pose_now=pose[None],
                                                           ball_position_valid=np.asarray([self._direct_observed]))[0]
             if self._expected_obs_dim == 117:
@@ -444,6 +538,26 @@ class FPLCPolicyController(MjxRLPolicyController):
                 context = make_v224_history_context(
                     self.prefix_history, step_count=self._fplc_tick - 1)
                 observation = np.concatenate((observation, context[0]))
+            elif self._expected_obs_dim in (114, 120):
+                # The suffix always uses direct observations; the registered
+                # release selects raw measurement or native refresh-clock age.
+                direct_velocity = (velocity if direct_ball_velocity_m_s is None else
+                                   _finite(direct_ball_velocity_m_s, 3, 'direct ball velocity'))
+                tick = self._fplc_tick - 1
+                self.wind_startup.observe(tick, direct, direct_velocity,
+                    position, observed=observed and direct_age <= self.LOST_BALL_TIMEOUT_S)
+                bounds = self.wind_startup.limits_deg(tick)
+                self.last_wind_startup = self.wind_startup.diagnostics(tick)
+                suffix = self.wind_history.advance(
+                    self._held_direct_position,
+                    self._held_actor_age if native_age else self._held_direct_age,
+                    self._direct_observed, bounds)
+                if self._expected_obs_dim == 120:
+                    observation = encode_single5(
+                        np.concatenate((observation, suffix[:40])),
+                        self.wind_startup.features(tick))
+                else:
+                    observation = np.concatenate((observation, suffix))
         elif self._expected_obs_dim == 156:
             if int(confirmed_hit_count) < 0 or int(confirmed_hit_count) != confirmed_hit_count:
                 raise RuntimeError('FPLC confirmed hit count must be nonnegative and integral')
@@ -497,6 +611,10 @@ class FPLCPolicyController(MjxRLPolicyController):
                 'maxLinearViolation': 0.0, 'correctionNormRadS': 0.0,
                 'ballDropoutHold': True, 'actorExecuted': False,
             }
+            if self.wind_startup is not None:
+                self.last_projection['windStartup'] = dict(self.last_wind_startup)
+            if self.last_ball_observation_ages:
+                self.last_projection['ballObservationAges'] = dict(self.last_ball_observation_ages)
         else:
             action = _finite(self._policy_action(observation), 7, 'actor output')
             nominal = np.clip(action, -1, 1) * self.arm_vel_limit_rad_s

@@ -139,6 +139,22 @@ def test_disabled_hybrid_pixel_kalman_returns_raw_ir_center():
     assert detection["cy"] == detection["cy_raw"]
 
 
+def test_failed_ir_frame_records_rejection_and_effective_morphology():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    detector.yolo_enabled = False
+    image = np.zeros((100, 120), np.uint8)
+    cv2.circle(image, (60, 50), 35, 255, -1)
+    out = detector._detect_core(np.zeros((100, 120, 3), np.uint8), image, None, 1.)
+    assert not out['detected']
+    raw = out['raw_measurement']
+    assert raw['ir_reject_radius'] == 1
+    assert raw['ir_contours_examined'] == 1
+    assert raw['ir_candidates_accepted'] == 0
+    assert raw['ir_config_threshold'] == 100
+    assert raw['ir_config_dilate_iterations'] == 0
+    assert not raw['depth_raw_jump_overridden']
+
+
 def test_ir_roi_is_cropped_and_coordinates_stay_full_frame():
     detector = _detector_for_ir_unit_test(enabled=False)
 
@@ -213,6 +229,24 @@ def test_existing_depth_modes_keep_their_legacy_source_priority():
     assert detector._select_depth(1550.0, 293.0) == (293.0, "geometry")
 
 
+def test_tunable_foreground_percentile_recovers_sparse_surface_without_changing_legacy():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    depth = np.full((20, 20), 1600, dtype=np.uint16)
+    depth[:3, :] = 360  # 15% valid foreground, center patch sees background.
+    mask = np.full(depth.shape, 255, dtype=np.uint8)
+    assert detector._get_depth_from_depthmap(
+        10., 10., depth, mask, (0, 0), prefer_near_surface=True) == 1600.
+    detector.depth_foreground_percentile = 10.
+    assert detector._get_depth_from_depthmap(
+        10., 10., depth, mask, (0, 0), prefer_near_surface=True) == 360.
+    assert detector._get_depth_from_depthmap(
+        10., 10., depth, mask, (0, 0)) == 1600.
+    # Lowering the percentile cannot invent depth when stereo has no returns.
+    depth[:] = 0
+    assert detector._get_depth_from_depthmap(
+        10., 10., depth, mask, (0, 0), prefer_near_surface=True) is None
+
+
 def test_adaptive_depth_keeps_valid_near_sensor_measurement():
     detector = _detector_for_ir_unit_test(enabled=False)
     detector.set_depth_mode("adaptive")
@@ -224,6 +258,34 @@ def test_adaptive_depth_keeps_valid_near_sensor_measurement():
     assert method == "adaptive_sensor"
     assert detector.last_depth_selection["sensor_rejected"] is False
     assert detector.last_depth_selection["sensor_weight"] == 1.0
+
+
+def test_dense_fresh_surface_recovers_without_using_rejected_raw_range_as_reference():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    detector.set_depth_mode('adaptive')
+    detector._select_depth(1400., 400., 0.)
+    detector._current_range_quality = dict(range_valid=True, range_quality_strong=True)
+    depth, method = detector._select_depth(400., 400., .011)
+    assert depth == 400. and method == 'adaptive_sensor'
+    assert detector.last_depth_selection['raw_jump_overridden']
+
+
+def test_dense_surface_still_needs_independent_ball_radius_agreement():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    detector.set_depth_mode('adaptive')
+    detector._current_range_quality = dict(range_valid=True, range_quality_strong=True)
+    _, method = detector._select_depth(450., 600., 0., observed_radius_px=14.)
+    assert method != 'adaptive_sensor'
+    assert 'radius_disagreement' in detector.last_depth_selection['rejection_reason']
+
+
+def test_quality_path_never_mixes_current_ir_with_temporally_median_depth():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    detector.set_depth_mode('adaptive')
+    detector.observation_quality_enabled = True
+    detector.depth_history.extend([600., 580., 560.])
+    assert detector._depth_for_reconstruction(540.) == 540.
+    assert list(detector.depth_history) == [600., 580., 560.]
 
 
 def test_deferred_adaptive_depth_commits_only_after_complete_3d_acceptance():
@@ -442,6 +504,76 @@ def test_adaptive_depth_recovers_after_two_normal_sensor_frames():
     assert outputs[1] == (510.0, "adaptive_sensor")
     assert detector.last_depth_selection["sensor_rejected"] is False
     assert detector.last_depth_selection["sensor_recovery_count"] == 0
+
+
+def test_bad_stereo_frame_does_not_poison_next_trusted_depth_recovery():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    detector.set_depth_mode('adaptive')
+    detector._select_depth(400., 390., 0.)
+    detector._select_depth(410., 400., .01)
+    detector._select_depth(3000., 410., .02)
+    assert detector.last_depth_selection['sensor_rejected']
+    depth, method = detector._select_depth(430., 420., .03)
+    assert (depth, method) == (430., 'adaptive_sensor')
+    assert detector.last_depth_selection['raw_jump_overridden']
+
+
+def test_stale_depth_prediction_cannot_bypass_recovery_or_hard_gates():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    detector.set_depth_mode('adaptive')
+    detector._select_depth(400., 400., 0.)
+    detector._select_depth(400., 400., .01)
+    detector._select_depth(3000., 400., .02)
+    detector._select_depth(400., 400., .08)
+    assert detector.last_depth_selection['sensor_rejected']
+    assert not detector.last_depth_selection['raw_jump_overridden']
+
+
+def test_short_measured_gap_keeps_velocity_but_long_gap_clears_it():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    detector.configure_observation_quality(
+        clear_buffers_on_detection_loss_enabled=True,
+        motion_consistency_gate_enabled=True,
+        physics_constrained_velocity_enabled=True)
+    detector.position_history.append((1., [0., 0., 1000.]))
+    detector.motion_last_trusted_time = 1.
+    detector.last_velocity_ready = True
+    detector.ir_tracking_miss_count = 2
+    detector._handle_observation_loss('ir_detection_lost', observation_time=1.023)
+    detector._handle_observation_loss('depth_untrusted', observation_time=1.033)
+    assert len(detector.position_history) == 1
+    detector._handle_observation_loss('ir_detection_lost', observation_time=1.045)
+    assert not detector.position_history
+
+
+def test_reacquired_discontinuity_cannot_reuse_short_gap_velocity():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    detector.configure_observation_quality(
+        clear_buffers_on_detection_loss_enabled=True,
+        motion_consistency_gate_enabled=True,
+        physics_constrained_velocity_enabled=True)
+    detector.position_history.extend((1.+i*.011, [0., 0., 1000.+i*10.]) for i in range(5))
+    detector.observation_gap_active = True
+    detector.observation_history_preserved_for_gap = True
+    detector.motion_last_innovation_mm = np.array([0., 0., 30.])
+    detector._append_physics_velocity_sample(1.066, [0., 0., 1100.])
+    assert len(detector.position_history) == 1
+    assert not detector.last_velocity_ready
+
+
+def test_short_gap_preservation_requires_motion_continuity_gate():
+    detector = _detector_for_ir_unit_test(enabled=False)
+    detector.configure_observation_quality(
+        clear_buffers_on_detection_loss_enabled=True,
+        motion_consistency_gate_enabled=False,
+        physics_constrained_velocity_enabled=True)
+    detector.position_history.append((1., [0., 0., 1000.]))
+    detector.motion_last_trusted_time = 1.
+    detector.last_velocity_ready = True
+    detector.ir_tracking_miss_count = 2
+    detector._handle_observation_loss('ir_detection_lost', observation_time=1.023)
+    assert not detector.position_history
+    assert not detector.observation_history_preserved_for_gap
 
 
 def test_disabling_yolo_clears_bbox_and_uses_ir_tracking_roi():

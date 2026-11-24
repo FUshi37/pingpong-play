@@ -18,9 +18,58 @@ build/
 # Model files
 *.pt
 *.pkl
+*.ckpt
+*.onnx
+*.safetensors
+
+# Generated archives and compressed datasets must stay out of Git snapshots.
+*.tar
+*.zip
+*.7z
+*.rar
+*.tgz
+*.tbz2
+*.txz
+*.gz
+*.bz2
+*.xz
+*.zst
+
+# Training runs and raw capture payloads.
+/runs/
+*.npy
+*.npz
+*.bag
+*.mcap
+*.pcap
+*.pcapng
+events.out.tfevents.*
+
+# Local compiled programs and binary traces; keep their source files visible.
+*.so.*
+/movax/controller/mc_core
+/movax/controller/mc_core_bak
+/movax/controller/mc_core_2102
+/movax/controller/mc_core_slam_odom
+/movax/controller/mc_core_hacked_wbc
+/movax/controller/mc_core_hacked_wbc_base
+/movax/controller/datatracer/**/*.dat
+/movax/tools/monitor_tool
+/src/pingpong_moz1/pingpong_controller/data/mc_core_pva.mc_core_pva
 
 # Output files
 outputs/
+# High-rate experiment payloads must not be indexed while control runs.
+# Keep analysis scripts/reports available; these generated recordings stay on disk.
+# Exclude whole recording trees, including live/readonly archives, so Git
+# can skip their contents regardless of the payload format.
+analysis_results/**/*recordings/
+analysis_results/**/probe_recording_*/
+analysis_results/**/raw_camera/
+analysis_results/**/*.jsonl
+analysis_results/**/*.npz
+analysis_results/**/*.jpg
+analysis_results/**/*.jpeg
 *.csv
 *.json
 *.png
@@ -31,6 +80,12 @@ outputs/
 !config/policy_release_manifest.json
 !config/fplc_model_contracts.json
 !config/fplc_simcode10_model_contracts.json
+!config/fplc_simcode11_model_contracts.json
+!config/fplc_simcode11_u416_model_contracts.json
+!/recovery_artifacts/v325_u416_adaptation_20261124/**
+!/recovery_artifacts/v325_u416_real_pose_7deg_20261124/**
+!/recovery_artifacts/v325_u416_native_age_20261124/**
+!/recovery_artifacts/v325_adaptation_20261118/**
 !config/policy_plant_real_fit_record_new3_v1.json
 !config/policy_validation_reports/
 !config/policy_validation_reports/*.json

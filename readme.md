@@ -1,3 +1,32 @@
+# V325 u416 固定 5° 单网络模型（simcode11）
+
+```bash
+# 只校验配置，不启动设备
+PROBE_CONFIG_ONLY=true POLICY_RELEASE_ID=fplc_gpu0_v325_u416 ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+# 启动交互网页
+POLICY_RELEASE_ID=fplc_gpu0_v325_u416 ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+```
+
+120D 观测，单个 120→282→282→282→7 MLP；策略目标 roll/pitch 从复位起固定 ±5°，实物外层姿态保护 ±7°，yaw 不限。
+网页可独立选择 u416 或旧 V325；全局默认仍为 V172。此前授权的实机工作空间外扩 5 cm 继续有效。
+u416 策略历史年龄已按训练缓存刷新时钟对齐（新测量为 0，保持时按 5 ms 累计）；原始测量年龄保留用于有效性检查和日志。
+这是随模型清单标注的临时版本，完整 1200 秒验收尚未通过。
+详细参数、观测列、验证与回退见 [u416 适配说明](docs/v325_u416_deployment.md)。
+
+# V325 风扰动模型（simcode11）
+
+```bash
+# 只校验配置
+PROBE_CONFIG_ONLY=true POLICY_RELEASE_ID=fplc_gpu0_v325 ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+# 启动交互网页
+POLICY_RELEASE_ID=fplc_gpu0_v325 ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+```
+
+网页 RL profile 已增加 V325（S15，1.6 m/s 恒风训练，114D）。默认启动版本仍为 V172。
+本轮只适配 V325，不迁移旧 simcode 目录；simcode11 已排除 colcon 编译。
+具体观测、动作和边界说明见 [V325 适配说明](docs/simcode11_v325_deployment.md)。
+回退记录保存在 `recovery_artifacts/v325_adaptation_20261118/`。
+
 # 相机标定
 激活conda环境
   conda activate pingpong
@@ -952,3 +981,18 @@ ANALYSIS_RUN_DIR=/path/to/probe_recording_xxx ./RUN_INTERACTIVE_POLICY_SAFETY_PR
 而且还有个问题当起球颠球时physics velocity总是会给球一个z一个负的速度，但是刚开始起球时这是不合理的，因为球是从0突然开始向上运动，没有负向速度
 
 我在实物上进行了分析，发现球拍姿态对于颠球影响非常大，而且非常容易导致SIM2REAL GAP，因此需要在仿真中就考虑设计专门的球拍姿态控制器，不过目前还没有确定合理的方案。我觉得只通过奖励函数约束可能不能实现很好的效果，是不是可以通过一个额外附加的、可部署的姿态稳定控制器来使得颠球时球拍姿态稳定。我觉得是不是执行器模型尽可能对齐比较好，因为实物上部署时可能会出现误差累积的情况，导致策略输出越来越不稳定，或者有什么比较好的解决方案吗？                                                                                                                                                                                                                           
+
+
+动捕标定
+# 原始动捕坐标（米）：当前实测四个刚体中目标 X≈1.122，其他三个 X<0；推荐 X=[0.3,2.0]，Y/Z 不限。
+# 范围模式逐包选择范围内唯一刚体；当前 UDP 的 slot/id 会换位，不用于锁定物理刚体。
+./RUN_AUTO_MOCAP_CALIBRATION.sh \
+  --speed-deg-s 3 \
+  --settle-seconds 5 \
+  --max-attempts 50 \
+  --mocap-observation-x-limits-m=0.3,2.0 \
+  --mocap-observation-y-limits-m= \
+  --mocap-observation-z-limits-m=
+
+# 在上面的命令中添加 --dry-run，只校验参数和 50 个姿态，不启动设备或运动。
+# 详细说明：docs/mocap_observation_range.md

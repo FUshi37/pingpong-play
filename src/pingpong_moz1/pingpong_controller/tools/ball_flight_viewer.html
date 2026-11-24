@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BALL FLIGHT · 球运动轨迹</title>
+<style>
+:root{color-scheme:dark;--bg:#070c12;--white:#e4ecee;--muted:#7c8a96;--cyan:#71dfdf;--gold:#e9bd80;--line:#ffffff12}
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:var(--bg);color:var(--white);font-family:Inter,"Helvetica Neue",Arial,"Noto Sans CJK SC",sans-serif}button,input,select{font:inherit}button,select{color:#abb7bf;border:1px solid var(--line);background:#101820;border-radius:7px;cursor:pointer}button{padding:9px 14px;transition:background .2s,color .2s}button:hover,button.active{color:var(--white);background:#1d2d36;border-color:#82e2e23d}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--cyan);outline-offset:4px}select{padding:8px 10px}canvas#scene{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:grab}canvas#scene:active{cursor:grabbing}header{position:absolute;left:4.4%;right:4.4%;top:4.5%;display:flex;justify-content:space-between;align-items:start;pointer-events:none}.brand{font-size:12px;letter-spacing:.29em;color:var(--muted);margin-bottom:19px}.brand b{color:var(--cyan);font-weight:500}.title{font-size:clamp(26px,3.4vw,58px);font-weight:300;letter-spacing:-.045em;margin:0}.subtitle{font-size:12px;color:var(--muted);letter-spacing:.12em;margin-top:13px}.status{font-size:11px;letter-spacing:.16em;text-align:right;color:#a5b6bd;line-height:1.9}.status i{display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--cyan);box-shadow:0 0 12px #71dfdf66;margin-right:9px}.status small{color:#657580;font-size:10px;letter-spacing:.07em}.stamp{font-variant-numeric:tabular-nums}.rail{position:absolute;right:4.4%;top:29%;width:18.5%;max-width:310px;pointer-events:none}.eyebrow{font-size:10px;color:var(--muted);letter-spacing:.22em;margin-bottom:19px}.number{font-size:clamp(44px,4.6vw,78px);font-weight:300;letter-spacing:-.055em;font-variant-numeric:tabular-nums;line-height:1}.number small{font-size:14px;color:var(--muted);letter-spacing:0;margin-left:9px}.metric-name{font-size:11px;color:var(--muted);margin-top:10px}.metrics{display:flex;gap:35px;border-top:1px solid var(--line);margin-top:25px;padding-top:22px}.value{font-size:26px;letter-spacing:-.02em;font-weight:300;font-variant-numeric:tabular-nums}.value small{color:var(--muted);font-size:11px;margin-left:5px}.mini{width:100%;height:95px;margin:24px 0 14px;display:block}.legend{border-top:1px solid var(--line);padding-top:17px;display:grid;gap:13px;color:#9caeb6;font-size:11px}.legend > span{display:grid;grid-template-columns:24px 44px 8px 1fr;align-items:center;column-gap:12px}.legend b{font-weight:400;white-space:nowrap}.swatch{width:24px;height:2px;background:var(--cyan);display:inline-block}.swatch.gold{background:repeating-linear-gradient(90deg,var(--gold),var(--gold) 5px,transparent 5px,transparent 8px)}.swatch.ghost{height:7px;background:linear-gradient(90deg,#91b7c41a,#91b7c488);border-radius:6px}.note{font-size:10px;line-height:1.9;color:#6e7f8b;margin-top:17px}.view-label{position:absolute;left:4.4%;bottom:22%;pointer-events:none}.view-label .eyebrow{margin-bottom:9px}.view-title{font-size:15px;font-weight:300;letter-spacing:.08em;color:#b0c6ce}.view-title b{font-size:10px;color:#5e727f;font-weight:400;letter-spacing:.1em;margin-right:12px}.view-controls{position:absolute;left:4.4%;bottom:15%;display:flex;gap:6px}.view-controls button{font-size:11px;padding:8px 13px;background:#0b1219b8}.footer{position:absolute;left:4.4%;right:4.4%;bottom:3.5%;border-top:1px solid #ffffff18;padding-top:20px}.timeline{position:relative;height:24px;margin-bottom:10px}.timeline canvas{position:absolute;top:2px;left:0;width:100%;height:20px;pointer-events:none}.timeline input{appearance:none;background:transparent;width:100%;position:absolute;inset:0;margin:0;cursor:pointer;height:24px}.timeline input::-webkit-slider-thumb{appearance:none;width:10px;height:10px;border-radius:50%;background:#d9efef;box-shadow:0 0 14px #71dfdf66}.timeline input::-moz-range-thumb{width:10px;height:10px;border:0;border-radius:50%;background:#d9efef}.transport{display:flex;justify-content:space-between;align-items:center;gap:12px}.left-controls,.right-controls{display:flex;align-items:center;gap:14px}.play{width:37px;height:34px;padding:0;color:var(--white);font-size:13px}.time{font-size:12px;color:#91a3ad;letter-spacing:.03em;font-variant-numeric:tabular-nums}.time strong{font-weight:400;color:#d9e5e8}.range-note{font-size:10px;color:#6e818d;letter-spacing:.06em}.right-controls button,.right-controls select{font-size:11px}.help{position:absolute;left:50%;transform:translateX(-50%);bottom:15.5%;font-size:10px;color:#506370;pointer-events:none;letter-spacing:.04em}.export .view-controls,.export .interactive,.export .help{display:none}.export .footer{bottom:4.2%}.export .view-label{bottom:19.8%}.export .transport{margin-top:10px}.export .range-note{font-size:11px}.export .time{font-size:14px}.badge{color:var(--gold);font-size:10px;letter-spacing:.09em}.export .footer .right-controls:after{content:attr(data-film-label);color:#6e818d;font-size:11px;letter-spacing:.16em}.tip{display:none;position:absolute;inset:12% 20%;background:#101a24f5;padding:35px;z-index:10;border:1px solid #ffffff25;border-radius:14px;overflow:auto;line-height:1.9;color:#a8b9c2;font-size:13px}.tip h2{font-size:22px;color:var(--white);font-weight:400}.tip .close{float:right}.tip p{margin:16px 0}.gap{color:var(--gold)}
+@media(max-width:850px){header{top:4%}.brand{font-size:9px;margin-bottom:12px}.subtitle{font-size:9px}.status{font-size:9px}.rail{top:30%;right:4%;width:22%}.rail .eyebrow{font-size:8px}.metrics{gap:15px;margin-top:18px;padding-top:15px}.value{font-size:18px}.metric-name,.legend{font-size:9px}.note{font-size:8px}.mini{height:65px;margin:16px 0}.right-controls{gap:5px}.right-controls button{padding:7px}.range-note{display:none}.help{display:none}.view-controls{bottom:17%}.view-controls button{font-size:10px;padding:6px 8px}.tip{inset:8% 6%}.legend{gap:9px}.title{font-size:32px}}
+@media(max-height:650px){.rail{top:25%}.note{display:none}.mini{height:55px;margin:12px 0}.metrics{margin-top:13px;padding-top:12px}.legend{gap:8px;padding-top:12px}.note{margin-top:9px}.view-label{bottom:25%}.view-controls{bottom:18%}.footer{padding-top:10px}.brand{margin-bottom:10px}.number{font-size:44px}}
+</style></head>
+<body>
+<canvas id="scene" aria-label="球运动三维轨迹，拖动旋转，滚轮缩放"></canvas>
+<header><div><div class="brand"><b>MOZ1</b> &nbsp; / &nbsp; TABLE TENNIS BALL BOUNCING</div><h1 class="title">Ball in flight<span style="color:#71dfdf">.</span></h1><div class="subtitle">球运动轨迹 &nbsp; / &nbsp; MEASURE · TRACE · PREDICT</div></div><div class="status"><i></i>BALL TRAJECTORY<br><small>WORLD FRAME · METRES</small></div></header>
+<aside class="rail"><div class="eyebrow">LIVE STATE / <span id="phase">上升</span></div><div class="number" id="height">1.402<small>m</small></div><div class="metric-name">球高度 · ABSOLUTE Z</div><div class="metrics"><div><div class="value" id="speed">1.24<small>m/s</small></div><div class="metric-name">运动速度</div></div><div><div class="value" id="bounce">102</div><div class="metric-name">累计颠球</div></div></div><canvas class="mini" id="heightChart"></canvas><div class="legend"><span><i class="swatch"></i><b>实测轨迹</b><span>/</span><b>MEASURED</b></span><span><i class="swatch gold"></i><b>预测轨迹</b><span>/</span><b>PREDICTED</b></span><span><i class="swatch ghost"></i><b>历史状态</b><span>/</span><b>HISTORY</b></span></div><div class="note">预测由当前实测状态以及历史状态共同前推预测得到。<br>灰色圆盘示意实测球拍中心。</div></aside>
+<div class="view-label"><div class="eyebrow">PERSPECTIVE / <span id="cameraIndex">01</span></div><div class="view-title"><b>●</b><span id="cameraName">斜侧 · OBLIQUE</span></div></div>
+<nav class="view-controls" aria-label="视角"><button data-view="auto" class="active">自动运镜</button><button data-view="0">斜侧</button><button data-view="1">正面</button><button data-view="2">侧面</button><button data-view="3">俯视</button></nav><div class="help">拖动旋转 &nbsp; · &nbsp; 滚轮缩放 &nbsp; · &nbsp; 双击恢复运镜</div>
+<footer class="footer"><div class="timeline"><canvas id="timelineArt"></canvas><input id="seek" type="range" min="60" max="84" step="0.005" value="60" aria-label="播放位置"></div><div class="transport"><div class="left-controls"><button class="play interactive" id="play" aria-label="播放或暂停">Ⅱ</button><div class="time"><strong id="timeNow">060.000</strong> s <span style="color:#415663"> / </span><span id="timeEnd">084.000</span> s</div></div><div class="right-controls"><span class="badge">ONLINE PREDICTION</span><select class="interactive" id="speedSelect" aria-label="播放速度"><option value=".25">0.25×</option><option value=".6" selected>0.6×</option><option value="1">1×</option><option value="2">2×</option></select><button class="interactive" id="range">整段录制</button><button class="interactive" id="info">说明</button><button class="interactive" id="fullscreen" aria-label="全屏">全屏 ⤢</button></div></div></footer>
+<section class="tip" id="infoPanel"><button class="close" id="closeInfo">关闭 ×</button><h2>实测与预测，如何阅读</h2><p>青色曲线来自录制中的 measuredBall；白球是当前状态，淡色球是最近 0.4 秒的历史状态。轨迹保留最近 2.6 秒。球半径 20 mm，XYZ 使用同一比例；网格间隔 50 mm。</p><p>金色虚线是离线重建：仅使用播放时刻及以前的 measuredBall / measuredVelocity，按重力 9.8 m/s² 与二次阻力系数 0.13545 m⁻¹ 前推，步长 5 ms，最长 400 ms。到达当前球拍中心高度 + 20 mm 时结束；不预测碰撞后的反弹。参数复用现有预测模块默认值，未为本次数据重新标定。</p><p>本次录制的 predictedBall 全为空。这里的预测线并非实物运行时保存的在线预测。球拍只保存了位置，因此以水平圆盘示意中心位置；不能据此判断拍面真实姿态或真实触拍位置。预测终点不是真实落点标注。</p><p>实测位置在相邻有效记录之间进行线性插值以改善显示；遇到明显速度反转时保持测量状态。预测始终使用当前时刻以前的一条原始记录；无效数据或明显断点会断开轨迹、隐藏球和预测。</p><p>空格：暂停；← / →：前后 1 秒；1–5：自动 / 斜侧 / 正面 / 侧面 / 俯视；F：全屏；拖动：旋转；滚轮：缩放。整段录制保留等待和结束阶段；自动视角固定于颠球区域，离开该区域后可拖动缩放查看。</p><p id="recordingInfo"></p></section>
+<script>
+'use strict';
+const DATA=/*__RECORDING_DATA__*/;
+const $=id=>document.getElementById(id), rows=DATA.rows, events=DATA.events;
+const exportMode=new URLSearchParams(location.search).has('export');
+if(exportMode)document.body.classList.add('export');
+const C={cyan:[113,223,223],gold:[233,189,128],muted:[99,130,146]};
+const scene=$('scene'),ctx=scene.getContext('2d'), mini=$('heightChart'),mc=mini.getContext('2d'),tl=$('timelineArt'),tc=tl.getContext('2d');
+let W=0,H=0,dpr=1,current=DATA.highlight[0],range=[...DATA.highlight],playing=!exportMode,rate=DATA.playbackRate??.6,full=false;
+let auto=true,manualCamera=null,transition=null,zoom=1,drag=null,filmSeconds=0,playClock=0;
+const SHOTS=[{a:.82,e:.28,name:'斜侧 · OBLIQUE'},{a:0,e:.09,name:'正面 · FRONT'},{a:Math.PI/2,e:.16,name:'侧面 · SIDE'},{a:.45,e:1.38,name:'俯视 · TOP'}];
+let camera={a:.82,e:.28};
+const rgba=(c,a)=>`rgba(${c.join(',')},${a})`,clamp=(x,a,b)=>Math.max(a,Math.min(b,x)),ease=x=>x*x*x*(x*(x*6-15)+10),lerp=(a,b,x)=>a+(b-a)*x;
+const mixAngle=(a,b,t)=>a+Math.atan2(Math.sin(b-a),Math.cos(b-a))*t;
+function indexAt(t){let lo=0,hi=rows.length;while(lo<hi){let mid=(lo+hi)>>1;if(rows[mid][0]<=t)lo=mid+1;else hi=mid;}return Math.max(0,lo-1);}
+function eventAt(t){let lo=0,hi=events.length;while(lo<hi){const mid=(lo+hi)>>1;if(events[mid][0]<=t)lo=mid+1;else hi=mid;}return lo?events[lo-1][1]:0;}
+function contiguous(a,b){return a&&b&&a[10]&&b[10]&&a[11]===b[11]&&b[0]-a[0]<.041&&Math.hypot(a[1]-b[1],a[2]-b[2],a[3]-b[3])<.12;}
+function stateAt(t){const i=indexAt(t),r=rows[i],next=rows[Math.min(i+1,rows.length-1)],p=r.slice(1,4),v=r.slice(4,7),racket=r.slice(7,10);const valid=!!r[10]&&t-r[0]<.041;
+  if(valid&&contiguous(r,next)&&next[0]>r[0]&&!(r[6]<-.1&&next[6]>.1)){const u=clamp((t-r[0])/(next[0]-r[0]),0,1);for(let j=0;j<3;j++)p[j]=lerp(p[j],next[1+j],u);}
+  return {i,p,v,racket,valid,mode:r[11],seed:r};}
+// This function is causal: only the latest past control query seeds the model.
+function predict(s){if(!s.valid||s.mode!==1||!s.racket.every(Number.isFinite))return [];
+  let p=s.seed.slice(1,4),v=s.seed.slice(4,7),out=[p.slice()],m=DATA.model,plane=s.racket[2]+m.ballRadius;
+  if(p[2]<plane)return [];
+  for(let k=0;k<Math.round(m.horizon/m.step);k++){
+    const n=p.map((x,j)=>x+v[j]*m.step),speed=Math.hypot(...v);
+    const nv=v.map((x,j)=>x+((j===2?-m.gravity:0)-m.drag*speed*x)*m.step);
+    if(n[2]<=plane&&nv[2]<0){const u=(p[2]-plane)/(p[2]-n[2]);out.push(p.map((x,j)=>lerp(x,n[j],u)));break;}
+    out.push(n);p=n;v=nv;
+  }return out;}
+function fit(canvas,c){const r=canvas.getBoundingClientRect();canvas.width=Math.round(r.width*dpr);canvas.height=Math.round(r.height*dpr);c.setTransform(dpr,0,0,dpr,0,0);return [r.width,r.height];}
+function resize(){W=innerWidth;H=innerHeight;dpr=Math.min(devicePixelRatio||1,2);fit(scene,ctx);fit(mini,mc);fit(tl,tc);render();} 
+function cameraAt(seconds){
+  const segment=10,phase=seconds/segment,base=Math.floor(phase)%4,local=phase-Math.floor(phase),a=SHOTS[base],b=SHOTS[(base+1)%4];
+  const t=ease(clamp((local-.66)/.34,0,1));
+  return {a:mixAngle(a.a,b.a,t)+.025*Math.sin(seconds*.16),e:lerp(a.e,b.e,t),index:t>.5?(base+1)%4:base};
+}
+function updateCamera(seconds){
+  if(transition){const t=ease(clamp((playClock-transition.start)/1.6,0,1));camera={a:mixAngle(transition.from.a,transition.to.a,t),e:lerp(transition.from.e,transition.to.e,t)};if(t>=1)transition=null;}
+  else if(auto){camera=cameraAt(seconds);}else if(manualCamera)camera={...manualCamera};
+  let k=auto?cameraAt(seconds).index:(manualCamera?.index??0);
+  $('cameraIndex').textContent=String(k+1).padStart(2,'0');$('cameraName').textContent=manualCamera?.name&&!auto?manualCamera.name:SHOTS[k].name;
+}
+function project(p){const x=p[0]-DATA.center[0],y=p[1]-DATA.center[1],z=p[2]-DATA.center[2],a=camera.a,e=camera.e;
+  const u=Math.cos(a)*x-Math.sin(a)*y,depth=Math.sin(a)*x+Math.cos(a)*y;
+  const scale=Math.min(H*1.15,W*.83)*zoom;
+  return [W*.405+u*scale,H*.48+(-Math.cos(e)*z+Math.sin(e)*depth)*scale,Math.cos(e)*depth+Math.sin(e)*z,scale];}
+function line(points,color,width=1,dash=[]){if(points.length<2)return;ctx.beginPath();let last=false;for(const p of points){if(!p){last=false;continue;}let q=project(p);if(last)ctx.lineTo(q[0],q[1]);else ctx.moveTo(q[0],q[1]);last=true;}ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dash);ctx.stroke();ctx.setLineDash([]);}
+function textAt(p,text,color='#57717f',size=10,dx=0,dy=0){const q=project(p);ctx.fillStyle=color;ctx.font=`${size}px Arial`;ctx.fillText(text,q[0]+dx,q[1]+dy);}
+function disc(p,r,fill,stroke){const points=[];for(let j=0;j<=64;j++){const a=j/64*2*Math.PI;points.push(project([p[0]+Math.cos(a)*r,p[1]+Math.sin(a)*r,p[2]]));}
+  ctx.beginPath();points.forEach((q,i)=>i?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1]));ctx.closePath();ctx.fillStyle=fill;ctx.fill();if(stroke){ctx.strokeStyle=stroke;ctx.lineWidth=1;ctx.stroke();}}
+function ball(p,opacity=1,radius=.02,ghost=false){const q=project(p),r=radius*q[3];if(!Number.isFinite(q[0])||r<0)return;
+  if(!ghost){const glow=ctx.createRadialGradient(q[0],q[1],r*.3,q[0],q[1],r*3.5);glow.addColorStop(0,'#a7edf51c');glow.addColorStop(1,'#71dfdf00');ctx.fillStyle=glow;ctx.fillRect(q[0]-4*r,q[1]-4*r,8*r,8*r);}
+  ctx.globalAlpha=opacity;const g=ctx.createRadialGradient(q[0]-r*.35,q[1]-r*.4,r*.02,q[0]+r*.1,q[1]+r*.15,r*1.15);
+  if(ghost){g.addColorStop(0,'#b9ecec77');g.addColorStop(.6,'#6599a42f');g.addColorStop(1,'#6197a00a');}
+  else{g.addColorStop(0,'#fffef4');g.addColorStop(.4,'#e4eeee');g.addColorStop(.78,'#9bb8c4');g.addColorStop(1,'#416171');}
+  ctx.beginPath();ctx.arc(q[0],q[1],r,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();ctx.strokeStyle=ghost?'#97d8de55':'#d6f4f578';ctx.lineWidth=.7;ctx.stroke();ctx.globalAlpha=1;
+}
+function stage(s){const cx=DATA.center[0],cy=DATA.center[1],floor=1.04,half=.205;
+  disc([cx,cy,floor],.247,'#0a141db8','#2b485121');
+  for(let k=-4;k<=4;k++){const d=k*.05;line([[cx+d,cy-half,floor],[cx+d,cy+half,floor]],k===0?'#47687755':'#3a58632b',.7);line([[cx-half,cy+d,floor],[cx+half,cy+d,floor]],k===0?'#47687755':'#3a58632b',.7);}
+  const zaxis=[cx-half,cy+half];line([[...zaxis,floor],[...zaxis,1.54]],'#55748155',.8);
+  if(Math.cos(camera.e)>.13){for(let z=1.1;z<1.55;z+=.1){line([[zaxis[0]-.006,zaxis[1],z],[zaxis[0]+.006,zaxis[1],z]],'#63818d66',1);textAt([zaxis[0]-.016,zaxis[1],z],z.toFixed(1),'#657f8d',10,-22,3);}
+  textAt([...zaxis,1.565],'Z / m','#7c96a2',10,-12,0);}
+  textAt([cx+half+.018,cy,floor],'X','#708e9c',11);textAt([cx,cy+half+.022,floor],'Y','#708e9c',11);
+  ctx.font='9px Arial';ctx.fillStyle='#435d6d';ctx.fillText('GRID 50 mm',W*.61,H*.82);
+  if(s.valid){disc([s.p[0],s.p[1],floor+.001],.021,'#70d9df0d','#72d9df18');line([[s.p[0],s.p[1],floor],s.p],'#689ea329',.7,[2,6]);}
+  if(s.racket.every(Number.isFinite)){const r=s.racket;disc(r,.078,'#8295a00d','#92acb14a');disc([r[0],r[1],r[2]+.0005],.008,'#adbec81a','#9ebbc366');line([[r[0]-.011,r[1],r[2]],[r[0]+.011,r[1],r[2]]],'#a0b4bf66',1);line([[r[0],r[1]-.011,r[2]],[r[0],r[1]+.011,r[2]]],'#a0b4bf66',1);}
+}
+function trajectory(s){const begin=indexAt(current-2.6);let points=[];
+  for(let i=begin;i<=s.i;i++){const r=rows[i],prev=rows[i-1];if(i>begin&&!contiguous(prev,r))points.push(null);if(r[10])points.push(r.slice(1,4));else points.push(null);}
+  line(points,rgba(C.cyan,.09),4.5);line(points,rgba(C.cyan,.23),1.15);
+  // Bright, time-faded final 800 ms, bounded by each validity break.
+  for(let j=0;j<16;j++){const lo=current-.8+j*.05,hi=lo+.05;let p=[],last=null;for(let i=indexAt(lo);i<=s.i&&rows[i][0]<=hi;i++){const r=rows[i];if(last&&!contiguous(last,r))p.push(null);p.push(r[10]?r.slice(1,4):null);last=r;}line(p,rgba(C.cyan,.10+.8*j/16),1.75);}
+}
+function forecast(points){if(points.length<2)return;line(points,rgba(C.gold,.06),5);line(points,rgba(C.gold,.85),1.5,[5,5]);const q=project(points.at(-1));ctx.beginPath();ctx.arc(q[0],q[1],4,0,Math.PI*2);ctx.strokeStyle=rgba(C.gold,.8);ctx.lineWidth=1;ctx.stroke();}
+function chart(s,prediction){const w=mini.clientWidth,h=mini.clientHeight;mc.clearRect(0,0,w,h);let x=t=>(t-(current-2.5))/2.95*w,y=z=>h-12-(z-1.08)/.46*(h-28);
+  mc.font='9px Arial';mc.fillStyle='#607684';mc.fillText('Z / RECENT FLIGHTS',0,10);mc.fillStyle='#b39b7d';mc.textAlign='right';mc.fillText('+0.4 s',w,10);mc.textAlign='left';
+  for(let z of [1.15,1.3,1.45]){mc.strokeStyle='#ffffff0a';mc.lineWidth=.7;mc.beginPath();mc.moveTo(0,y(z));mc.lineTo(w,y(z));mc.stroke();}
+  mc.beginPath();let prev=null;for(let i=indexAt(current-2.5);i<=s.i;i++){const r=rows[i];if(r[10]){if(prev&&contiguous(prev,r))mc.lineTo(x(r[0]),y(r[3]));else mc.moveTo(x(r[0]),y(r[3]));prev=r;}else prev=null;}
+  mc.strokeStyle='#71dfdf88';mc.lineWidth=1.2;mc.stroke();
+  if(prediction.length>1){mc.beginPath();prediction.forEach((p,i)=>i?mc.lineTo(x(current+i*.005),y(p[2])):mc.moveTo(x(current),y(p[2])));mc.strokeStyle='#e9bd8099';mc.setLineDash([3,3]);mc.stroke();mc.setLineDash([]);}
+  if(s.valid){mc.fillStyle='#ecf5f0';mc.beginPath();mc.arc(x(current),y(s.p[2]),2.5,0,2*Math.PI);mc.fill();}}
+function timeline(){const w=tl.clientWidth,h=tl.clientHeight;tc.clearRect(0,0,w,h);const x=t=>(t-range[0])/(range[1]-range[0])*w;tc.fillStyle='#20323f';tc.fillRect(0,h/2-1,w,2);
+  tc.fillStyle='#71dfdf55';for(const e of events)if(e[0]>=range[0]&&e[0]<=range[1])tc.fillRect(x(e[0]),h/2-3,1,6);
+  tc.fillStyle='#91dede';tc.fillRect(0,h/2-1,clamp(x(current),0,w),2);}
+function render(){const s=stateAt(current),p=predict(s);ctx.clearRect(0,0,W,H);ctx.fillStyle='#070c12';ctx.fillRect(0,0,W,H);
+  const g=ctx.createRadialGradient(W*.405,H*.49,H*.04,W*.405,H*.49,H*.6);g.addColorStop(0,'#13232c99');g.addColorStop(1,'#070c1200');ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  ctx.save();ctx.beginPath();ctx.rect(0,H*.19,W*.75,H*.67);ctx.clip();stage(s);trajectory(s);forecast(p);
+  // Sort all history spheres by camera depth so the top view remains readable.
+  let spheres=[];for(let j=8;j>=1;j--){const old=stateAt(current-j*.05);if(old.valid&&old.mode===s.mode)spheres.push({p:old.p,opacity:(1-j/9)*.26,ghost:true});}
+  if(s.valid)spheres.push({p:s.p,opacity:1,ghost:false});spheres.sort((a,b)=>project(a.p)[2]-project(b.p)[2]);for(const b of spheres)ball(b.p,b.opacity,.02,b.ghost);
+  if(!s.valid){ctx.fillStyle='#c2a884';ctx.font='12px Arial';ctx.textAlign='center';ctx.fillText('MEASUREMENT UNAVAILABLE',W*.405,H*.49);ctx.textAlign='left';}ctx.restore();
+  $('height').innerHTML=(s.valid?s.p[2].toFixed(3):'—')+'<small>m</small>';$('speed').innerHTML=(s.valid?Math.hypot(...s.v).toFixed(2):'—')+'<small>m/s</small>';$('bounce').textContent=eventAt(current);
+  $('phase').textContent=!s.valid?'缺测':s.mode===0?'等待':s.mode===2?'已结束':s.v[2]>.12?'上升':s.v[2]<-.12?'下降':'近顶点';
+  $('timeNow').textContent=current.toFixed(3).padStart(7,'0');$('seek').value=current;chart(s,p);timeline();}
+function selectCamera(which){document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===String(which)));
+  const target=which==='auto'?cameraAt(filmSeconds):SHOTS[+which];auto=which==='auto';manualCamera=auto?null:{...target,index:+which};transition={from:{...camera},to:{...target},start:playClock};}
+function setRange(all){full=all;range=all?[0,DATA.duration]:[...DATA.highlight];current=range[0];$('seek').min=range[0];$('seek').max=range[1];$('timeEnd').textContent=range[1].toFixed(3).padStart(7,'0');$('range').textContent=all?'精选片段':'整段录制';render();}
+function togglePlay(){if(!playing&&current>=range[1]){current=range[0];filmSeconds=0;}playing=!playing;$('play').textContent=playing?'Ⅱ':'▶';$('play').setAttribute('aria-label',playing?'暂停':'播放');}
+function fullscreen(){if(document.fullscreenElement)document.exitFullscreen();else document.documentElement.requestFullscreen().catch(()=>{});}
+$('play').onclick=togglePlay;$('seek').oninput=e=>{current=+e.target.value;render();};$('speedSelect').onchange=e=>rate=+e.target.value;$('range').onclick=()=>setRange(!full);$('fullscreen').onclick=fullscreen;
+$('info').onclick=()=>{$('infoPanel').style.display='block';if(playing)togglePlay();};$('closeInfo').onclick=()=>$('infoPanel').style.display='none';
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>selectCamera(b.dataset.view));
+scene.onpointerdown=e=>{drag={x:e.clientX,y:e.clientY,a:camera.a,e:camera.e};scene.setPointerCapture(e.pointerId);auto=false;transition=null;manualCamera={...camera,name:'自由视角 · FREE ORBIT',index:0};document.querySelectorAll('[data-view]').forEach(b=>b.classList.remove('active'));};
+scene.onpointermove=e=>{if(!drag)return;manualCamera={a:drag.a+(e.clientX-drag.x)*.006,e:clamp(drag.e+(e.clientY-drag.y)*.006,.02,1.55),name:'自由视角 · FREE ORBIT',index:0};camera={...manualCamera};render();};
+scene.onpointerup=()=>drag=null;scene.onpointercancel=()=>drag=null;scene.ondblclick=()=>{zoom=1;selectCamera('auto');};scene.addEventListener('wheel',e=>{e.preventDefault();zoom=clamp(zoom*Math.exp(-e.deltaY*.001),.25,2.6);render();},{passive:false});
+document.onkeydown=e=>{if(['INPUT','SELECT','BUTTON'].includes(document.activeElement.tagName))return;if(e.code==='Space'){e.preventDefault();togglePlay();}if(e.code==='ArrowRight'||e.code==='ArrowLeft'){e.preventDefault();current=clamp(current+(e.code==='ArrowRight'?1:-1),...range);render();}if(e.key>='1'&&e.key<='5')selectCamera(e.key==='1'?'auto':+e.key-2);if(e.key.toLowerCase()==='f')fullscreen();if(e.key==='Escape')$('infoPanel').style.display='none';};
+window.renderFilmFrame=seconds=>{filmSeconds=seconds;playClock=seconds;current=clamp(DATA.highlight[0]+seconds*(DATA.playbackRate??.6),...DATA.highlight);auto=true;transition=null;updateCamera(seconds);render();return {time:current,index:stateAt(current).i,predictionPoints:predict(stateAt(current)).length};};
+window.flightDebug={stateAt,predict,contiguous,indexAt,eventAt,DATA,getCamera:()=>({...camera}),getState:()=>({current,range:[...range],playing,rate,auto,zoom})};
+$('speedSelect').value=String(rate);if($('speedSelect').selectedIndex<0){const option=new Option(rate+'×',String(rate));$('speedSelect').add(option);$('speedSelect').value=String(rate);}document.querySelector('.right-controls').dataset.filmLabel='MOTION STUDY  /  '+rate+'×';$('recordingInfo').textContent=`录制：${DATA.recordedAt}。${DATA.counts.control.toLocaleString()} 条控制记录；${DATA.bounceCount} 次记录器判定的颠球事件。数据全部内嵌，离线可用。`;
+setRange(false);resize();window.addEventListener('resize',resize);let last=null;
+function tick(now){if(last===null)last=now;const dt=Math.min((now-last)/1000,.1);last=now;playClock+=dt;if(playing){filmSeconds+=dt;current+=dt*rate;if(current>range[1]){current=range[1];playing=false;$('play').textContent='▶';}}updateCamera(filmSeconds);render();if(!exportMode)requestAnimationFrame(tick);}
+if(!exportMode)requestAnimationFrame(tick);else window.renderFilmFrame(0);window.ballFlightReady=true;
+</script></body></html>

@@ -16,6 +16,7 @@ import numpy as np
 from pingpong_controller.camera_process import replace_latest
 from pingpong_controller.observation_clock import ReceiverClock, receiver_clock_anchor
 from pingpong_controller.probe_ball_recording import make_sensor_recording_sample
+from pingpong_controller.mocap_observation_range import normalize_observation_bounds
 
 
 class _StopFlag:
@@ -47,6 +48,7 @@ def mocap_worker(kwargs, input_q, state_q, stop, parent_pid, anchor):
     source = MocapBallInput(**kwargs, receiver_clock=clock)
     previous = None
     sync_request = 0
+    clock_sync_request = 0
     try:
         if not source.start():
             raise RuntimeError(str(source._last_start_error))
@@ -60,9 +62,11 @@ def mocap_worker(kwargs, input_q, state_q, stop, parent_pid, anchor):
                     break
             if pending is not None:
                 clock.anchor = pending['clockAnchor']
-                if pending['syncRequest'] != sync_request:
+                requested_clock_sync = pending.get('clockSyncRequest', pending['syncRequest'])
+                if requested_clock_sync != clock_sync_request:
                     source.resynchronize()
-                    sync_request = pending['syncRequest']
+                    clock_sync_request = requested_clock_sync
+                sync_request = pending['syncRequest']
                 marker = int(pending['markerId'])
                 if marker != source.marker_id:
                     with source.detector._lock:
@@ -70,6 +74,9 @@ def mocap_worker(kwargs, input_q, state_q, stop, parent_pid, anchor):
                         # A different marker needs its own source-clock/velocity
                         # history; never relabel a cached previous marker fresh.
                         source._resynchronize_locked('marker_changed')
+                if ('observationBoundsM' in pending
+                        and pending['observationBoundsM'] != source.detector.observation_bounds_m):
+                    source.set_observation_bounds(pending['observationBoundsM'])
             observed_monotonic = time.monotonic()
             p, v, valid, feedback = source.get_control_state()
             feedback['syncRequest'] = sync_request
@@ -97,8 +104,12 @@ class MocapInputProcess:
     def __init__(self, *, receiver_clock=None, worker_target=mocap_worker, **kwargs):
         self.receiver_clock = receiver_clock or time.time
         self.sync_request = 0
+        self.clock_sync_request = 0
         self.kwargs = kwargs
         self.marker_id = int(kwargs.get('marker_id', 1))
+        self.observation_bounds_m = normalize_observation_bounds(
+            kwargs['observation_bounds_m'] if kwargs.get('observation_bounds_m') is not None else
+            (kwargs.get('marker_x_limits_m'), None, kwargs.get('marker_z_limits_m', (-1., 1.))))
         self.timeout_s = float(kwargs.get('timeout_s', .5))
         self.worker_target = worker_target
         self.ctx = mp.get_context('spawn')
@@ -141,7 +152,9 @@ class MocapInputProcess:
             if now >= next_clock:
                 try:
                     replace_latest(self.input_q, {'clockAnchor': self._anchor(),
-                        'markerId': self.marker_id, 'syncRequest': self.sync_request})
+                        'markerId': self.marker_id, 'syncRequest': self.sync_request,
+                        'clockSyncRequest': self.clock_sync_request,
+                        'observationBoundsM': self.observation_bounds_m})
                 except ValueError:
                     pass  # Retry an imprecise clock read; preserve source stamps.
                 except Exception as exc:
@@ -173,6 +186,16 @@ class MocapInputProcess:
 
     def resynchronize(self):
         self.sync_request += 1
+        self.clock_sync_request += 1
+
+    def set_observation_bounds(self, bounds):
+        bounds = normalize_observation_bounds(bounds)
+        if bounds != self.observation_bounds_m:
+            self.kwargs['observation_bounds_m'] = bounds
+            self.observation_bounds_m = bounds
+            # Reuse the existing request fence for both control and recording;
+            # no stale cached sample can be relabeled with the new range.
+            self.sync_request += 1
 
     def get_control_state(self):
         sample = self._sample

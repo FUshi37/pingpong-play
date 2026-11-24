@@ -1,0 +1,293 @@
+{
+  "task": "UserauthorizedfulltimeRP5ordinarysingleMLPthreepopulation1200s99optimization",
+  "public_version": "V325unchanged;privateoptinboundedexperimentonly",
+  "source_model": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_structural_ablations_20261119_r1/inputs/joint_pass_s15_u14400.pkl",
+  "source_sha256": "fd9def8f5fdb511e1543cbcca264e0021738ff07c6425e8d393cb1c240918e97",
+  "seed": 2026112101,
+  "n_envs": 1024,
+  "n_steps": 128,
+  "ppo": {
+    "learning_rate": 3.75e-06,
+    "actor_anchor_kl_coef": 0.0,
+    "clip_range": 0.12,
+    "target_kl": 0.006,
+    "gamma": 0.9995,
+    "gae_lambda": 0.99,
+    "vf_coef": 0.05,
+    "ent_coef": 0.001,
+    "max_grad_norm": 0.5,
+    "min_log_std": -5.298317366548036,
+    "max_log_std": -5.298317366548036,
+    "update_epochs": 4,
+    "minibatch_size": 16384,
+    "residual_l2_coef_effective_default": 0.0,
+    "apply_every_minibatch": false,
+    "time_limit_bootstrap": true
+  },
+  "single_parent": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/fplc_v325_gpu0_s15_warm_direct_20261120_r2/milestone_u00000064.pkl",
+  "single_parent_sha256": "4bc67481ee2a7c7a92b22d381583707457db94b073d87e057d2a9a37468e3939",
+  "pose": {
+    "roll_limit_deg": 5.0,
+    "pitch_limit_deg": 5.0,
+    "full_episode": true,
+    "margin_deg": 0.1,
+    "yaw_limited": false,
+    "pose_ramp_enabled": false
+  },
+  "BC": 0,
+  "acceptance": {
+    "episode_seconds": 1200.0,
+    "minimum_success": 0.99,
+    "minimum_hits": 1440,
+    "maximum_gap_s": 1.2,
+    "training_readiness_minimum_real_episodes_per_cell": 100,
+    "hold_updates": 16,
+    "cells": "clean1 + fourXsectorsxfourspeedbins16 + peak10directions",
+    "final_evidence": "Fixedpolicy1200squalificationrequired;shortprobe/readinessnotgraduation",
+    "promotion": "Calm survival, lifetime, hit12, continuity, contact/apex quality and racket-height failures must not regress in paired mean/noisy short replay; require a calm target improvement. Wind metrics are retained as phase-transfer diagnostics, not final qualification.",
+    "confirmation_gap": "calm1.2s; windclip(3*period,1.2,1.8)s; independentphysical1.2s"
+  },
+  "projected_initialization": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_single5_training_20261121_r2/projected_initialization/best_s056000.pkl",
+  "projected_initialization_sha256": "319afd02a6673f187ca257b954362021aea2818b506a5cb35508faf23c939a6d",
+  "reward_revision": {
+    "revision": "original_R10_native_reward_mature_context",
+    "goal_reward_enabled": false,
+    "safe_return_reference": false,
+    "targeted_reward_enabled": false,
+    "targeted_variant": "kinetic_brake",
+    "failure_reserve": 0.0,
+    "stopping_margin_m": 0.005,
+    "brake_rate": 20.0,
+    "required_deceleration_scale_m_s2": 2.0,
+    "release_xy_error_scale_m_s": 0.035,
+    "release_z_error_scale_m_s": 0.03,
+    "release_error_huber_weight": 2.0,
+    "weak_calm_release_floor": {
+      "enabled": true,
+      "weight": 4.0,
+      "minimum_predicted_apex_m": 1.405,
+      "velocity_scale_m_s": 0.03,
+      "maximum_loss": 10.0,
+      "minimum_confirmed_hits": 5,
+      "scope": "calm detached upward physical releases only; native weak penalties retained; no gate/control/observation/physics/PPO change"
+    }
+  },
+  "revision": "v325_single5_windfeature_high_train_20261124_r1",
+  "arms": {
+    "direct": {
+      "run_id": "fplc_v325_single5_windfeature_high_train_20261124_r1",
+      "gpu": 0,
+      "gpu_uuid": "GPU-91f9b105-f5c8-b00e-de70-39d3ee1ce7b4"
+    }
+  },
+  "native_actor_critic_action": [
+    120,
+    453,
+    7
+  ],
+  "direct_MLP": [
+    120,
+    282,
+    282,
+    282,
+    7
+  ],
+  "direct_trainable_actor_parameters": 564,
+  "probe_update_budget": 256,
+  "update_budget": null,
+  "initialization": "Exact retained288 old118 actor rows, hidden/output, critic and all existing Adam values; append2zero input rows/moments; fresh wind-phase physical episodes/history. No residual or BC.",
+  "actor_precision": "HIGHEST; native critic/physics DEFAULT",
+  "observation": {
+    "actor": 120,
+    "critic": 453,
+    "unchanged_prefix": 118,
+    "new_suffix": "Two causal estimated windXY transforms active above1.25m/s, width0.35m/s afterhit5; no privileged wind",
+    "runtime": "single5_windfeature120_high_v2"
+  },
+  "observed_force": {
+    "mass_kg": 0.004,
+    "rho_kg_m3": 1.2,
+    "drag_coefficient": 0.47,
+    "radius_m": 0.02,
+    "wind_limit_m_s": 1.6,
+    "vertical_acceleration_valid_m_s2": [
+      -11.5,
+      -8.5
+    ],
+    "actual_sample_dt_min_s": 0.02,
+    "history": "Existing500ms; consistent newest pair otherwise robust medoid; >=2 free-flight triplets and250ms history; no true state"
+  },
+  "initial_admission": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_xwind_workflow_20261123_r1/GPU_ADMISSION.json",
+  "initial_frozen_result": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_single5_training_20261123_r12/frozen_0/RESULT.json",
+  "revision_scope": "User-authorized random delayed onset and X-side wind domain, physical-vs-confirmed continuity audit, failure-focused stratified sampling; R12 native reward control, R13 targeted reward comparison",
+  "rollback_weights": "Pinned better R10u9607; no failed probe weights",
+  "motivation": "Returntoretained288;previous120-Dschemefixedcalmpreservationbutone0.8-1.2m/smixedcasefailed. Changethenewinputactivationrangeonly:zero<=1.25m/sestimate,smoothlyfullat1.6m/s. Nativeold118featuresandallweights/moments,physics,rewards,samplingandgraduationgatesremainunchanged. Userrequestedlongerlearningbeforejudgment:256newupdates,fullpairedreviewsat128/256;runtimeNaN/safety/memoryandclearregressionsstilltriggerintervention.",
+  "feature_optimizer": {
+    "warmup_accepted_minibatches": 512,
+    "feature_rows": [
+      118,
+      119
+    ],
+    "feature_row_learning_rate_multiplier": 32.0,
+    "feature_only_warmup": true,
+    "actor_moments_restart_at_unfreeze": true,
+    "critic_moments_retained": true,
+    "global_adam_step_preserved": true,
+    "independent_actor_critic_clipping": false,
+    "permanent_wind_rows_only": true,
+    "frozen_actor_values_and_moments_preserved": true
+  },
+  "full_episode_outcome_capacity": 100,
+  "calm_trust_region": {
+    "enabled": true,
+    "maximum_initial_policy_kl": 0.00025,
+    "replay_kl_coef": 0.0,
+    "bank_rows": 4185,
+    "actor_projection_only": true,
+    "critic_preserved": true,
+    "bank_sha256": "131a261349c81d458111112b0b4de47b2372932413a084fe29629a5fd18464a7",
+    "projection_origin": "previous_policy",
+    "phase_grouping": true,
+    "anchor_model": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_long_window_review_20261123_r1/candidate_u00000288.pkl",
+    "anchor_model_sha256": "47574db621b47fbeaad43aac7a9ced3b0068a466163b4b716aed9e48cd5e2a99",
+    "maximum_absolute_action_change": 1e-05,
+    "held_maximum_absolute_action_change": 1e-05
+  },
+  "continuous_experiment": false,
+  "continuation_parent": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/fplc_v325_gpu0_single5_calmtrust_20261121_r10_resume1_20261122/interrupted_u00009607.pkl",
+  "continuation_parent_sha256": "7093249fb0e9c515b083adbfb1ac1422a5d81a10d3cbe9f7a91027b8eed2a92d",
+  "onset": {
+    "confirmed_hits": 5,
+    "delay_steps_min": 5,
+    "delay_steps_max": 100,
+    "control_dt_s": 0.005,
+    "ramp_s": 1.0,
+    "sample_once_per_episode": true,
+    "actor_sees_future_schedule": false
+  },
+  "wind_domain": {
+    "max_speed_m_s": 1.6,
+    "wind_y_nonpositive": true,
+    "x_axis_half_angle_deg": 45.0,
+    "pending_user_angle_interpretation": false,
+    "interpretation": "User confirmed X-side45deg half-angle at both X axes; Y<=0"
+  },
+  "timing": {
+    "clean_confirmation_gap_s": 1.2,
+    "wind_confirmation_period_multiplier": 3.0,
+    "wind_confirmation_gap_cap_s": 1.8,
+    "physical_gap_cap_s": 1.2,
+    "minimum_hits": 1440,
+    "episode_s": 1200.0
+  },
+  "allowed_gpu_uuids": [
+    "GPU-91f9b105-f5c8-b00e-de70-39d3ee1ce7b4",
+    "GPU-e74458ec-002a-1bac-e0be-d0a5713b661e"
+  ],
+  "hard_sampling": "Both X sides:48peakaxis +85highspeedmixed each; preserve representative16cells",
+  "probe_replay_seconds": 12.8,
+  "learning_stability": {
+    "critic_warmup_start_t": 307300,
+    "critic_only_minibatches": 0,
+    "maximum_sampled_cohort_step_kl": 0.001,
+    "step_observations": 2048,
+    "groups": "calm,preonset_or_weak,negativeX,positiveX",
+    "no_teacher_or_BC": true
+  },
+  "actor_total_parameters": 195715,
+  "scope": "User explicitly chose calm foundation before frozen-backbone wind adaptation; final three-population1200s99 requirements unchanged",
+  "training_phase": "wind_adaptation",
+  "phase_sampling": {
+    "calm_fraction": 0.1,
+    "wind_fraction": 0.9,
+    "peak_fraction": 0.25,
+    "mixed_fraction": 0.65,
+    "startup_rehearsal_fraction": 0.0,
+    "long1200_fraction": 1.0
+  },
+  "rehearsal": {
+    "enabled": true,
+    "fraction": 0.0,
+    "seconds": 20.0,
+    "n_envs": 0,
+    "long_n_envs": 1024,
+    "minimum_episode_hits": 24,
+    "minimum_episodes": 0,
+    "minimum_success": 0.0,
+    "counts_as_full1200_success": false,
+    "actor_or_critic_observes_role": false,
+    "window_episode_capacity": 1024,
+    "wrapper_only_for_zero_role_metrics": true
+  },
+  "reward_maturity": {
+    "enabled": true,
+    "parent_snapshot": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/fplc_v325_gpu0_single5_calmtrust_20261121_r10_resume1_20261122/trainer_state_u00009607.zip",
+    "parent_snapshot_sha256": "5d7af212a98664fd78c02664ea41b5e0686cd933159cafa3aca6524bca1b9e96",
+    "parent_total_steps_min": 1229696,
+    "parent_update": 9607,
+    "reward_offset_steps": 8192,
+    "physical_clock_unchanged": true,
+    "wind_onset_clock_unchanged": true,
+    "scope": "Retain original mature center/apex credits; no coefficient or gate change"
+  },
+  "rehearsal_stagger": {
+    "enabled": false,
+    "warmup_n_envs": 102,
+    "warmup_blocks_max": 31,
+    "steps_per_block": 128,
+    "dt_s": 0.005,
+    "seed": 2026112319,
+    "full20s_episodes_preserved": true,
+    "long_initial_state_unchanged": true,
+    "warmup_actor_updates": 0,
+    "skip_on_full_state_resume": true,
+    "rollout_batch_n_envs": 1024,
+    "additional_model_constructors": 0
+  },
+  "actor_phase": {
+    "minimum_startup_mass": 0.0,
+    "mask": "causal actor column112<0.999",
+    "critic_targets_unchanged": true,
+    "BC": 0
+  },
+  "actor_training": {
+    "output_layer_only": false,
+    "trainable_parameters": 564,
+    "single_actor_MLP": true,
+    "BC": 0
+  },
+  "cached_initialization": {
+    "enabled": false,
+    "snapshot": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_phase_gradient_audit_20261123_r1/PRE_PPO_STAGGERED_NATIVE_STATE.zip",
+    "snapshot_sha256": "161dfd7e5d9785650e23575bbd04d018f8c73aa3b1a16483f02ce0bb5bc0cb5e",
+    "preflight": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/fplc_v325_single5_stagger_balanced_20261123_r29_retry2/PREFLIGHT.json",
+    "preflight_sha256": "5c92f90756a838167b9aea43952ba65ac21a30f35d49c85dc33084eff7f47483",
+    "actual_PPO_updates": 0,
+    "expected_runner_digest": "4eec935913106715eda5a7819b430fc815260bf097ecd0459b25bb8632ed61db",
+    "same_parent_weights_and_all_Adam_required": true,
+    "physics_unchanged": true,
+    "fixed_parent_warm_state_reward_independent": true
+  },
+  "probe_total_update_limit": 544,
+  "phase_transition": {
+    "actual_updates": 288,
+    "model": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_long_window_review_20261123_r1/candidate_u00000288.pkl",
+    "model_sha256": "47574db621b47fbeaad43aac7a9ced3b0068a466163b4b716aed9e48cd5e2a99",
+    "full_state": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_long_window_review_20261123_r1/candidate_state_u00000288.zip",
+    "full_state_sha256": "0d6f6c4a3cbb44760ca5ada43fde4a08c9324ca6820621aeb7b1681bc32eb656",
+    "parent_plan": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_single5_training_20261123_r36/TRAIN_PLAN.json",
+    "parent_plan_sha256": "c23967914233839649b280c1bcaf7d3a2e81bec28d0823774478dc7f45d1a906",
+    "decision": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_long_window_review_20261123_r1/ASSESSMENT_U00000288.json",
+    "decision_sha256": "3d8af5010cd19452d38334a4a7e30122856b56dc9f8c82c18f6bba161c95d4fc"
+  },
+  "phase_milestones": [
+    416,
+    544
+  ],
+  "observation_proof": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/v325_wind_feature120_high_20261124_r1/GPU_IDENTITY_PROOF.json",
+  "preregistered_reviews_new_updates": [
+    128,
+    256
+  ],
+  "observation_proof_sha256": "e654dae07ad090c2495d6127bfec4e70b788b4a0ef1462c3305501996a4ac8ff"
+}

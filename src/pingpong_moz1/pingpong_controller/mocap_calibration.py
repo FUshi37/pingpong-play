@@ -58,6 +58,7 @@ except ImportError:
 
 try:
     from pingpong_controller.mocap_ball_detector import parse_mocap_packet
+    from pingpong_controller.mocap_observation_range import normalize_observation_bounds
     from pingpong_controller.mocap_transform import (
         apply_tool_offset,
         average_quaternions_wxyz,
@@ -73,6 +74,7 @@ try:
     )
 except ImportError:
     from mocap_ball_detector import parse_mocap_packet
+    from mocap_observation_range import normalize_observation_bounds
     from mocap_transform import (
         apply_tool_offset,
         average_quaternions_wxyz,
@@ -174,7 +176,13 @@ class MocapCalibrationNode(Node):
                      DEFAULT_MAX_MOCAP_ROTATION_RMS_DEG),
                  max_mocap_mean_error_m: float = (
                      DEFAULT_MAX_MOCAP_MEAN_ERROR_M),
-                 handeye_method: str = 'PARK'):
+                 handeye_method: str = 'PARK',
+                 mocap_observation_bounds_m=None):
+        self.mocap_observation_bounds_m = (
+            None if mocap_observation_bounds_m is None else
+            normalize_observation_bounds(mocap_observation_bounds_m))
+        self.selected_rigid_body = None
+        self.last_mocap_range_status = None
         super().__init__('mocap_calibration')
 
         self.udp_port = int(udp_port)
@@ -275,6 +283,7 @@ class MocapCalibrationNode(Node):
                 rigid_body_id=self.mocap_object_id,
                 position_unit=self.position_unit,
                 timestamp_unit=self.timestamp_unit,
+                rigid_body_observation_bounds_m=getattr(self, 'mocap_observation_bounds_m', None),
             )
         else:
             packet = parse_mocap_packet(
@@ -287,6 +296,12 @@ class MocapCalibrationNode(Node):
             )
         if packet is None:
             return None
+        range_enabled = (self.calib_target == 'rigid_body'
+                         and getattr(self, 'mocap_observation_bounds_m', None) is not None)
+        if range_enabled:
+            self.last_mocap_range_status = (packet.marker_selection_info or {}).get('status')
+            if packet.tracked is False:
+                return None
         orientation_wxyz = packet.orientation_wxyz
         if orientation_wxyz is not None:
             orientation_wxyz = np.asarray(
@@ -294,6 +309,20 @@ class MocapCalibrationNode(Node):
             if (not np.all(np.isfinite(orientation_wxyz))
                     or np.linalg.norm(orientation_wxyz) < 1e-12):
                 orientation_wxyz = None
+        if range_enabled:
+            if orientation_wxyz is None:
+                self.last_mocap_range_status = 'invalid_orientation'
+                return None
+            identity = dict(slot=packet.rigid_body_slot, id=packet.rigid_body_id)
+            selected = getattr(self, 'selected_rigid_body', None)
+            # The actual bridge reassigns both slot and *_id between frames.
+            # These fields describe the current packet, not a stable body ID.
+            # The configured spatial range is the persistent selection rule.
+            self.selected_rigid_body = identity
+            if selected is None:
+                self.get_logger().info(
+                    f'Rigid-body range selected UDP slot={identity["slot"]}, id={identity["id"]} '
+                    '(mocap_raw_m); UDP numbering may change, selection stays spatial')
         return MocapCalibrationMeasurement(
             position_m=packet.position_m.astype(np.float64),
             orientation_wxyz=orientation_wxyz,
@@ -306,7 +335,7 @@ class MocapCalibrationNode(Node):
             self
     ) -> Optional[MocapCalibrationMeasurement]:
         try:
-            data, _addr = self.socket.recvfrom(4096)
+            data, _addr = self.socket.recvfrom(65535)
             return self._parse_mocap_datagram(data)
         except socket.timeout:
             return None
@@ -321,7 +350,7 @@ class MocapCalibrationNode(Node):
         try:
             self.socket.setblocking(False)
             while True:
-                self.socket.recvfrom(4096)
+                self.socket.recvfrom(65535)
                 discarded += 1
         except BlockingIOError:
             pass
@@ -418,7 +447,9 @@ class MocapCalibrationNode(Node):
 
         return None, (
             f'timed out with {len(samples)} valid packets; need at least '
-            f'{MIN_STABILITY_PACKETS}')
+            f'{MIN_STABILITY_PACKETS}'
+            + (f'; rigid-body range: {self.last_mocap_range_status}'
+               if getattr(self, 'mocap_observation_bounds_m', None) is not None else ''))
 
     def _extract_right_arm_joints(self) -> Optional[np.ndarray]:
         if self.latest_joint_state is None:
@@ -706,6 +737,12 @@ class MocapCalibrationNode(Node):
             'mocap_object_id': self.mocap_object_id,
             'mocap_object_slot': self.mocap_object_slot,
             'mocap_object_name': self.mocap_object_name,
+            'mocap_observation_bounds_m': getattr(self, 'mocap_observation_bounds_m', None),
+            'mocap_observation_frame': 'mocap_raw_m',
+            'selected_rigid_body': getattr(self, 'selected_rigid_body', None),
+            'rigid_body_selection_mode': (
+                'unique_raw_xyz' if getattr(self, 'mocap_observation_bounds_m', None) is not None
+                else 'fixed_slot_id'),
             'ball_marker_id': self.ball_marker_id,
             'robot_source': self.robot_source,
             'cart_state_topic': self.cart_state_topic,

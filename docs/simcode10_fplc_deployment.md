@@ -1,6 +1,6 @@
 # simcode10 模型实物探针接入
 
-`RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh` 和网页的 Policy profile 支持以下七个独立模型。
+`RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh` 和网页的 Policy profile 支持以下十个独立模型。
 启动默认仍为原来的 `fplc_gpu1_v172`；选择新模型时按 release 同时解析权重、XML、维度和配置哈希。
 
 | POLICY_RELEASE_ID / 网页 profile | 训练版本 | Actor / Critic / Action |
@@ -12,6 +12,9 @@
 | `fplc_gpu1_v274_s11` | V274 S11，反弹外力 DR 加相机 AR1 | 72 / 398 / 7 |
 | `fplc_gpu0_v319` | V319 S17，近侧位置与向内动量恢复 | 72 / 393 / 7 |
 | `fplc_v321_s4_u2097_20261029_r1` | V321 S4/u2097，V172 长回合微调候选 | 72 / 393 / 7 |
+| `fplc_gpu1_v322` | V322 S4/u31361，V319 长回合居中续训 | 72 / 393 / 7 |
+| `fplc_gpu0_v323` | V323 S2/u3075，V321 相机 AR1 训练达标 | 72 / 396 / 7 |
+| `fplc_gpu1_v324` | V324 S2/u2947，V322 相机 AR1 训练达标 | 72 / 396 / 7 |
 
 例如：
 
@@ -46,8 +49,33 @@ PROBE_CONFIG_ONLY=true POLICY_RELEASE_ID=fplc_v321_s4_u2097_20261029_r1 \
 接口依据见 [`V321 部署说明`](../simcode10/pingpong_moz1-main/pingpong_controller/tools/rl_2real/FPLC_V321_S4_U2097_DEPLOYMENT_20261029.md)
 和归档目录中的 `release.json`。
 
+V322、V323、V324 可直接按以下命令启动，或在网页 Policy profile 中选择对应版本：
+
+```bash
+POLICY_RELEASE_ID=fplc_gpu1_v322 ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+POLICY_RELEASE_ID=fplc_gpu0_v323 ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+POLICY_RELEASE_ID=fplc_gpu1_v324 ./RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh
+```
+
+在命令前添加 `PROBE_CONFIG_ONLY=true` 可只检查配置、权重和 XML 身份，不启动设备。
+三个版本继续支持 `--ball-state-rate-hz 90`、`120`、`200`，策略推理和投影保持 200 Hz。
+
+| 版本 | simcode10 下的权重目录 / 文件 | SHA-256 |
+| --- | --- | --- |
+| V322 | `fplc_v322_gpu1_late_center_precision_20261103_r1/training_qualified_inherited1200s.pkl` | `d35ea68508cbdfbaddfb3766f21c3f4e82f6f127e3caab8262d9e69a9ad307bc` |
+| V323 | `fplc_v323_gpu0_training_quality_20261105_r4/training_qualified_u00003075.pkl` | `126fd19f6e9f93ccb6b57b675c6f7a6ed55fb3e22134ce556a5711bd40e57d55` |
+| V324 | `fplc_v324_gpu1_training_quality_20261105_r3/training_qualified_u00002947.pkl` | `d1197b4024377c3e73927e75d91fff47411db5cdb1088c30a6c2cda86b4a9679` |
+
+目录前缀均为 `simcode10/pingpong_moz1-main/pingpong_controller/outputs/rl_sim/`。
+V322 沿用 V319 的 72D 观测和零偏移部署复位，训练达标记录继承历史 1200 秒资格；
+V323 源自 V321，V324 源自 V322，两者增加相机 AR1 训练噪声，Critic 增加到 396D，
+实物 Actor 仍使用相同的 72D 位置及因果历史。实物输入不重复注入训练噪声。
+三者均保留归档的训练达标状态，未标记为独立冻结验收或实机效果验收通过。
+新增权重的 NumPy 2 数组格式通过局部反序列化兼容层支持当前 NumPy 1.26 环境，
+不需要更换 NumPy，也不会导入 JAX 或训练模块。
+
 新模型配置保存在 [`fplc_simcode10_model_contracts.json`](../config/fplc_simcode10_model_contracts.json)，
-原 simcode9 合同文件保持原有内容及哈希。七个权重分别绑定各自 SHA-256，两个 V224 即使维度相同也不能互换。
+原 simcode9 合同文件保持原有内容及哈希。十个权重分别绑定各自 SHA-256，维度相同也不能互换。
 XML 使用 simcode10 自带、与归档哈希一致的 `moz1_pd_1ms_v98.xml`。
 
 72D 路径使用原 V149 位置观测，117D 路径使用独立的 V224 因果历史实现。
@@ -57,10 +85,10 @@ XML 使用 simcode10 自带、与归档哈希一致的 `moz1_pd_1ms_v98.xml`。
 复位、安全干预和模型切换清空历史，并从新的测量状态重新建立。
 部署使用标定 FK 和传感器输入；训练的姿态偏差、球噪声和外力 DR 不额外注入实物观测。
 
-每个模型的训练投影范围来自其 checkpoint：V223、V321 沿用较大位置箱，其余五个使用
+每个模型的训练投影范围来自其 checkpoint：V223、V321、V323 沿用较大位置箱，其余七个使用
 X[-0.145,0.145]、Y[-0.595,-0.355]、Z[1.00,1.15] m。
 实物边界继续使用原 FPLC 实物安全范围与物理限制的交集，训练投影保持独立。
-V319 训练时包含目标 Y 偏移，部署复位明确选择其中的零偏移 lane，目标保持 [0,-0.49,1.025] m。
+V319、V322、V324 训练时包含目标 Y 偏移，部署复位明确选择其中的零偏移 lane，目标保持 [0,-0.49,1.025] m。
 网页复位继续使用兼容的 `simcode9_native` preset ID，显示为 simcode9/10 共用 FPLC 原生复位。
 
 所有新 profile 复用现有 FPLC 的独立控制线程、关节反馈接收器、限时等待和调度配置。
@@ -69,7 +97,7 @@ V319 训练时包含目标 Y 偏移，部署复位明确选择其中的零偏移
 网页后台快照默认 30 Hz，浏览器请求默认 60 Hz，控制记录仍按 200 Hz 生成。
 模型在网页服务就绪前预加载；新增历史计算不引入定时器、同步设备调用或运行期模型加载。
 
-网页可切换七个 simcode10 profile，显示对应的维度、观测段、投影范围和模型路径。
+网页可切换十个 simcode10 profile，显示对应的维度、观测段、投影范围和模型路径。
 117D 的录制、离线对比和 CPU 仿真镜像使用对应观测索引，球位置历史不会被误读为球速。
 模型切换继续执行停发、清历史、复位及显式重新使能流程。
 
@@ -89,6 +117,15 @@ OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
   src/pingpong_moz1/test/test_joint_feedback_receiver.py \
   src/pingpong_moz1/test/test_probe_timing.py
 ```
+
+2026-11-06 V322/V323/V324 接入验证：模型合同、manifest、网页切换、仿真镜像、
+安全中断、丢帧、多频率、关节反馈与启动计时共 684 项不同回归通过。
+Bash/Python/网页 JavaScript 语法检查通过；原有七个 simcode10 模型合同逐项保持一致。
+离线计时中，每个模型实际执行网络与 24 次投影各 1000 次，
+球状态刷新各 450 次，平均策略频率分别为 199.993、199.996、199.998 Hz，
+predict P99 分别为 1.221、1.248、0.939 ms。计时期间同时运行离线回归；
+未初始化 ROS、相机、动捕或发送硬件命令，不代表完整传感器负载下的实机验收。
+原始数据见 [`simcode10_v322_v323_v324_runtime_20261106.json`](../config/policy_validation_reports/simcode10_v322_v323_v324_runtime_20261106.json)。
 
 2026-10-29 V321 接入验证：模型合同、manifest、观测、仿真镜像、网页切换、
 安全边界和丢帧回归 495 项通过，球状态多频率回归 53 项通过。

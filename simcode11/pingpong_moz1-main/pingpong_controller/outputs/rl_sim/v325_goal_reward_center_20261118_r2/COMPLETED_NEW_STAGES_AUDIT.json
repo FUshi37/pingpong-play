@@ -1,0 +1,146 @@
+{
+  "timestamp": "2026-11-18T06:56:36.357304+08:00",
+  "scope": "Existing original training evidence;no independent rollouts or changes to advancement",
+  "completed_new_stages": [
+    15
+  ],
+  "evidence": [
+    {
+      "stage": 15,
+      "name": "fplc_v325_wind160_constant",
+      "checkpoint": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/fplc_v325_gpu0_reference_center_20261118_r2/converged_s15_u00014400.pkl",
+      "sha256": "fd9def8f5fdb511e1543cbcca264e0021738ff07c6425e8d393cb1c240918e97",
+      "update": 14400,
+      "true_step": 3497132032,
+      "Adam_t": 963375,
+      "original_gate_recomputed_passed": true,
+      "hold16_from_real_history": true,
+      "full_learner_finite": true,
+      "wind": {
+        "clean": {
+          "n": 474,
+          "len_fraction": 0.9984723394280356,
+          "hits_mean": 349.21729957805906,
+          "survival": 0.9936708860759493
+        },
+        "constant": {
+          "n": 3622,
+          "len_fraction": 0.9928845711393337,
+          "hits_mean": 349.29569298729984,
+          "survival": 0.9900607399226946
+        },
+        "slow": {
+          "n": 0
+        },
+        "gust": {
+          "n": 0
+        }
+      },
+      "quality": {
+        "apex_m": 1.4229059388701133,
+        "racket_vxy_rms_m_s": 0.04611272692115667,
+        "racket_omega_rms_rad_s": 0.1500815667500075,
+        "in_band": 0.9995615637559372,
+        "adjacent_jump_m": 0.007415059532989699,
+        "center_m": 0.004085635802297769,
+        "recurrent_vxy_m_s": 0.04233422618297662,
+        "recurrent_vxy_rms_m_s": 0.04611272692115667,
+        "ball_vxy_m_s": 0.04333541892403637,
+        "ball_vxy_rms_m_s": 0.04987802223381363,
+        "steady_events": 41080.0,
+        "racket_vxy_excess_rms_m_s": 0.035676872838733616,
+        "recurrent_vxy_excess_m_s": 0.032172203249685255,
+        "recurrent_vxy_excess_rms_m_s": 0.035676872838733616,
+        "racket_omega_excess_rms_rad_s": 0.14983825332731618,
+        "reference_vxy_rms_m_s": 0.012101066475219956,
+        "reference_omega_rms_rad_s": 0.0004508618659974971,
+        "center_rms_m": 0.0046856412791841185,
+        "apex_error_rms_m": 0.0076731417690951795,
+        "apex_std_m": 0.007381870534825881
+      },
+      "wind_quality": {
+        "clean": {
+          "apex_m": 1.4259616707097367,
+          "racket_vxy_rms_m_s": 0.03780460349429681,
+          "racket_omega_rms_rad_s": 0.10225218786722257,
+          "in_band": 1.0,
+          "adjacent_jump_m": 0.006908055703431462,
+          "center_m": 0.004393166405145369,
+          "recurrent_vxy_m_s": 0.0351964006005385,
+          "recurrent_vxy_rms_m_s": 0.03780460349429681,
+          "ball_vxy_m_s": 0.01944534863220875,
+          "ball_vxy_rms_m_s": 0.02243583028914891,
+          "steady_events": 4745.0,
+          "racket_vxy_excess_rms_m_s": 0.03780460345426305,
+          "recurrent_vxy_excess_m_s": 0.0351964005497034,
+          "recurrent_vxy_excess_rms_m_s": 0.03780460345426305,
+          "racket_omega_excess_rms_rad_s": 0.10225218775199174,
+          "reference_vxy_rms_m_s": 0.0,
+          "reference_omega_rms_rad_s": 0.0,
+          "center_rms_m": 0.005084503195208108,
+          "apex_error_rms_m": 0.006932082200767376,
+          "apex_std_m": 0.006865053028508266
+        },
+        "constant": {
+          "apex_m": 1.4225066152330734,
+          "racket_vxy_rms_m_s": 0.04708960179202202,
+          "racket_omega_rms_rad_s": 0.1552435733700075,
+          "in_band": 0.9995042687964748,
+          "adjacent_jump_m": 0.0074813148562358585,
+          "center_m": 0.004045475293481452,
+          "recurrent_vxy_m_s": 0.04326635716272882,
+          "recurrent_vxy_rms_m_s": 0.04708960179202202,
+          "ball_vxy_m_s": 0.04645523173687472,
+          "ball_vxy_rms_m_s": 0.05241151748470406,
+          "steady_events": 36335.0,
+          "racket_vxy_excess_rms_m_s": 0.03538956927633237,
+          "recurrent_vxy_excess_m_s": 0.031777272133491276,
+          "recurrent_vxy_excess_rms_m_s": 0.03538956927633237,
+          "racket_omega_excess_rms_rad_s": 0.1549776207345298,
+          "reference_vxy_rms_m_s": 0.01286696979607056,
+          "reference_omega_rms_rad_s": 0.00047939791163640884,
+          "center_rms_m": 0.0046310184484582234,
+          "apex_error_rms_m": 0.007764760270473494,
+          "apex_std_m": 0.007353538907354872
+        },
+        "slow": {
+          "steady_events": 0.0
+        },
+        "gust": {
+          "steady_events": 0.0
+        }
+      },
+      "course": {
+        "name": "fplc_v325_wind160_constant",
+        "seconds": 180.0,
+        "max_speed_m_s": 1.6,
+        "mode_weights": [
+          0.1,
+          0.9,
+          0.0,
+          0.0
+        ],
+        "ou_tau_s": 2.0,
+        "gust_duration_s": [
+          0.5,
+          1.5
+        ],
+        "pose_start_deg": 20.0,
+        "pose_target_deg": 20.0,
+        "pose_ramp_updates": 0,
+        "pose_flatness_start_deg": 0.25,
+        "pose_flatness_target_deg": 0.35,
+        "pose_quality_start_scale": 1.0,
+        "pose_quality_target_scale": 1.0,
+        "strong_wind_reward": true,
+        "peak_wind_fraction": 0.25,
+        "history_enabled": true,
+        "fast_pose_growth": true,
+        "pose_time_driven": false,
+        "continue_on_quality_regression": true
+      },
+      "training_course_completed": false
+    }
+  ],
+  "goal_completed": false
+}

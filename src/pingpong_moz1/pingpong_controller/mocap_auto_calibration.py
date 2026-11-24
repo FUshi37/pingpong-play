@@ -13,6 +13,7 @@ from collections import deque
 from dataclasses import asdict
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import threading
@@ -22,6 +23,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 
 from pingpong_controller.reset_trajectory import SlowResetTrajectory
+from pingpong_controller.mocap_observation_range import normalize_observation_bounds, parse_observation_bounds
 
 JOINT_NAMES = [f'RightArm-{i}' for i in range(7)]
 DEFAULT_WAYPOINTS = Path(__file__).with_name(
@@ -69,6 +71,14 @@ def load_resume(path, args, fk):
     if saved.get('waypoints_sha256', digest) != digest:
         raise ValueError('Waypoints changed since the progress file was saved')
     previous = saved.get('options', {})
+    previous_bounds = previous.get('mocap_observation_bounds_m')
+    if previous_bounds is not None:
+        previous_bounds = normalize_observation_bounds(previous_bounds)
+    current_bounds = getattr(args, 'mocap_observation_bounds_m', None)
+    if count and previous_bounds != current_bounds:
+        raise ValueError('Resume requires the same mocap observation range as the saved samples')
+    if not count and previous_bounds != current_bounds:
+        saved['selected_rigid_body'] = None
     if supplemental and previous.get('target_samples', 50) != args.target_samples:
         raise ValueError('Resume requires the same --target-samples for a saved supplemental route')
     for name in ('rigid_body_slot', 'rigid_body_id', 'position_unit',
@@ -163,6 +173,7 @@ def restore_session(node, saved):
         session.mocap_poses.append(sample.T_mocap_rigid.copy())
         session.robot_poses.append(sample.T_waist03_ee.copy())
     node.session = session
+    node.selected_rigid_body = saved.get('selected_rigid_body')
 
 
 def joint_limits(xml_path: str | Path) -> tuple[np.ndarray, np.ndarray]:
@@ -400,7 +411,8 @@ def create_node(args, motion):
                 max_mocap_std_m=args.max_mocap_std_mm / 1000,
                 max_mocap_rotation_rms_deg=args.max_mocap_rotation_rms_deg,
                 max_mocap_mean_error_m=args.max_mocap_mean_error_mm / 1000,
-                handeye_method=args.handeye_method)
+                handeye_method=args.handeye_method,
+                mocap_observation_bounds_m=getattr(args, 'mocap_observation_bounds_m', None))
             self.command_pub = self.create_publisher(MechUnitCmdArray, args.command_topic, 1)
             self.command_timer = self.create_timer(1 / args.publish_hz, self._control_tick)
             self.graph_checked_at = 0.
@@ -611,6 +623,9 @@ class LiveSequence:
             supplemental_workspace=self.supplemental_workspace,
             supplemental_stop_reason=self.supplemental_stop_reason,
             options=vars(self.args), attempts=self.events,
+            selected_rigid_body=getattr(self.node, 'selected_rigid_body', None),
+            rigid_body_selection_mode=('unique_raw_xyz'
+                if getattr(self.args, 'mocap_observation_bounds_m', None) is not None else 'fixed_slot_id'),
             resume_history=self.resume_history,
             motion=self.motion.diagnostics(time.monotonic()),
             samples=[asdict(sample) for sample in self.node.session.samples]))
@@ -687,6 +702,12 @@ def build_parser():
     parser.add_argument('--udp-port', type=int, default=65501)
     parser.add_argument('--rigid-body-slot', type=int, default=0)
     parser.add_argument('--rigid-body-id', type=int, default=0)
+    for axis in 'xyz':
+        parser.add_argument(
+            f'--mocap-observation-{axis}-limits-m',
+            default=os.environ.get(f'MOCAP_OBSERVATION_{axis.upper()}_LIMITS_M'),
+            help='Raw mocap rigid-body MIN,MAX range in meters; blank/unset axis is unrestricted. '
+                 'Any range option selects the unique in-range rigid body instead of a fixed slot/id.')
     parser.add_argument('--command-topic', default='/mx_mix_command')
     parser.add_argument('--right-arm-mu-idx', type=int, default=3)
     parser.add_argument('--publish-hz', type=float, default=100.)
@@ -734,6 +755,12 @@ def main(argv=None):
     if arguments[:1] == ['--']:
         arguments.pop(0)
     args = parser.parse_args(arguments)
+    try:
+        args.mocap_observation_bounds_m = parse_observation_bounds([
+            args.mocap_observation_x_limits_m, args.mocap_observation_y_limits_m,
+            args.mocap_observation_z_limits_m])
+    except ValueError as exc:
+        parser.error(str(exc))
     for name, value in vars(args).items():
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if not np.isfinite(value) or value < 0 or (value == 0 and name not in (
@@ -780,6 +807,13 @@ def main(argv=None):
           f'minimum move {args.min_move_seconds:g} s, settle {args.settle_seconds:g} s; '
           f'up to {args.max_attempts} attempts/point', flush=True)
     print(f'Sampling mode: {args.arrival_mode}; calibration always uses measured joint feedback/FK.', flush=True)
+    if args.mocap_observation_bounds_m is not None:
+        print(f'Rigid-body observation range: frame=mocap_raw_m, '
+              f'XYZ={args.mocap_observation_bounds_m}; unique in-range selection replaces fixed slot/id; '
+              'UDP slot/id may change; keep selecting by spatial range on each packet.', flush=True)
+    else:
+        print(f'Rigid-body selection: fixed slot={args.rigid_body_slot}, id={args.rigid_body_id}; '
+              'no spatial range configured.', flush=True)
     print(f'Supplemental collection: target {args.target_samples} accepted samples, '
           f'maximum {args.max_supplemental_points} extra intermediate points; '
           f'V172 sim-frame box {planner.lower.tolist()} .. {planner.upper.tolist()}, '

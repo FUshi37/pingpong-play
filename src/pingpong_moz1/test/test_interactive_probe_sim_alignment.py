@@ -47,6 +47,12 @@ class PolicyObservationAgeContractTest(unittest.TestCase):
 
 class CameraImpactRacketFrameContractTest(unittest.TestCase):
 
+    def test_depth_assisted_ir_startup_flag_is_explicit_opt_in(self):
+        parser = PROBE.build_arg_parser()
+        self.assertFalse(parser.parse_args([]).enable_depth_assisted_ir)
+        args = parser.parse_args(['--enable-depth-assisted-ir'])
+        self.assertTrue(PROBE.config_from_args(args).enable_depth_assisted_ir)
+
     class _Core:
         def __init__(self):
             self.racket_updates = []
@@ -154,6 +160,40 @@ class SensorDepthAnomalyPredictionContractTest(unittest.TestCase):
         probe.cfg = SimpleNamespace(control_dt=0.005)
         probe.ros_bridge = None
         return probe
+
+    def test_quality_snapshot_survives_scalar_packet_and_control_does_not_refit(self):
+        from pingpong_controller.ball_observation_model import BallObservationProcessor
+        processor = BallObservationProcessor(sim_offset_m=[0., .02, 1.3])
+        for i in range(10):
+            t = i/90.
+            p = PROBE.np.array([.2*t, -.4, .1+1.8*t-4.9*t*t])
+            observation = dict(detected=True, position=p*1000, velocity=PROBE.np.zeros(3),
+                raw_measurement=dict(ball_observation_version=1, velocity_ready=True,
+                    measurement_trusted_3d=True, range_sigma_mm=3.))
+            processor.process(observation, t)
+        raw = json.loads(json.dumps(PROBE._camera_measurement_payload(observation['raw_measurement'])))
+        probe = self._probe()
+        probe.cfg = SimpleNamespace(control_dt=.005, sim_cartesian_x_offset_m=0.,
+            sim_cartesian_y_offset_m=.02, sim_base_height_m=1.3)
+        probe.now_s = t+.015
+        with mock.patch.object(PROBE.np.linalg, 'lstsq', side_effect=AssertionError('fit in control')):
+            pos, vel, ready, stamp, info = probe._resolve_high_ball_occlusion_state(
+                p+PROBE.np.array([0., .02, 1.3]), PROBE.np.zeros(3), True, t, self._options(), raw)
+        future = t+.020
+        expected = [.2*future, -.38, 1.4+1.8*future-4.9*future*future]
+        PROBE.np.testing.assert_allclose(pos, expected, atol=1e-6)
+        self.assertTrue(ready)
+        self.assertAlmostEqual(stamp, future)
+        self.assertEqual(info['model'], 'quality_bearing_range_flight')
+        self.assertEqual(info['estimatorMode'], 'tracking')
+
+    def test_quality_packet_without_producer_state_never_runs_control_fit(self):
+        probe = self._probe()
+        _, _, ready, _, info = probe._resolve_high_ball_occlusion_state(
+            PROBE.np.ones(3), PROBE.np.ones(3), True, 0., self._options(),
+            dict(ball_observation_version=1, velocity_ready=True, measurement_trusted_3d=True))
+        self.assertFalse(ready)
+        self.assertEqual(info['reason'], 'observation_processor_unavailable')
 
     def test_independent_switch_routes_adaptive_depth_fault_to_3d_model(self):
         probe = self._probe()
@@ -2240,6 +2280,10 @@ class Gpu1HotSwitchRegressionTest(unittest.TestCase):
         self.assertEqual(set(PROBE.RUNTIME_SWITCHABLE_POLICY_PROFILES), {
             "fplc_gpu0_v152", "fplc_gpu1_v151", "fplc_gpu0_v161", "fplc_gpu1_v172",
             "fplc_v220_s17_u839_20261013_r1",
+            "fplc_gpu1_v223", "fplc_gpu0_v224", "fplc_gpu1_v224",
+            "fplc_gpu1_v274_s9", "fplc_gpu1_v274_s11", "fplc_gpu0_v319",
+            "fplc_v321_s4_u2097_20261029_r1",
+            "fplc_gpu1_v322", "fplc_gpu0_v323", "fplc_gpu1_v324",
             PROBE.OBSERVATION_PROFILE_LEGACY_BUG_COMPAT,
             PROBE.OBSERVATION_PROFILE_SIMCODE3_ACTUATOR67,
             PROBE.OBSERVATION_PROFILE_SIMCODE5_PURE_ACTUATOR67,
@@ -2972,7 +3016,7 @@ class PolicyWorkspaceSwitchRegressionTest(unittest.TestCase):
 
     def test_round_trip_restores_general_limits_for_every_non_fplc_profile(self):
         general = ((-.348, .263), (-.702, -.230), (.842, 1.462))
-        small = ((-.1, .1), (-.6, -.4), (.95, 1.2))
+        small = ((-.15, .15), (-.6, -.35), (.95, 1.2))
         for initial in (PROBE.FPLC_PROFILES[0], PROBE.OBSERVATION_PROFILE_GPU0_QVEL_REAL_RMP_V85):
             probe = self._probe(general, initial)
             # Two rounds catch cumulative intersection with the previous box.
@@ -2992,7 +3036,7 @@ class PolicyWorkspaceSwitchRegressionTest(unittest.TestCase):
         profile = PROBE.OBSERVATION_PROFILE_GPU1_QACC_FT_V153
         probe = self._probe(general, profile)
         probe._select_policy_profile(PROBE.FPLC_PROFILES[0])
-        self.assert_workspace(probe, ((-.1, .1), (-.57, -.4), (1.02, 1.2)))
+        self.assert_workspace(probe, ((-.15, .15), (-.57, -.35), (1.02, 1.2)))
         probe._select_policy_profile(profile)
         self.assert_workspace(probe, general)
 

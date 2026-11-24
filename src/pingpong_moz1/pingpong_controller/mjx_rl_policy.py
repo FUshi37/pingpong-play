@@ -97,10 +97,20 @@ class _CheckpointUnpickler(pickle.Unpickler):
     """Unpickler that stubs JAX/training globals so JAX need not be present."""
 
     def find_class(self, module: str, name: str):
+        if (module, name) == ('single_actor', 'ActorOptim'):
+            return _StubType
         if any(module == p or module.startswith(p + ".")
                for p in _STUBBED_MODULE_PREFIXES):
             return _StubType
-        return super().find_class(module, name)
+        try:
+            return super().find_class(module, name)
+        except ModuleNotFoundError:
+            # NumPy 2 checkpoints name numpy._core; the deployment environment
+            # can still use NumPy 1.26. Keep the alias scoped to this loader.
+            if module.startswith("numpy._core."):
+                return super().find_class(
+                    module.replace("numpy._core.", "numpy.core.", 1), name)
+            raise
 
 
 def inspect_mjx_checkpoint_metadata(model_path: str) -> dict:
@@ -114,6 +124,8 @@ def inspect_mjx_checkpoint_metadata(model_path: str) -> dict:
         payload = _CheckpointUnpickler(handle).load()
     if not isinstance(payload, dict):
         raise RuntimeError(f"MJX checkpoint is not a dict: {model_path}")
+    from pingpong_controller.fplc_deployment import prepare_fplc_checkpoint_payload
+    payload = prepare_fplc_checkpoint_payload(payload, model_path)
     return {
         "obs_dim": int(payload.get("obs_dim", 0) or 0),
         "act_dim": int(payload.get("act_dim", 0) or 0),
@@ -175,6 +187,9 @@ class MjxRLPolicyController(RLPolicyController):
             raise RuntimeError(
                 f"MJX checkpoint missing 'params': {model_path}")
 
+        from pingpong_controller.fplc_deployment import prepare_fplc_checkpoint_payload
+        payload = prepare_fplc_checkpoint_payload(payload, model_path)
+
         obs_dim = int(payload.get("obs_dim", self._expected_obs_dim))
         act_dim = int(payload.get("act_dim", self.n_arm))
 
@@ -207,6 +222,12 @@ class MjxRLPolicyController(RLPolicyController):
             "out_w": np.ascontiguousarray(flat["pi/out/w"], dtype=np.float32),
             "out_b": np.ascontiguousarray(flat["pi/out/b"], dtype=np.float32),
         }
+        if 'pi/l3/w' in flat or 'pi/l3/b' in flat:
+            if not all(key in flat for key in ('pi/l3/w', 'pi/l3/b')):
+                raise RuntimeError('MJX checkpoint third actor layer is incomplete')
+            self._pi_weights.update({
+                'l3_w': np.ascontiguousarray(flat['pi/l3/w'], dtype=np.float32),
+                'l3_b': np.ascontiguousarray(flat['pi/l3/b'], dtype=np.float32)})
         self._validate_weight_shapes()
 
         self._checkpoint_env_cfg = dict(payload.get("env_cfg") or {})
@@ -233,6 +254,8 @@ class MjxRLPolicyController(RLPolicyController):
             (w["out_w"].shape, (hidden, self.n_arm)),
             (w["out_b"].shape, (self.n_arm,)),
         ]
+        if 'l3_w' in w:
+            checks += [(w['l3_w'].shape, (hidden, hidden)), (w['l3_b'].shape, (hidden,))]
         for got, expected in checks:
             if tuple(got) != tuple(expected):
                 raise RuntimeError(
@@ -348,6 +371,8 @@ class MjxRLPolicyController(RLPolicyController):
         x = np.asarray(obs, dtype=np.float32).reshape(-1)
         x = np.tanh(x @ w["l1_w"] + w["l1_b"])
         x = np.tanh(x @ w["l2_w"] + w["l2_b"])
+        if 'l3_w' in w:
+            x = np.tanh(x @ w['l3_w'] + w['l3_b'])
         mean = x @ w["out_w"] + w["out_b"]
         return np.asarray(mean, dtype=np.float32).reshape(self.n_arm)
 

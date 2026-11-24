@@ -1,0 +1,224 @@
+{
+  "completed_per_latest_user_training_stop": true,
+  "model": "/home/yangzhe/Project/pingpong_controller/pingpong_controller/outputs/rl_sim/fplc_v322_gpu1_late_center_precision_20261103_r1/training_qualified_inherited1200s.pkl",
+  "model_sha256": "d35ea68508cbdfbaddfb3766f21c3f4e82f6f127e3caab8262d9e69a9ad307bc",
+  "source_sha256": "a669ad75fc1a8c56cbba7719a85dd7e5e8e73e67c6109c8b59dda40596da8fff",
+  "update": 31361,
+  "step": 8238268416,
+  "Adam_t": 2020766,
+  "actual_updates": 48,
+  "all32": true,
+  "no_rejection_or_rollback": true,
+  "no_critic_or_optimizer_reset": true,
+  "episode_limit_s": 1200,
+  "envs": 1024,
+  "rollout_steps": 128,
+  "quality": {
+    "scope": "center_runtime_quality_repair",
+    "passed": true,
+    "checks": {
+      "original_quality": true,
+      "full_quality_window": true,
+      "all_minibatches": true,
+      "no_rejection": true,
+      "no_rollback": true,
+      "finite": true
+    },
+    "hold": 17,
+    "required_hold": 16,
+    "ready_for_frozen_evaluation": true,
+    "update": 31361,
+    "step": 8238268416,
+    "quality": {
+      "adjacent_jump_m": 0.00848390545815554,
+      "in_band": 0.9933765086841331,
+      "ball_vxy_m_s": 0.021494795413128077,
+      "racket_omega_rms_rad_s": 0.2307607523760005,
+      "ball_vxy_rms_m_s": 0.024868769875654614,
+      "recurrent_vxy_m_s": 0.046696526744131876,
+      "recurrent_vxy_rms_m_s": 0.05011598494561038,
+      "steady_events": 40624,
+      "apex_m": 1.4260872401041795,
+      "center_m": 0.00500496662052751,
+      "racket_vxy_rms_m_s": 0.05011598494561038
+    },
+    "new_exposure_s": 30.72,
+    "long_qualification": "inherited u31201; no new1200s clock"
+  },
+  "qualification": {
+    "qualified": true,
+    "scope": "training_quality_with_inherited_1200s",
+    "user_stop_instruction": "新的训练只要在训练中所有指标满足要求就可以停止训练",
+    "source_checkpoint_sha256": "a669ad75fc1a8c56cbba7719a85dd7e5e8e73e67c6109c8b59dda40596da8fff",
+    "source_update": 31361,
+    "source_step": 8238268416,
+    "source_Adam_t": 2020766,
+    "fresh_training_quality": {
+      "scope": "center_runtime_quality_repair",
+      "passed": true,
+      "checks": {
+        "original_quality": true,
+        "full_quality_window": true,
+        "all_minibatches": true,
+        "no_rejection": true,
+        "no_rollback": true,
+        "finite": true
+      },
+      "hold": 17,
+      "required_hold": 16,
+      "ready_for_frozen_evaluation": true,
+      "update": 31361,
+      "step": 8238268416,
+      "quality": {
+        "adjacent_jump_m": 0.00848390545815554,
+        "in_band": 0.9933765086841331,
+        "ball_vxy_m_s": 0.021494795413128077,
+        "racket_omega_rms_rad_s": 0.2307607523760005,
+        "ball_vxy_rms_m_s": 0.024868769875654614,
+        "recurrent_vxy_m_s": 0.046696526744131876,
+        "recurrent_vxy_rms_m_s": 0.05011598494561038,
+        "steady_events": 40624,
+        "apex_m": 1.4260872401041795,
+        "center_m": 0.00500496662052751,
+        "racket_vxy_rms_m_s": 0.05011598494561038
+      },
+      "new_exposure_s": 30.72,
+      "long_qualification": "inherited u31201; no new1200s clock"
+    },
+    "historical_1200s_qualification": {
+      "inherited": true,
+      "source_sha256": "187739cdc9125de13afceae386788671df6010d6cec729df7351096e4fba0777",
+      "source_update": 31201,
+      "source_step": 8217296896,
+      "source_Adam_t": 2015646,
+      "primary": {
+        "scope": "center_runtime_recovery",
+        "passed": true,
+        "checks": {
+          "stage4": true,
+          "horizon_1200s": true,
+          "clock_complete": true,
+          "true_step_continuous": true,
+          "full_quality_window": true,
+          "original_quality": true,
+          "nominal_samples": true,
+          "overall_samples": true,
+          "nominal_survival": true,
+          "nominal_length": true,
+          "nominal_hit_density": true,
+          "every_minibatch_applied": true,
+          "no_rejected_update": true,
+          "no_rollback": true,
+          "finite_simulation": true
+        },
+        "update": 31201,
+        "elapsed_s": 1255.04,
+        "quality": {
+          "racket_vxy_rms_m_s": 0.05025622771635587,
+          "in_band": 0.9927356615210936,
+          "recurrent_vxy_rms_m_s": 0.05025622771635587,
+          "steady_events": 40607,
+          "ball_vxy_rms_m_s": 0.02509990441190539,
+          "ball_vxy_m_s": 0.021687064670020982,
+          "center_m": 0.005066329915565744,
+          "racket_omega_rms_rad_s": 0.23398111584415782,
+          "adjacent_jump_m": 0.008542915711412372,
+          "recurrent_vxy_m_s": 0.04694170529926866,
+          "apex_m": 1.4261994070305382
+        },
+        "nominal": {
+          "survival": 0.9966722129783694,
+          "len_fraction": 0.9979364877981143,
+          "hits_mean": 2309.2029950083192,
+          "n": 601
+        },
+        "conditions": {
+          "nominal": {
+            "survival": 0.9966722129783694,
+            "len_fraction": 0.9979364877981143,
+            "hits_mean": 2309.2029950083192,
+            "n": 601
+          },
+          "near_0_50": {
+            "survival": 0.896551724137931,
+            "n": 203,
+            "hits_mean": 2074.3546798029556,
+            "len_fraction": 0.8967501026272579
+          },
+          "near_50_80": {
+            "len_fraction": 0.4142980971128609,
+            "survival": 0.41338582677165353,
+            "n": 254,
+            "hits_mean": 957.0905511811023
+          },
+          "near_80_100": {
+            "n": 149,
+            "len_fraction": 0.1286991610738255,
+            "survival": 0.12751677852348994,
+            "hits_mean": 296.3422818791946
+          },
+          "mirror": {
+            "survival": 1,
+            "n": 118,
+            "len_fraction": 1,
+            "hits_mean": 2314.4491525423728
+          }
+        },
+        "extreme_initial_conditions": {
+          "near_50_80": {
+            "len_fraction": 0.4142980971128609,
+            "survival": 0.41338582677165353,
+            "n": 254,
+            "hits_mean": 957.0905511811023
+          },
+          "near_80_100": {
+            "n": 149,
+            "len_fraction": 0.1286991610738255,
+            "survival": 0.12751677852348994,
+            "hits_mean": 296.3422818791946
+          }
+        },
+        "original_all_five_passed": false,
+        "frozen_runtime_acceptance_pending": true,
+        "hold": 87,
+        "required_hold": 16,
+        "ready_for_frozen_evaluation": true
+      },
+      "fresh_1200s_endpoints_required": false,
+      "episode_limit_s": 1200.0,
+      "numerical_quality_thresholds_unchanged": true,
+      "qualification_kind": "historical mixed-policy training, not frozen1200s",
+      "resume_origin": {
+        "update": 31313,
+        "step": 8231976960,
+        "Adam_t": 2019230,
+        "sha256": "ba3883b0de1ba16ba2f7adb79121b649322d71e0c48abeb4b0dcfcc5b1667d85"
+      }
+    },
+    "fresh_1200s_clock_required": false,
+    "episode_limit_s": 1200.0,
+    "all_original_numeric_training_gates_retained": true,
+    "current_policy_frozen_acceptance_claim": false,
+    "current_policy_frozen_status": "not assessed; no inherited frozen pass",
+    "original_stage_converged_preserved": false,
+    "original_course_not_relabelled": true,
+    "numeric_state_sha256": {
+      "params": "5652179c3bb3d181edaa12f1b09d158783680663186d231e48f4943d0418b0c0",
+      "opt": "daef6a9b405625547b7f670ecbcf7c8249e6d0011e0eba0e28d42e981681eab5",
+      "stage_actor_anchor_reference_params": "02fbb31e31f424c70cca3d926b49f5791f6d218922f90fc6ab53749143106952"
+    }
+  },
+  "main_exit": {
+    "event": "exit",
+    "returncode": 0,
+    "stop_requested": false
+  },
+  "WandB": "https://wandb.ai/fushi37/pingpong-mjx/runs/fplc_v322_gpu1_late_center_precision_20261103_r1",
+  "storage": "raw metrics and SDK buffers RAM only; online cloud; periodic best-of-five plus protected qualified model",
+  "original_stage_flags_preserved": true,
+  "original_frozen_gates_unchanged": true,
+  "current_policy_frozen_assessed": false,
+  "prior_negative_frozen_result": "v322_late_cycle_quality_supervision_20261103_r2/FROZEN_U31249.json",
+  "CPU_tests": 311,
+  "user_ledger_unchanged": true
+}

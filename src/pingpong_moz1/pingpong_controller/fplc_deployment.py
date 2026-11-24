@@ -1,4 +1,4 @@
-"""Versioned simcode9/10 asset and real-workspace contracts (standard library)."""
+"""Versioned simcode9/10/11 asset and real-workspace contracts."""
 from __future__ import annotations
 
 import json
@@ -17,6 +17,17 @@ if FPLC_CONTRACTS.keys() & SIMCODE10_CONTRACTS.keys():
     raise ValueError("simcode10 must not replace an existing FPLC model identity")
 FPLC_CONTRACTS.update(SIMCODE10_CONTRACTS)
 SIMCODE10_PROFILES = tuple(SIMCODE10_CONTRACTS)
+SIMCODE11_CONTRACT_PATH = REPO_ROOT / "config" / "fplc_simcode11_model_contracts.json"
+SIMCODE11_CONTRACTS = json.loads(SIMCODE11_CONTRACT_PATH.read_text(encoding="utf-8"))
+SIMCODE11_U416_CONTRACT_PATH = REPO_ROOT / "config" / "fplc_simcode11_u416_model_contracts.json"
+SIMCODE11_U416_CONTRACTS = json.loads(SIMCODE11_U416_CONTRACT_PATH.read_text(encoding="utf-8"))
+if SIMCODE11_CONTRACTS.keys() & SIMCODE11_U416_CONTRACTS.keys():
+    raise ValueError("u416 must not replace an existing simcode11 model identity")
+SIMCODE11_CONTRACTS.update(SIMCODE11_U416_CONTRACTS)
+if FPLC_CONTRACTS.keys() & SIMCODE11_CONTRACTS.keys():
+    raise ValueError("simcode11 must not replace an existing FPLC model identity")
+FPLC_CONTRACTS.update(SIMCODE11_CONTRACTS)
+SIMCODE11_PROFILES = tuple(SIMCODE11_CONTRACTS)
 FPLC_PROFILES = tuple(FPLC_CONTRACTS)
 # Authenticated training bounds; the actor's projection keeps these unchanged.
 FPLC_LOWER_M = (-0.348, -0.700, 1.000)
@@ -53,9 +64,87 @@ def fplc_assets(profile: str, repo_root: Path = REPO_ROOT) -> tuple[Path, Path]:
             repo_root / contract["policy_xml_path"])
 
 
-def fplc_workspace_intersection(limits):
-    """Intersect physical limits with the operator-requested real envelope."""
-    import math
+def prepare_fplc_checkpoint_payload(payload: dict, model_path: str) -> dict:
+    """Restore u416's omitted metadata from its authenticated frozen manifest.
+
+    Shared by the actor and CPU mirror, so neither silently uses plant defaults.
+    The training optimizer is never imported or executed.
+    """
+    runtime = payload.get('requires_actor_runtime')
+    if runtime is None:
+        return payload
+    from pingpong_controller.policy_release_manifest import sha256_file
+    matches = [c for c in FPLC_CONTRACTS.values()
+               if c.get('required_actor_runtime') == runtime
+               and c['sha256'] == sha256_file(Path(model_path))]
+    if len(matches) != 1:
+        raise RuntimeError('Unregistered FPLC actor runtime/checkpoint identity')
+    contract = matches[0]
+    path = REPO_ROOT / contract['checkpoint_metadata_path']
+    if sha256_file(path) != contract['checkpoint_metadata_sha256']:
+        raise RuntimeError('FPLC checkpoint metadata SHA-256 mismatch')
+    manifest = json.loads(path.read_text(encoding='utf-8'))
+    if (payload.get('schema') != 'v325_single5_training_v1'
+            or payload.get('mode') != 'direct'
+            or payload.get('actual_updates') != 416
+            or payload.get('native_actor_obs_dim') != 120
+            or payload.get('single_actor_input_dim') != 120
+            or manifest['actor_critic_action'] != [120, 453, 7]
+            or manifest['residual_network'] is not False):
+        raise RuntimeError('FPLC u416 schema/runtime mismatch')
+    return {**payload, 'env_cfg': manifest['source_physical_cfg'],
+            'obs_dim': 120, 'critic_obs_dim': 453, 'act_dim': 7}
+
+
+def fplc_real_roll_pitch_limit_deg(profile: str) -> tuple[float, float]:
+    """Read the selected model's real envelope; older models retain 4 degrees."""
+    limits = FPLC_CONTRACTS[profile].get(
+        'real_roll_pitch_limit_deg', FPLC_REAL_ROLL_PITCH_LIMIT_DEG)
+    if (len(limits) != 2
+            or any(not math.isfinite(float(v)) or float(v) <= 0 for v in limits)):
+        raise ValueError('FPLC real roll/pitch limits must be two finite positive angles')
+    return tuple(map(float, limits))
+
+
+def fplc_real_workspace_limits(profile: str | None = None):
+    """Return the selected model's real box in the policy Cartesian frame."""
+    contract = {} if profile is None else FPLC_CONTRACTS[profile]
+    mode = contract.get('real_workspace_mode', 'operator')
+    margin = 0.0
+    if mode == 'training':
+        cfg = contract['env_contract']
+        lower = cfg['cartesian_pose_position_lower_m']
+        upper = cfg['cartesian_pose_position_upper_m']
+        margin = float(contract.get('real_workspace_margin_m', 0.0))
+        if not math.isfinite(margin) or margin < 0.0:
+            raise ValueError('FPLC real workspace margin must be finite and nonnegative')
+    elif mode == 'operator':
+        lower, upper = FPLC_REAL_LOWER_M, FPLC_REAL_UPPER_M
+    else:
+        raise ValueError(f'Unsupported FPLC real workspace mode: {mode!r}')
+    if (len(lower) != 3 or len(upper) != 3
+            or any(not math.isfinite(float(v)) for v in (*lower, *upper))
+            or any(float(low) >= float(high) for low, high in zip(lower, upper))):
+        raise ValueError('FPLC real workspace must contain three finite increasing pairs')
+    # Normalize decimal metre bounds after adding the configured outer margin.
+    return tuple((round(float(low) - margin, 12), round(float(high) + margin, 12))
+                 for low, high in zip(lower, upper))
+
+
+def fplc_workspace_for_profile(profile: str, configured_limits):
+    """Select a model box independently of the previous/general profile box.
+
+    Training-derived releases use the model box plus its explicit outer margin;
+    general YAML/CLI bounds remain available when switching to older models.
+    """
+    if FPLC_CONTRACTS[profile].get('real_workspace_mode', 'operator') == 'training':
+        return fplc_real_workspace_limits(profile)
+    return fplc_workspace_intersection(configured_limits, profile=profile)
+
+
+def fplc_workspace_intersection(limits, *, profile: str | None = None):
+    """Intersect explicit limits with the selected model's real envelope."""
+    envelope = fplc_real_workspace_limits(profile)
     if len(limits) != 3:
         raise ValueError("FPLC requires exactly three real workspace limits")
     output = []
@@ -65,8 +154,8 @@ def fplc_workspace_intersection(limits):
         low, high = map(float, limit)
         if not all(math.isfinite(v) for v in (low, high)) or low >= high:
             raise ValueError("FPLC workspace limits must be finite increasing pairs")
-        low = max(low, FPLC_REAL_LOWER_M[axis])
-        high = min(high, FPLC_REAL_UPPER_M[axis])
+        low = max(low, envelope[axis][0])
+        high = min(high, envelope[axis][1])
         if low >= high:
             raise ValueError("real workspace has no intersection with the FPLC workspace")
         output.append((low, high))
@@ -85,8 +174,13 @@ if __name__ == "__main__":
     print(f"FPLC_MODEL_PATH\t{model}")
     print(f"FPLC_POLICY_XML_PATH\t{xml}")
     print(f"FPLC_OBS_DIM\t{FPLC_CONTRACTS[args.profile]['actor_dim']}")
-    print(f"FPLC_REAL_ROLL_PITCH_LIMITS_DEG\t{','.join(map(str, FPLC_REAL_ROLL_PITCH_LIMIT_DEG))}")
+    print(f"FPLC_ACTOR_AGE_MODE\t{FPLC_CONTRACTS[args.profile].get('actor_ball_age_mode', 'measurement_age')}")
+    training = FPLC_CONTRACTS[args.profile]['env_contract']
+    training_rp = [training[key] for key in ('cartesian_pose_roll_limit_deg', 'cartesian_pose_pitch_limit_deg')]
+    print(f"FPLC_TRAINING_ROLL_PITCH_LIMITS_DEG\t{','.join(map(str, training_rp))}")
+    real_rp = fplc_real_roll_pitch_limit_deg(args.profile)
+    print(f"FPLC_REAL_ROLL_PITCH_LIMITS_DEG\t{','.join(map(str, real_rp))}")
     if args.x_limits is not None:
         pairs = [tuple(map(float, value.split(','))) for value in (args.x_limits, args.y_limits, args.z_limits)]
-        for axis, pair in zip("XYZ", fplc_workspace_intersection(pairs)):
+        for axis, pair in zip("XYZ", fplc_workspace_for_profile(args.profile, pairs)):
             print(f"DONE_EE_{axis}_LIMITS_M\t{pair[0]},{pair[1]}")

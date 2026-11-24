@@ -16,8 +16,10 @@ import numpy as np
 
 try:
     from pingpong_controller.mocap_clock_sync import MocapClockSynchronizer
+    from pingpong_controller.mocap_observation_range import normalize_observation_bounds
 except ImportError:
     from mocap_clock_sync import MocapClockSynchronizer
+    from mocap_observation_range import normalize_observation_bounds
 
 _BINARY_PACKET_FORMAT = '<d6f'
 _BINARY_PACKET_SIZE = struct.calcsize(_BINARY_PACKET_FORMAT)
@@ -37,6 +39,8 @@ class MocapPacket:
     tracked: Optional[bool] = None
     mean_error_m: Optional[float] = None
     marker_selection_info: Optional[Dict[str, Any]] = None
+    rigid_body_slot: Optional[int] = None
+    rigid_body_id: Optional[int] = None
 
 
 def _to_float(value) -> Optional[float]:
@@ -235,7 +239,44 @@ def _parse_opti_rb_packet(payload: Dict[str, Any],
         orientation_wxyz=orientation,
         tracked=tracked,
         mean_error_m=mean_error_m,
+        rigid_body_slot=int(rigid_body_slot),
+        rigid_body_id=_to_int(payload.get(prefix + 'id')),
     )
+
+
+def _parse_ranged_opti_rb_packet(payload, *, bounds, position_unit, timestamp_unit):
+    """Calibration-only: select a unique tracked rigid body by raw XYZ position."""
+    slots = sorted({int(match.group(1)) for key in payload
+                    if (match := re.fullmatch(r'opti_rb_(\d+)_px', key))})
+    eligible = []
+    for slot in slots:
+        if _opti_rb_tracked(payload, slot) is False:
+            continue
+        # Compare the original float64 coordinates before narrowing the pose
+        # to float32, so inclusive decimal endpoints retain their meaning.
+        position = _extract_opti_rb_position(payload, slot)
+        if position is None:
+            continue
+        position = position * _scale_for_unit(position, position_unit)
+        if _marker_in_limits(position, bounds[0], bounds[2], bounds[1]):
+            packet = _parse_opti_rb_packet(
+                payload, rigid_body_slot=slot, rigid_body_id=None,
+                position_unit=position_unit, timestamp_unit=timestamp_unit)
+            eligible.append(packet)
+    selected = len(eligible) == 1
+    info = dict(enabled=True, frame='mocap_raw_m', object_kind='rigid_body',
+                **_marker_limits_info(bounds[0], bounds[2], bounds[1]),
+                total_rigid_body_count=len(slots), eligible_rigid_body_count=len(eligible),
+                selected_rigid_body_slot=eligible[0].rigid_body_slot if selected else None,
+                selected_rigid_body_id=eligible[0].rigid_body_id if selected else None,
+                status='selected' if selected else
+                       'no_candidate' if not eligible else 'ambiguous_candidates')
+    if selected:
+        eligible[0].marker_selection_info = info
+        return eligible[0]
+    return MocapPacket(position_m=np.zeros(3, np.float32), velocity_m_s=None,
+                       frame_idx=None, timestamp_s=None, source_format='optitrack_opti_rb',
+                       raw=payload, tracked=False, marker_selection_info=info)
 
 
 def _first_number(payload: Dict[str, Any], keys) -> Optional[float]:
@@ -460,22 +501,25 @@ def _validate_marker_x_limits(limits):
     return _validate_marker_limits(limits, 'X')
 
 
-def _marker_in_limits(position_m, x_limits, z_limits):
+def _marker_in_limits(position_m, x_limits, z_limits, y_limits=None):
     return bool(np.all(np.isfinite(position_m))
                 and (x_limits is None or x_limits[0] <= float(position_m[0]) <= x_limits[1])
+                and (y_limits is None or y_limits[0] <= float(position_m[1]) <= y_limits[1])
                 and (z_limits is None or z_limits[0] <= float(position_m[2]) <= z_limits[1]))
 
 
-def _marker_limits_info(x_limits, z_limits):
+def _marker_limits_info(x_limits, z_limits, y_limits=None):
     return dict(x_min_m=None if x_limits is None else x_limits[0],
                 x_max_m=None if x_limits is None else x_limits[1],
+                y_min_m=None if y_limits is None else y_limits[0],
+                y_max_m=None if y_limits is None else y_limits[1],
                 z_min_m=None if z_limits is None else z_limits[0],
                 z_max_m=None if z_limits is None else z_limits[1])
 
 
 def _parse_x_filtered_marker_frame(payload, *, marker_id, limits,
-                                   position_unit, timestamp_unit, z_limits=None):
-    """Select one raw point within the X/Z ranges, independent of field index.
+                                   position_unit, timestamp_unit, z_limits=None, y_limits=None):
+    """Select one raw point within the XYZ ranges, independent of field index.
 
     A missing/ambiguous observation still carries frame timing, but its
     position must never enter the measurement or velocity history.
@@ -523,13 +567,13 @@ def _parse_x_filtered_marker_frame(payload, *, marker_id, limits,
         position_m = position * scale
         if z_limits is not None and not z_limits[0] <= float(position_m[2]) <= z_limits[1]:
             z_rejected += 1
-        if not _marker_in_limits(position_m, limits, z_limits):
+        if not _marker_in_limits(position_m, limits, z_limits, y_limits):
             continue
         velocity = _extract_velocity(candidate, index)
         eligible.append((index, position_m.astype(np.float32),
                          None if velocity is None else (velocity * scale).astype(np.float32)))
     selected = len(eligible) == 1
-    info = dict(enabled=True, frame='mocap_raw_m', **_marker_limits_info(limits, z_limits),
+    info = dict(enabled=True, frame='mocap_raw_m', **_marker_limits_info(limits, z_limits, y_limits),
                 total_marker_count=total, eligible_marker_count=len(eligible),
                 z_rejected_marker_count=z_rejected,
                 selected_marker_id=eligible[0][0] if selected else None,
@@ -552,7 +596,9 @@ def parse_mocap_packet(data: bytes,
                        position_unit: str = 'auto',
                        timestamp_unit: str = 's',
                        marker_x_limits_m: Optional[Tuple[float, float]] = None,
-                       marker_z_limits_m: Optional[Tuple[float, float]] = None) -> Optional[MocapPacket]:
+                       marker_z_limits_m: Optional[Tuple[float, float]] = None,
+                       observation_bounds_m=None,
+                       rigid_body_observation_bounds_m=None) -> Optional[MocapPacket]:
     """Parse one UDP packet from the mocap system.
 
     Supported formats:
@@ -563,12 +609,19 @@ def parse_mocap_packet(data: bytes,
         {"opti_rb_0_px": ..., "opti_rb_0_qw": ..., "opti_rb_1_id": 1, ...}
       - Generic JSON marker lists and legacy binary <d6f>.
 
-    When X or Z limits are set, select the unique scatter point inside all
-    configured inclusive ranges in meters, before robot-frame calibration.
+    When observation_bounds_m is supplied, it replaces the legacy X/Z limits.
+    Select the unique scatter point inside all configured XYZ ranges.
+    These inclusive ranges are in meters, before robot-frame calibration.
     Rigid-body pose parsing is independent of the scatter-point filters.
+    Calibration can explicitly use rigid_body_observation_bounds_m to select
+    the unique tracked rigid body inside a separate raw XYZ range.
     """
     if not data:
         return None
+    marker_y_limits_m = None
+    if observation_bounds_m is not None:
+        marker_x_limits_m, marker_y_limits_m, marker_z_limits_m = normalize_observation_bounds(
+            observation_bounds_m)
 
     stripped = data.strip()
     if stripped[:1] in (b'{', b'['):
@@ -589,6 +642,10 @@ def parse_mocap_packet(data: bytes,
 
         kind = str(object_kind or 'auto').strip().lower()
         if kind in ('opti_rb', 'rigid_body'):
+            if rigid_body_observation_bounds_m is not None:
+                return _parse_ranged_opti_rb_packet(
+                    root_payload, bounds=normalize_observation_bounds(rigid_body_observation_bounds_m),
+                    position_unit=position_unit, timestamp_unit=timestamp_unit)
             if rigid_body_slot is None:
                 return None
             return _parse_opti_rb_packet(
@@ -609,11 +666,12 @@ def parse_mocap_packet(data: bytes,
             if packet is not None:
                 return packet
 
-        if marker_x_limits_m is not None or marker_z_limits_m is not None:
+        if any(pair is not None for pair in (marker_x_limits_m, marker_y_limits_m, marker_z_limits_m)):
             return _parse_x_filtered_marker_frame(
                 payload, marker_id=marker_id,
                 limits=_validate_marker_x_limits(marker_x_limits_m),
                 z_limits=_validate_marker_limits(marker_z_limits_m, 'Z'),
+                y_limits=marker_y_limits_m,
                 position_unit=position_unit, timestamp_unit=timestamp_unit)
 
         marker_payloads = list(
@@ -684,13 +742,13 @@ def parse_mocap_packet(data: bytes,
             timestamp_s=_normalize_timestamp(values[0], timestamp_unit),
             source_format='binary_d6f',
             raw={})
-        if marker_x_limits_m is not None or marker_z_limits_m is not None:
+        if any(pair is not None for pair in (marker_x_limits_m, marker_y_limits_m, marker_z_limits_m)):
             limits = _validate_marker_x_limits(marker_x_limits_m)
             z_limits = _validate_marker_limits(marker_z_limits_m, 'Z')
-            eligible = _marker_in_limits(pos * scale, limits, z_limits)
+            eligible = _marker_in_limits(pos * scale, limits, z_limits, marker_y_limits_m)
             packet.tracked = eligible
             packet.marker_selection_info = dict(
-                enabled=True, frame='mocap_raw_m', **_marker_limits_info(limits, z_limits),
+                enabled=True, frame='mocap_raw_m', **_marker_limits_info(limits, z_limits, marker_y_limits_m),
                 total_marker_count=1, eligible_marker_count=int(eligible), selected_marker_id=None,
                 z_rejected_marker_count=int(z_limits is not None and not z_limits[0] <= float(pos[2] * scale) <= z_limits[1]),
                 status='selected' if eligible else 'no_candidate', frame_idx=None)
@@ -727,7 +785,8 @@ class MocapBallDetector:
                  clock_sync_min_span_s: float = 0.05,
                  clock_sync_window_s: float = 10.0,
                  marker_x_limits_m: Optional[Tuple[float, float]] = None,
-                 marker_z_limits_m: Optional[Tuple[float, float]] = (-1.0, 1.0)):
+                 marker_z_limits_m: Optional[Tuple[float, float]] = (-1.0, 1.0),
+                 observation_bounds_m=None):
         """Initialize mocap ball detector.
 
         Args:
@@ -741,6 +800,8 @@ class MocapBallDetector:
                 selects the unique in-range point instead of a fixed index.
             marker_z_limits_m: Inclusive raw mocap Z range in meters; defaults
                 to [-1, 1] to exclude contaminated scatter points before selection.
+            observation_bounds_m: Optional XYZ pairs replacing the legacy X/Z
+                ranges. None on an axis leaves that axis unrestricted.
             object_kind: marker / opti_rb / auto.
             rigid_body_slot: OptiTrack slot Y in opti_rb_Y_* fields.
             rigid_body_id: OptiTrack id YY in opti_rb_YY_id.
@@ -773,6 +834,10 @@ class MocapBallDetector:
         self.timestamp_unit = str(timestamp_unit or 's')
         self.marker_x_limits_m = _validate_marker_x_limits(marker_x_limits_m)
         self.marker_z_limits_m = _validate_marker_limits(marker_z_limits_m, 'Z')
+        self.observation_bounds_m = normalize_observation_bounds(
+            (self.marker_x_limits_m, None, self.marker_z_limits_m)
+            if observation_bounds_m is None else observation_bounds_m)
+        self.marker_x_limits_m, self.marker_y_limits_m, self.marker_z_limits_m = self.observation_bounds_m
         self.velocity_alpha = min(max(float(velocity_alpha), 0.0), 1.0)
         self.max_velocity_m_s = float(max_velocity_m_s)
         self.velocity_window_frames = max(1, int(velocity_window_frames))
@@ -837,6 +902,24 @@ class MocapBallDetector:
         self._thread = None
         self._socket = None
         self._last_start_error = None
+
+    def set_observation_bounds(self, bounds) -> bool:
+        bounds = normalize_observation_bounds(bounds)
+        with self._lock:
+            if bounds == self.observation_bounds_m:
+                return False
+            self.marker_x_limits_m, self.marker_y_limits_m, self.marker_z_limits_m = bounds
+            self.observation_bounds_m = bounds
+            self._latest_observation_valid = False
+            self._last_marker_selection = dict(
+                enabled=any(pair is not None for pair in bounds), frame='mocap_raw_m',
+                **_marker_limits_info(bounds[0], bounds[2], bounds[1]),
+                status='observation_range_changed')
+            self._velocity_history.clear()
+            self._prev_vel_mocap_m_s = None
+            self._prev_sample_time_s = None
+            self._prev_sample_time_source = None
+            return True
 
     def load_calibration(self, path: str) -> None:
         """Load calibration transform from file.
@@ -932,13 +1015,12 @@ class MocapBallDetector:
                     rigid_body_id=self.rigid_body_id,
                     position_unit=self.position_unit,
                     timestamp_unit=self.timestamp_unit,
-                    marker_x_limits_m=self.marker_x_limits_m,
-                    marker_z_limits_m=self.marker_z_limits_m)
+                    observation_bounds_m=self.observation_bounds_m)
                 if packet is None:
                     with self._lock:
                         self._parse_error_count += 1
                         self._receive_status = 'parse_failed'
-                        if self.marker_x_limits_m is not None or self.marker_z_limits_m is not None:
+                        if any(pair is not None for pair in self.observation_bounds_m):
                             self._latest_observation_valid = False
                     callback = getattr(self, 'recording_callback', None)
                     if callback is not None:
@@ -971,20 +1053,22 @@ class MocapBallDetector:
         """Accept one observation atomically; late/repeated frames stay held."""
         with self._lock:
             self._decoded_packet_count += 1
-            limits_info = _marker_limits_info(self.marker_x_limits_m, self.marker_z_limits_m)
+            limits_info = _marker_limits_info(self.marker_x_limits_m, self.marker_z_limits_m,
+                                              self.marker_y_limits_m)
             selection_matches = (packet.marker_selection_info is not None
                                  and all(packet.marker_selection_info.get(key) == value
                                          for key, value in limits_info.items()))
-            if ((self.marker_x_limits_m is not None or self.marker_z_limits_m is not None)
+            if (any(pair is not None for pair in self.observation_bounds_m)
                     and packet.source_format != 'optitrack_opti_rb' and not selection_matches):
                 if packet.source_format == 'json':
                     packet = _parse_x_filtered_marker_frame(
                         packet.raw, marker_id=self.marker_id, limits=self.marker_x_limits_m,
                         z_limits=self.marker_z_limits_m,
+                        y_limits=self.marker_y_limits_m,
                         position_unit=self.position_unit, timestamp_unit=self.timestamp_unit)
                 else:
                     eligible = _marker_in_limits(packet.position_m, self.marker_x_limits_m,
-                                                 self.marker_z_limits_m)
+                                                 self.marker_z_limits_m, self.marker_y_limits_m)
                     packet.marker_selection_info = dict(
                         enabled=True, frame='mocap_raw_m', **limits_info,
                         total_marker_count=1, eligible_marker_count=int(eligible),
@@ -1254,4 +1338,5 @@ class MocapBallDetector:
             'raw': dict(self._latest_raw) if isinstance(
                 self._latest_raw, dict) else self._latest_raw,
             'marker_selection': dict(self._last_marker_selection),
+            'observation_bounds_m': self.observation_bounds_m,
         }

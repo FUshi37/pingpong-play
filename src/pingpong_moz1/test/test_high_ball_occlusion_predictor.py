@@ -794,6 +794,48 @@ class HighBallOcclusionPredictorTest(unittest.TestCase):
             warming.diagnostics["velocityWarmupRejectionErrorNormMm"],
             120.0)
 
+    def test_low_warmup_survives_next_miss_but_expires_from_trusted_time(self):
+        predictor = HighBallOcclusionPredictor(self._config(
+            stop_prediction_z_m=1.24, enable_reacquisition_smoothing=True))
+        predictor.step([0., -.49, 1.05], [0., 0., 0.], True, 1., 1.)
+        predictor.step(np.zeros(3), np.zeros(3), False, 1.016, 1.016)
+        warm = predictor.step([0., -.49, 1.049], np.zeros(3), True, 1.033, 1.033,
+                              measurement_velocity_valid=False)
+        self.assertTrue(warm.valid)
+        lost = predictor.step(np.zeros(3), np.zeros(3), False, 1.044, 1.044)
+        self.assertTrue(lost.valid)
+        self.assertEqual(lost.diagnostics['reason'], 'predicting_velocity_warmup')
+        # Repeated visible position-only frames cannot refresh a 6D budget.
+        expired = predictor.step([0., -.49, 1.01], np.zeros(3), True, 1.101, 1.101,
+                                 measurement_velocity_valid=False)
+        self.assertFalse(expired.valid)
+        self.assertEqual(expired.diagnostics['reason'], 'velocity_warmup_timeout')
+        stale = predictor.step([0., -.49, 1.049], np.zeros(3), True, 1.033, 1.120,
+                               measurement_velocity_valid=False)
+        self.assertFalse(stale.valid)
+
+    def test_warmup_rechecks_model_after_initial_post_impact_point(self):
+        predictor = HighBallOcclusionPredictor(self._config(
+            activation_z_m=2.0, enable_optimized_initial_state=True,
+            enable_reacquisition_smoothing=True))
+        predictor.step([0., -.49, 1.15], [0., 0., -2.3], True, 1., 1.)
+        predictor.step(np.zeros(3), np.zeros(3), False, 1.01, 1.01)
+        # First rising point after a bounce is still inside the 120 mm gate.
+        warm = predictor.step([0., -.49, 1.15], np.zeros(3), True, 1.03, 1.03,
+                              measurement_velocity_valid=False)
+        self.assertTrue(warm.valid)
+        self.assertEqual(warm.diagnostics['reason'], 'velocity_warmup_bridge_started')
+        fresh = np.array([0., -.49, 1.20])
+        invalidated = predictor.step(fresh, np.zeros(3), True, 1.05, 1.05,
+                                     measurement_velocity_valid=False)
+        self.assertFalse(invalidated.valid)
+        self.assertFalse(invalidated.predicted)
+        np.testing.assert_allclose(invalidated.position_m, fresh, atol=1e-7)
+        self.assertEqual(invalidated.diagnostics['reason'], 'velocity_warmup_model_invalidated')
+        # A subsequent miss must never resurrect the pre-impact falling arc.
+        lost = predictor.step(np.zeros(3), np.zeros(3), False, 1.06, 1.06)
+        self.assertFalse(lost.valid)
+
 
 if __name__ == "__main__":
     unittest.main()

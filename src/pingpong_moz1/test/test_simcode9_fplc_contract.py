@@ -20,7 +20,7 @@ import mujoco
 import pytest
 
 from pingpong_controller.fplc_deployment import (
-    FPLC_CONTRACTS, FPLC_PROFILES, REPO_ROOT, fplc_assets,
+    FPLC_CONTRACTS, FPLC_PROFILES, SIMCODE10_PROFILES, SIMCODE11_PROFILES, REPO_ROOT, fplc_assets,
     fplc_workspace_intersection,
 )
 from pingpong_controller.fplc_policy import FPLCPolicyController
@@ -206,15 +206,25 @@ def test_authenticated_actor_and_manifest(controller):
         params = _flatten_params(_CheckpointUnpickler(handle).load()['params'])
     _predict(controller)
     x = controller.last_obs.astype(np.float64)
-    for layer in ('l1', 'l2', 'out'):
+    for layer in (('l1', 'l2', 'l3', 'out') if controller._expected_obs_dim == 120 else ('l1', 'l2', 'out')):
         x = x @ np.asarray(params[f'pi/{layer}/w'], dtype=np.float64) + np.asarray(
             params[f'pi/{layer}/b'], dtype=np.float64)
         if layer != 'out':
             x = np.tanh(x)
+    if 'teacher_pi/l1/w' in params:
+        teacher = controller.last_obs.astype(np.float64)
+        for layer in ('l1', 'l2', 'out'):
+            teacher = teacher @ np.asarray(params[f'teacher_pi/{layer}/w'], dtype=np.float64) + np.asarray(
+                params[f'teacher_pi/{layer}/b'], dtype=np.float64)
+            if layer != 'out':
+                teacher = np.tanh(teacher)
+        authority = min(controller.last_obs[-2:]) * 20.
+        gate = np.clip((authority - 2.) / float(params['wind_pose_bound_gate_v1']), 0., 1.)
+        x = teacher + gate * (np.clip(teacher, -1, 1) - teacher) + gate * params['residual_action_scale'] * np.tanh(x)
     np.testing.assert_allclose(controller.last_action, x, atol=3e-6, rtol=1e-6)
     assert controller._expected_obs_dim == FPLC_CONTRACTS[profile]['actor_dim']
     assert controller.pose_is_safe(controller.warm_arm_q)
-    assert not controller.pose_is_safe(controller.warm_arm_q, fplc_workspace_intersection(REAL_LIMITS))
+    assert controller.pose_is_safe(controller.warm_arm_q, fplc_workspace_intersection(REAL_LIMITS))
     np.testing.assert_array_equal(controller.episode_target_xy, np.array([0, -.49], np.float32))
 
 
@@ -238,11 +248,13 @@ def test_observation_history_reset_and_fractional_camera_clock(controller):
     for tick in (1, 2):  # 90/200 fractional clock refreshes next at tick 3.
         _predict(controller, direct_ball_position_m=np.full(3, tick), direct_ball_age_s=.030)
         np.testing.assert_array_equal(controller.ball_history[0, 0], original_direct)
-        assert controller.age_history[0, 0] == pytest.approx(.012 + tick * .005)
+        assert controller.age_history[0, 0] == pytest.approx(
+            (0. if controller.contract.get('actor_ball_age_mode') == 'native_refresh_clock' else .012) + tick * .005)
     fresh_direct = np.array([.015, -.485, 1.17], np.float32)
     _predict(controller, direct_ball_position_m=fresh_direct, direct_ball_age_s=.030)
     np.testing.assert_array_equal(controller.ball_history[0, 0], fresh_direct)
-    assert controller.age_history[0, 0] == pytest.approx(.030)
+    assert controller.age_history[0, 0] == pytest.approx(
+        0. if controller.contract.get('actor_ball_age_mode') == 'native_refresh_clock' else .030)
     q = controller.warm_arm_q
     pos, rot, *_ = controller._pose(q)
     pose = np.concatenate((pos, port.rotation_matrix_to_6d(rot[None])[0]))[None]
@@ -250,11 +262,11 @@ def test_observation_history_reset_and_fractional_camera_clock(controller):
                   q_ref_error=np.zeros((1, 7)), previous_action=np.zeros((1, 7)),
                   ball_positions=controller.ball_history, ball_ages=controller.age_history,
                   target_xy_m=np.array([[0, -.49]], np.float32))
-    if controller._expected_obs_dim == 72:
+    if controller._expected_obs_dim in (72, 114, 117, 120):
         reference = _source_functions('fixed_plane_v149.py', ['make_simple_position_observation'])
         expected = reference['make_simple_position_observation'](
             **common, racket_pose_now=pose, ball_position_valid=np.array([True]))[0]
-        np.testing.assert_array_equal(controller.last_obs, expected)
+        np.testing.assert_array_equal(controller.last_obs[:72], expected)
     else:
         reference = _source_functions('fixed_plane_v92.py', ['make_history_actor_observation'],
                                       {'HISTORY_LAGS_TICKS': tuple(range(8)), 'ACTOR_OBS_DIM': 137})
@@ -506,7 +518,7 @@ def test_invalid_inputs_and_direct_observed_flag(controller):
     _predict(controller)
     for _ in range(3):
         _predict(controller, ball_observed=False)
-    valid_index = 71 if controller._expected_obs_dim == 72 else 135
+    valid_index = 71 if controller._expected_obs_dim in (72, 114, 117, 120) else 135
     assert controller.last_obs[valid_index] == 0  # Valid forecast is not a direct observation.
 
 
@@ -589,13 +601,16 @@ def test_web_switch_and_forbidden_controls(probe):
         assert probe.controller.last_obs.size == FPLC_CONTRACTS[profile]['actor_dim']
         assert probe_module._policy_runtime_contract(probe.controller)['observationDim'] == probe.controller.last_obs.size
         assert probe.browser_config()['policy']['observationDim'] == probe.controller.last_obs.size
-        assert probe.browser_config()['eeBox']['z0'] == .95
-        assert probe.browser_config()['eeBox'] == probe_module.box_payload(
-            (-.1, .1), (-.6, -.4), (.95, 1.2))
+        expected_box = (((-.398, .398), (-.75, -.23), (.95, 1.2))
+                        if profile in ('fplc_gpu0_v325', 'fplc_gpu0_v325_u416') else
+                        ((-.15, .15), (-.6, -.35), (.95, 1.2)))
+        assert probe.browser_config()['eeBox'] == probe_module.box_payload(*expected_box)
         assert probe.reset_initial_pose_id == 'simcode9_native'
         np.testing.assert_array_equal(probe._current_reset_pose_q(), probe.controller.native_reset_arm_q)
         assert probe.browser_config()['resetInitialPoses']['selected'] == 'simcode9_native'
-        np.testing.assert_allclose(np.rad2deg(probe.controller.rp_outer), [2., 2.], atol=1e-6)
+        np.testing.assert_allclose(np.rad2deg(probe.controller.rp_outer),
+            [probe.controller.contract['env_contract'][key] for key in
+             ('cartesian_pose_roll_limit_deg', 'cartesian_pose_pitch_limit_deg')], atol=2e-6)
 
 
 @pytest.mark.parametrize('fault', ['unsafe_target', 'stale_joint', 'changed_target', 'unsafe_measured',
@@ -616,6 +631,19 @@ def test_publish_boundary_latches_and_never_enters_limiter(probe, monkeypatch, f
                             lambda *args, **kw: pytest.fail('entered safety_limiter'), raising=False)
     _predict(probe.controller, arm_q=measured.copy())
     target = probe.controller.arm_cmd_q.copy()
+    if fault in {'outside_real_box_target', 'outside_real_box_measured'}:
+        original_pose = probe.controller._pose
+
+        def pose_outside_real_box(q, **kwargs):
+            pose = list(original_pose(q, **kwargs))
+            if np.array_equal(q, probe.controller.warm_arm_q):
+                pose[2] = pose[2].copy()
+                pose[2][0] = -.151
+            return tuple(pose)
+
+        # The warm pose is now inside the expanded box. Inject an X position
+        # just outside the real box while retaining a valid training pose.
+        monkeypatch.setattr(probe.controller, '_pose', pose_outside_real_box)
     if fault == 'unsafe_target':
         target[0] = 1.0
     elif fault == 'stale_joint':
@@ -640,7 +668,7 @@ def test_publish_boundary_latches_and_never_enters_limiter(probe, monkeypatch, f
     assert probe._hard_workspace_stop_active()
     assert probe.publish_rearm_required and probe.controller._fplc_requires_measured_reset
     assert probe.publish_rearm_details['faults']
-    assert probe.publish_rearm_details['maximumJointFeedbackAgeS'] == .010
+    assert probe.publish_rearm_details['maximumJointFeedbackAgeS'] == probe_module.FPLC_JOINT_FEEDBACK_MAX_AGE_S
     assert probe.publish_rearm_details['positionLimitsM'] == [list(pair) for pair in
         fplc_workspace_intersection(REAL_LIMITS)]
     assert not probe._publish_control_command(target, options, profile='normal')
@@ -774,10 +802,12 @@ def test_safe_publish_and_supervised_reset_never_enter_limiter(probe, monkeypatc
     np.testing.assert_array_equal(issued[-1], measured)
 
 
-@pytest.mark.parametrize('z_m,inside_real_box', [
-    (.96, True), (1.19, True), (.949, False), (1.201, False),
+@pytest.mark.parametrize('axis,position_m,inside_real_box', [
+    (0, -.149, True), (0, .149, True), (0, -.151, False), (0, .151, False),
+    (1, -.599, True), (1, -.351, True), (1, -.601, False), (1, -.349, False),
+    (2, .96, True), (2, 1.19, True), (2, .949, False), (2, 1.201, False),
 ])
-def test_real_z_envelope_is_independent_at_publish_boundary(probe, monkeypatch, z_m, inside_real_box):
+def test_real_envelope_at_publish_boundary(probe, monkeypatch, axis, position_m, inside_real_box):
     options = dataclasses.replace(_policy_options(probe), publish_commands=True)
     measured = probe.controller.native_reset_arm_q.copy()
     issued = []
@@ -792,16 +822,17 @@ def test_real_z_envelope_is_independent_at_publish_boundary(probe, monkeypatch, 
     target = _predict(probe.controller, arm_q=measured.copy())
     original_pose = probe.controller._pose
 
-    def pose_at_test_height(q, **kwargs):
+    def pose_at_test_position(q, **kwargs):
         pose = list(original_pose(q, **kwargs))
         pose[2] = pose[2].copy()
-        pose[2][2] = z_m
+        pose[2][axis] = position_m
         return tuple(pose)
 
-    # Isolate the physical height check from joint/attitude constraints.  All
-    # cases are outside training Z, but only two exceed the requested real box.
-    monkeypatch.setattr(probe.controller, '_pose', pose_at_test_height)
-    assert not probe.controller.pose_is_safe(target)
+    # Isolate physical position from joint/attitude constraints. Z cases also
+    # verify the real envelope remains independent of the training projection.
+    monkeypatch.setattr(probe.controller, '_pose', pose_at_test_position)
+    if axis == 2:
+        assert not probe.controller.pose_is_safe(target)
     assert probe.controller.pose_is_safe(
         target, fplc_workspace_intersection(REAL_LIMITS)) == inside_real_box
     assert probe._publish_control_command(target, options) == inside_real_box
@@ -900,6 +931,75 @@ def test_stale_atomic_actor_feedback_is_rejected_even_if_later_feedback_is_fresh
     assert probe.controller._fplc_requires_measured_reset
 
 
+@pytest.mark.parametrize('maximum_age_s,age_s,accepted', [
+    (.010, .012, False), (.015, .012, True), (.015, .018, False),
+    (.020, .018, True), (.020, .025, False)])
+def test_running_feedback_limit_is_shared_by_actor_and_publication(probe, monkeypatch, maximum_age_s, age_s, accepted):
+    monkeypatch.setattr(probe_module, 'FPLC_JOINT_FEEDBACK_MAX_AGE_S', maximum_age_s)
+    q = probe.controller.native_reset_arm_q.copy()
+    probe.ros_bridge = SimpleNamespace(
+        get_joint_feedback_coherent_with_timing=lambda: (
+            q.copy(), np.zeros(7), age_s, 'joint_state', 1., dict(jointSourceSequence=1)),
+        get_joint_feedback_with_age=lambda: (q.copy(), np.zeros(7), age_s, 'joint_state'),
+        get_joint_feedback=lambda: (q.copy(), np.zeros(7)),
+        get_cart_feedback=lambda: (None, None, None),
+        publish_right_arm_command=lambda q: None)
+    options = dataclasses.replace(_policy_options(probe), use_ros_state=True, publish_commands=True)
+    mode, reason, _conditions, _age, executed = probe._run_one_control_step(
+        np.array([0, -.49, 1.16]), np.array([0, 0, -.3]), True, .001, options)
+    assert executed is accepted, (mode, reason)
+    if accepted:
+        probe.command_stream_active = True
+        assert probe._publish_control_command(probe.controller.arm_cmd_q.copy(), options, profile='normal')
+    else:
+        assert mode == 'policy_feedback_hold'
+        assert probe.publish_rearm_details['maximumJointFeedbackAgeS'] == maximum_age_s
+
+
+@pytest.mark.parametrize('wait_succeeded,recovered_age_s,read_time,accepted', [
+    (True, .001, 50.004, True),
+    (False, .001, 50.004, True),
+    (False, .020, 50.004, False),
+    (False, .001, 50.006, False),
+])
+def test_publish_boundary_validates_recovered_sample_and_deadline(
+        probe, monkeypatch, wait_succeeded, recovered_age_s, read_time, accepted):
+    measured = probe.controller.native_reset_arm_q.copy()
+    published, waits = [], []
+    age = [.010539894]
+
+    def recover(**kwargs):
+        waits.append(kwargs['timeout_s'])
+        age[0] = recovered_age_s
+        return wait_succeeded
+
+    probe.ros_bridge = SimpleNamespace(
+        wait_for_joint_feedback=recover,
+        get_joint_feedback_with_age=lambda: (measured, np.zeros(7), age[0], 'test'),
+        publish_right_arm_command=lambda q: published.append(np.array(q)))
+    probe.command_stream_active = True
+    probe.control_tick_deadline_perf = 50.005
+    monkeypatch.setattr(probe_module.time, 'perf_counter', lambda: read_time)
+    monkeypatch.setattr(probe_module, 'FPLC_JOINT_FEEDBACK_MAX_AGE_S', .015)
+    options = dataclasses.replace(_policy_options(probe), publish_commands=True)
+    _predict(probe.controller, arm_q=measured.copy())
+    target = probe.controller.arm_cmd_q.copy()
+    assert probe._publish_control_command(target, options, profile='normal') is accepted
+    assert len(waits) == 1 and waits[0] <= .005
+    assert probe._hard_workspace_stop_active() is (not accepted)
+    if accepted:
+        np.testing.assert_allclose(published[0], target)
+    else:
+        assert probe.publish_rearm_details['feedbackWaitSucceeded'] is False
+        assert probe.publish_rearm_details['faults'] == ['joint_feedback_not_fresh']
+        # A final hold also requires fresh data: an old sample must not even
+        # supply a new hold target. A deadline-only fault can hold fresh q.
+        if recovered_age_s <= .010:
+            np.testing.assert_allclose(published[0], measured)
+        else:
+            assert not published
+
+
 @pytest.mark.parametrize('profile', FPLC_PROFILES)
 def test_launcher_config_only(profile):
     result = subprocess.run(['bash', str(REPO_ROOT / 'RUN_INTERACTIVE_POLICY_SAFETY_PROBE.sh')],
@@ -913,7 +1013,11 @@ def test_launcher_config_only(profile):
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'limiter=hard-disabled all_paths=true' in result.stdout
     assert f"[ProbeConfig] FPLC CPU threads openblas={os.environ.get('OPENBLAS_NUM_THREADS') or '1'}" in result.stdout
-    assert 'ee_x=-0.1,0.1 ee_y=-0.6,-0.4 ee_z=0.95,1.2' in result.stdout
+    expected_workspace = (
+        'ee_x=-0.398,0.398 ee_y=-0.75,-0.23 ee_z=0.95,1.2'
+        if profile in ('fplc_gpu0_v325', 'fplc_gpu0_v325_u416') else
+        'ee_x=-0.15,0.15 ee_y=-0.6,-0.35 ee_z=0.95,1.2')
+    assert expected_workspace in result.stdout
     assert 'reset_initial_pose=simcode9_native' in result.stdout
     assert f'policy observation={FPLC_CONTRACTS[profile]["actor_dim"]}D' in result.stdout
 
@@ -934,9 +1038,9 @@ def test_launcher_rejects_invalid_contract_overrides(override):
 
 
 def test_workspace_malformed_and_empty_intersections_fail_closed():
-    assert fplc_workspace_intersection(REAL_LIMITS) == ((-.1, .1), (-.6, -.4), (.95, 1.2))
+    assert fplc_workspace_intersection(REAL_LIMITS) == ((-.15, .15), (-.6, -.35), (.95, 1.2))
     assert fplc_workspace_intersection(((-1., 1.), (-1., 1.), (0., 2.))) == (
-        (-.1, .1), (-.6, -.4), (.95, 1.2))
+        (-.15, .15), (-.6, -.35), (.95, 1.2))
     smaller = ((-.02, .01), (-.51, -.49), (1.01, 1.10))
     assert fplc_workspace_intersection(smaller) == smaller
     # Valid explicit physical sub-boxes also retain the requested Z extension.
@@ -959,7 +1063,9 @@ def test_frontend_javascript_and_colcon_ignore(tmp_path):
     control_function = re.search(r'function syncPolicyModelControl\(\) \{.*?\n\}', html, re.S).group()
     script_file.write_text('''
 const policyProfileEl = {value: 'fplc_v220_s17_u839_20261013_r1'};
-const inputs = {workspaceSafetyMode: {value: 'off'}};
+const document = {getElementById: () => null};
+const inputs = {workspaceSafetyMode: {value: 'off'}, obsHz: {value: '90'}};
+const CONFIG = {policy: {defaultProfile: 'fplc_gpu1_v172'}, defaultBallObservationRateHz: 120};
 const policyModelEl = {};
 const policyModelRowEl = {classList: {toggle: () => {}}};
 const resetInitialPoseEl = {value: 'default_2_horizontal', options: [
@@ -967,6 +1073,7 @@ const resetInitialPoseEl = {value: 'default_2_horizontal', options: [
 function setControlDisabled(el, value) { el.disabled = value; }
 ''' + control_function + '''
 syncPolicyModelControl();
+if (inputs.obsHz.value !== '120' || !inputs.obsHz.disabled) process.exit(1);
 if (inputs.workspaceSafetyMode.value !== 'position' ||
     !inputs.workspaceSafetyMode.disabled || !policyModelEl.disabled ||
     resetInitialPoseEl.value !== 'simcode9_native' || !resetInitialPoseEl.disabled ||
@@ -1006,9 +1113,11 @@ if (!poseMessage.includes('实测位姿越界') || !poseMessage.includes('4.006'
 ''')
     subprocess.run(['node', str(script_file)], check=True, capture_output=True)
     assert (REPO_ROOT / 'simcode9/COLCON_IGNORE').is_file()
+    assert (REPO_ROOT / 'simcode10/COLCON_IGNORE').is_file()
+    assert (REPO_ROOT / 'simcode11/COLCON_IGNORE').is_file()
 
 
-@pytest.mark.parametrize('profile', ['fplc_gpu1_v172', 'fplc_v220_s17_u839_20261013_r1'])
+@pytest.mark.parametrize('profile', ['fplc_gpu1_v172', 'fplc_v220_s17_u839_20261013_r1', *SIMCODE10_PROFILES, *SIMCODE11_PROFILES])
 def test_cpu_mirror_carries_direct_observation_separately(profile):
     config = sim_mirror_config_for_policy_profile(SimMirrorConfig(
         model_path=fplc_assets(profile)[0],

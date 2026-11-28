@@ -1,0 +1,117 @@
+{
+  "name": "V325 wind-early r5_fast u6247 candidate",
+  "public_version": "V325-wind-early-r5fast-u6247",
+  "saved_at": "2026-11-27T22:02:00+08:00",
+  "status": "Frozen 1280-env x 60s deterministic benchmark 100.00% (1280/1280) across Clean, Constant Early/Late, and Dynamic Early/Late; ready for real-robot reference integration",
+  "actual_update": 6247,
+  "stage": 15,
+  "true_step": 6165102592,
+  "optimizer_steps": {
+    "opt_t": 506763,
+    "actor_t": 45734
+  },
+  "lineage": [
+    "V325 S15 u14400 (fd9def8f5fdb511e1543cbcca264e0021738ff07c6425e8d393cb1c240918e97)",
+    "V325 single5 u416 provisional baseline (97c89251fe8a54b193f7a9348799cf3fab58b487322a5cdfc27cc51fe2a49dce)",
+    "wind-early r1..r3 -> r4 (u5247) -> r5 stratified wide onset (u5608, 0656ba8fbd4e7fc6872a64a634ce816a199d0bc247c070b9c65f46f678eae8b1) -> r5_fast u6247"
+  ],
+  "files": {
+    "model.pkl": {
+      "source": "pingpong_controller/outputs/rl_sim/fplc_wind_early_20261127_r5_fast/interrupted_u00006247.pkl",
+      "bytes": 4556748,
+      "sha256": "e9591ce1eabb2100be31a4a73e58c8a1b2c4bc97c3100edfa5fdf49698ab9666"
+    },
+    "evaluation_1280x60s.json": {
+      "source": "pingpong_controller/outputs/rl_sim/fplc_wind_early_20261127_r5_fast/benchmark_r5fast_u6006_vs_u6247.json",
+      "sha256": "708265da3f9a117336d29adad928c7143b2d609f4a786dd86f788ee3a839dc97"
+    }
+  },
+  "architecture": {
+    "actor_critic_action": [120, 453, 7],
+    "actor_layers": {
+      "l1": [120, 282],
+      "l2": [282, 282],
+      "l3": [282, 282],
+      "out": [282, 7]
+    },
+    "activation": "tanh (l1, l2, l3), linear (out)",
+    "requires_actor_runtime": "single5_windfeature120_high_v2",
+    "residual_network": false,
+    "BC": 0,
+    "privileged_wind_in_actor": false
+  },
+  "control_and_physics": {
+    "control_dt_s": 0.005,
+    "simulation_dt_s": 0.001,
+    "ball_obs_hz": 90,
+    "ball_mass_kg": 0.004,
+    "RP_limit_deg": 5.0,
+    "workspace_xyz_m": {
+      "x": [-0.348, 0.348],
+      "y": [-0.700, -0.280],
+      "z": [1.00, 1.15]
+    },
+    "arm_vel_limit_deg_s": [210, 210, 240, 240, 300, 300, 300],
+    "trained_wind_domain": {
+      "max_speed_m_s": 1.6,
+      "wind_y_nonpositive": true,
+      "x_axis_half_angle_deg": 45.0,
+      "onset_mode": "stratified_wide (post-hit-5 delays: early 5..100, mid 500..2000, late 2000..15000 steps; 1.0s ramp)"
+    }
+  },
+  "reference_source_sha256": {
+    "pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+    "pingpong_controller/tools/rl_sim/fixed_plane_wind_history.py": "7db5cd69cd6238edc656a2e3be1d55eac646c0961a7020382d39affa3a2d3558",
+    "pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/single5_runtime.py": "7ca619f8218ef58dc1137787becc01f5a8816ffaf4333579116c4aedda54226e",
+    "pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/observed_force.py": "9c004054d77844c0b52766b31f1536ff002cd89e55531a928782920f69c12d23",
+    "pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/wind_features.py": "770b20d5ae9026f189394f54c2d66c4cc42af84620159ac2e235a3241be8c92c",
+    "pingpong_controller/outputs/rl_sim/v325_single5_early_stability_20261126_r1/wide_onset.py": "c3eeb78e030b55e6e314af86fd751dfdb0a7509a5f3ace85fec20e41898dc9c4",
+    "pingpong_controller/outputs/rl_sim/v325_single5_early_stability_20261126_r1/TRAIN_PLAN_R5_FAST.json": "5bf5b6872728f1cbe2b1591bf2ef7341bcf50d1bc754e480fc025290afdf8cd2"
+  },
+  "frozen_benchmark_1280x60s_summary": {
+    "seed": 2026112701,
+    "pose_deg": 5.0,
+    "overall_strict_60s": "1280/1280 (100.00%)",
+    "clean": {
+      "strict_60s_pct": 100.0,
+      "h1_5_center_rms_mm": 2.99,
+      "h6_15_center_rms_mm": 4.97,
+      "steady_6_115_center_rms_mm": 4.03,
+      "steady_in_band_pct": 99.95,
+      "steady_racket_vxy_rms_m_s": 0.0345
+    },
+    "constant_early": {
+      "strict_60s_pct": 100.0,
+      "peak_1p6_strict_60s_pct": 100.0,
+      "dir08_strict_60s_pct": 100.0,
+      "h6_15_center_rms_mm": 6.10,
+      "steady_6_115_center_rms_mm": 3.76,
+      "steady_in_band_pct": 99.91,
+      "steady_racket_vxy_rms_m_s": 0.0376
+    },
+    "dynamic_early": {
+      "strict_60s_pct": 100.0,
+      "slow_ou_strict_60s_pct": 100.0,
+      "gust_strict_60s_pct": 100.0,
+      "h6_15_center_rms_mm": 7.04,
+      "steady_6_115_center_rms_mm": 5.99,
+      "steady_in_band_pct": 99.56,
+      "steady_racket_vxy_rms_m_s": 0.0367
+    },
+    "constant_late_10_20s": {
+      "strict_60s_pct": 100.0,
+      "peak_1p6_strict_60s_pct": 100.0,
+      "h6_15_center_rms_mm": 4.89,
+      "steady_6_115_center_rms_mm": 3.84,
+      "steady_in_band_pct": 99.92,
+      "steady_racket_vxy_rms_m_s": 0.0366
+    },
+    "dynamic_late_10_20s": {
+      "strict_60s_pct": 100.0,
+      "h6_15_center_rms_mm": 4.98,
+      "steady_6_115_center_rms_mm": 5.52,
+      "steady_in_band_pct": 99.68,
+      "steady_racket_vxy_rms_m_s": 0.0359
+    }
+  }
+}

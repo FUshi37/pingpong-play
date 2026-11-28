@@ -1,0 +1,182 @@
+{
+  "schema_version": "moz1_base_identified_params_v1",
+  "generated_utc": "2026-11-28T11:03:03Z",
+  "kinematic_type": "omnidirectional_4wheel",
+  "axes": {
+    "vx": {
+      "identified": true,
+      "n_train_trials": 8,
+      "n_heldout_trials": 7,
+      "delay_s": 0.042644,
+      "delay_xcorr_s": 0.08,
+      "delay_onset10_s": 0.019999,
+      "time_constant_s": 0.091344,
+      "gain": 1.00028,
+      "v_max": 0.3506,
+      "a_acc_max": 2.7994,
+      "a_brake_max": 2.8846,
+      "overshoot_frac": 0.01219,
+      "brake_time_s": 0.26,
+      "brake_distance": 0.0266,
+      "train_rmse": 0.00663,
+      "heldout_rmse": 0.00666,
+      "heldout_p95": 0.00802,
+      "heldout_max_err": 0.06339,
+      "heldout_r2": 0.99607
+    },
+    "vy": {
+      "identified": true,
+      "n_train_trials": 8,
+      "n_heldout_trials": 7,
+      "delay_s": 0.042685,
+      "delay_xcorr_s": 0.08,
+      "delay_onset10_s": 0.0,
+      "time_constant_s": 0.089524,
+      "gain": 0.99972,
+      "v_max": 0.3506,
+      "a_acc_max": 2.7474,
+      "a_brake_max": 2.7726,
+      "overshoot_frac": 0.01405,
+      "brake_time_s": 0.26,
+      "brake_distance": 0.0266,
+      "train_rmse": 0.00712,
+      "heldout_rmse": 0.00687,
+      "heldout_p95": 0.00729,
+      "heldout_max_err": 0.0641,
+      "heldout_r2": 0.99526
+    },
+    "wz": {
+      "identified": true,
+      "n_train_trials": 8,
+      "n_heldout_trials": 7,
+      "delay_s": 0.039186,
+      "delay_xcorr_s": 0.08,
+      "delay_onset10_s": 0.0,
+      "time_constant_s": 0.085635,
+      "gain": 0.99967,
+      "v_max": 0.5518,
+      "a_acc_max": 5.2822,
+      "a_brake_max": 5.6002,
+      "overshoot_frac": 0.01612,
+      "brake_time_s": 0.28,
+      "brake_distance": 0.0426,
+      "train_rmse": 0.00265,
+      "heldout_rmse": 0.00415,
+      "heldout_p95": 0.00338,
+      "heldout_max_err": 0.08769,
+      "heldout_r2": 0.99953
+    }
+  },
+  "cross_coupling_matrix_3x3": [
+    [
+      0.90824,
+      -0.00985,
+      -0.00399
+    ],
+    [
+      -0.00766,
+      0.90083,
+      -0.00254
+    ],
+    [
+      -0.01802,
+      -0.00211,
+      0.9477
+    ]
+  ],
+  "cross_coupling_diagnostics": {
+    "gain_vx": 0.9082,
+    "gain_vy": 0.9008,
+    "gain_wz": 0.9477,
+    "max_off_diagonal_coupling": 0.018
+  },
+  "racket_jitter_model": {
+    "imu_included": true,
+    "normal_deg_rms_idle": 0.13432,
+    "pos_mm_rms_idle": 0.0001,
+    "normal_deg_per_mps2": 0.19867,
+    "normal_deg_per_radps2": 0.20403,
+    "normal_deg_p95_by_tier": {
+      "low": 0.9137,
+      "med": 0.9475,
+      "high": 0.0
+    },
+    "normal_deg_rms_by_tier": {
+      "low": 0.4943,
+      "med": 0.4998,
+      "high": 0.0
+    },
+    "normal_deg_max_by_tier": {
+      "low": 1.4995,
+      "med": 2.0764,
+      "high": 0.0
+    },
+    "pos_mm_p95_by_tier": {
+      "low": 0.0137,
+      "med": 0.0199,
+      "high": 0.0
+    }
+  },
+  "arm_base_concurrency": {
+    "has_s5_concurrency_trials": true,
+    "arm_dt_p50_ms": 4.9999,
+    "arm_dt_p95_ms": 5.1729,
+    "arm_dt_p99_ms": 5.3731,
+    "base_dt_p50_ms": 20.0,
+    "base_dt_p95_ms": 20.2032,
+    "base_dt_p99_ms": 20.4704,
+    "drop_rate": 0.0003,
+    "zoh_hold_ratio": 0.0,
+    "blocking_detected": false
+  },
+  "odom_vs_mocap": {
+    "available": true,
+    "mocap_mode": "rigid_body_lever_arm_compensated",
+    "velocity_scale_error_frac": 0.0294,
+    "yaw_rate_scale_error_frac": 0.05311,
+    "position_drift_m_per_m": 0.00851,
+    "relative_delay_mocap_minus_odom_s": 0.02,
+    "lever_arm_calibration": {
+      "calibrated": true,
+      "n_wz_trials_used": 9,
+      "lever_arm_xy_m": [
+        0.09622,
+        -0.25494
+      ],
+      "lever_arm_radius_m": 0.27249,
+      "fit_residual_mm": 0.827
+    },
+    "recommended_primary_source": "mx_robot_state_odom_verified_against_mocap"
+  },
+  "clock_offsets_s": {
+    "arm_state": {
+      "median_s": -1.13215,
+      "min_s": -1.141358,
+      "max_s": -1.13097,
+      "large_bias_separated": true
+    },
+    "base_state": {
+      "median_s": -1.13215,
+      "min_s": -1.141358,
+      "max_s": -1.13097,
+      "large_bias_separated": true
+    }
+  },
+  "source_run_hashes": {
+    "s0_idle_noise": "23047e95344d4c3213620a021252dc183cfaabc5bda31f47bbef9475c4049d45",
+    "s1_kinematic_low": "16248541bcbfc3ad6324f7bf7e8f987c6aa134bcda94d862b037d2c42684c560",
+    "s2_step_ramp_med": "43a9f3c6dc4112ab5e6b9632b63b2b80c2093531c9ef9d3e1185d93d44da5ce7",
+    "s4_combined_turn": "f704e9a088b0a9a0c60d0176d26772154e7f18024ac4837accc650cdc342de16",
+    "s5_arm_concurrency": "ef8ea714047cf5c5a2170831aea0398212a546beada2c57519c7168bd0a546ca"
+  },
+  "simulation_modeling_hints": {
+    "actuator_model": "fopdt_with_asymmetric_accel_brake_clamp",
+    "frame": "body_frame_se2_twist_to_world",
+    "omni_wheel_half_xy_m": [
+      0.2423,
+      0.2423
+    ],
+    "recommended_sim_dt_s": 0.002,
+    "recommended_control_dt_s": 0.02
+  }
+}

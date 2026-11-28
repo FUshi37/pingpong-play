@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from pingpong_controller.fplc_deployment import (
-    FPLC_CONTRACTS, REPO_ROOT, fplc_assets, fplc_real_workspace_limits,
+    FPLC_CONTRACTS, REPO_ROOT, SIMCODE12_PROFILES, fplc_assets, fplc_real_workspace_limits,
     fplc_workspace_for_profile, fplc_workspace_intersection,
 )
 from pingpong_controller.mjx_rl_policy import _CheckpointUnpickler
@@ -45,7 +45,7 @@ def test_workspace_matches_actual_checkpoint_and_release():
 def test_old_models_keep_their_configured_intersection():
     smaller = ((-.04, .03), (-.55, -.45), (1.01, 1.10))
     for profile in FPLC_CONTRACTS:
-        if profile not in (PROFILE, 'fplc_gpu0_v325_u416'):
+        if profile not in (PROFILE, 'fplc_gpu0_v325_u416', *SIMCODE12_PROFILES):
             assert fplc_workspace_for_profile(profile, REAL_LIMITS) == OLD_BOX
             assert fplc_workspace_for_profile(profile, smaller) == smaller
     assert fplc_workspace_intersection(TRAINING_BOX, profile=PROFILE) == TRAINING_BOX

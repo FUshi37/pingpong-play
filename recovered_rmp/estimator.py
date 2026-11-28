@@ -50,10 +50,21 @@ class ConstantAccelerationKalman:
     def acceleration(self) -> FloatArray:
         return self.x[:, 2].copy()
 
-    def reset(self, measurement: ArrayLike, *, velocity: ArrayLike | None = None, acceleration: ArrayLike | None = None) -> None:
+    def reset(
+        self,
+        measurement: ArrayLike,
+        *,
+        velocity: ArrayLike | None = None,
+        acceleration: ArrayLike | None = None,
+        covariance: ArrayLike | None = None,
+    ) -> None:
         value = np.asarray(measurement, dtype=float).reshape(-1)
         if value.size != self.dimensions:
             raise ValueError("measurement has the wrong dimension")
+        if covariance is not None:
+            covariance = np.asarray(covariance, dtype=float)
+            if covariance.shape != (3, 3) or not np.all(np.isfinite(covariance)):
+                raise ValueError("reset covariance must be a finite 3x3 matrix")
         self.x.fill(0.0)
         self.x[:, 0] = value
         if velocity is not None:
@@ -63,8 +74,11 @@ class ConstantAccelerationKalman:
         # Exact initSingleJointFilter initialization: only the measured
         # position state starts with covariance 0.01.  Velocity and
         # acceleration covariance start at zero and are introduced through Q.
-        self.P.fill(0.0)
-        self.P[:, 0, 0] = 0.01
+        if covariance is None:
+            self.P.fill(0.0)
+            self.P[:, 0, 0] = 0.01
+        else:
+            self.P[:] = covariance
         self.initialized = True
 
     def predict(self) -> None:

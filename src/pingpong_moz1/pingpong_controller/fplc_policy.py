@@ -16,7 +16,7 @@ except ImportError:
     mj = None
 
 from pingpong_controller.fplc_deployment import (
-    FPLC_CONTRACTS, fplc_real_roll_pitch_limit_deg, fplc_assets,
+    FPLC_CONTRACTS, fplc_real_roll_pitch_limit_deg, fplc_assets, fplc_obs_wind_max_m_s,
 )
 from pingpong_controller.fplc_numpy import (
     ContactTargetConfig, advance_position_history, compute_dynamic_contact_target,
@@ -52,6 +52,10 @@ class FPLCPolicyController(MjxRLPolicyController):
         if observation_profile not in FPLC_CONTRACTS:
             raise RuntimeError(f"unknown FPLC profile {observation_profile!r}")
         self.contract = FPLC_CONTRACTS[observation_profile]
+        self.obs_wind_max_m_s = fplc_obs_wind_max_m_s(observation_profile)
+        self.wind_feature_deadband_m_s = float(self.contract.get('wind_feature_deadband_m_s', 1.25))
+        self.wind_feature_activation_width_m_s = float(
+            self.contract.get('wind_feature_activation_width_m_s', .35))
         if self.contract.get('actor_ball_age_mode', 'measurement_age') not in (
                 'measurement_age', 'native_refresh_clock'):
             raise RuntimeError('FPLC actor ball-age mode is not implemented')
@@ -209,9 +213,12 @@ class FPLCPolicyController(MjxRLPolicyController):
         if self.contract['actor_dim'] == 120:
             if (set(payload['params']) != {'pi', 'v', 'log_std'}
                     or set(payload['params']['pi']) != {'l1', 'l2', 'l3', 'out'}
-                    or self._pi_weights['l3_w'].shape != (282, 282)
-                    or self.contract['fixed_pose_override_deg'] != 5.):
-                raise RuntimeError('FPLC u416 requires its single 120/282/282/282/7 actor')
+                    or self._pi_weights['l3_w'].shape != (282, 282)):
+                raise RuntimeError('FPLC single5 requires a single 120/282/282/282/7 actor')
+            pose = self.contract['fixed_pose_override_deg']
+            if (cfg['cartesian_pose_roll_limit_deg'] != pose
+                    or cfg['cartesian_pose_pitch_limit_deg'] != pose):
+                raise RuntimeError('FPLC fixed pose does not match the frozen actor contract')
         if self.contract['actor_dim'] == 114:
             # The saved curriculum target is20 degrees; per-episode startup
             # authority is separately scheduled by WindStartupAuthority.
@@ -555,7 +562,10 @@ class FPLCPolicyController(MjxRLPolicyController):
                 if self._expected_obs_dim == 120:
                     observation = encode_single5(
                         np.concatenate((observation, suffix[:40])),
-                        self.wind_startup.features(tick))
+                        self.wind_startup.features(tick),
+                        max_wind_m_s=self.obs_wind_max_m_s,
+                        deadband_m_s=self.wind_feature_deadband_m_s,
+                        activation_width_m_s=self.wind_feature_activation_width_m_s)
                 else:
                     observation = np.concatenate((observation, suffix))
         elif self._expected_obs_dim == 156:

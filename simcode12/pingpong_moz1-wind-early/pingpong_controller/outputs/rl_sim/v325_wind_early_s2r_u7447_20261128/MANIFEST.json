@@ -1,0 +1,221 @@
+{
+  "name": "V325 wind-early Sim2Real s2r_v2 S09 u7447 candidate",
+  "public_version": "V325-wind-early-s2r-u7447",
+  "saved_at": "2026-11-28T14:40:00+08:00",
+  "status": "Frozen 1280-env x 60s P_warm (1280/1280 = 100.00% strict) + 1280-env x 60s P_cold (1280/1280 = 100.00% phys) + 640-env x 60s Real-Robot Sim2Real Twin (640/640 = 100.00% strict); 100% drop-in compatible with existing u6247 robot deployment stack",
+  "actual_update": 7447,
+  "stage": 15,
+  "s2r_curriculum_stage": {
+    "id": 9,
+    "name": "D2_dr65",
+    "warm_w": 1.0,
+    "dr_scale": 0.65
+  },
+  "true_step": 6794248192,
+  "optimizer_steps": {
+    "opt_t": 544853,
+    "actor_t": 37706
+  },
+  "lineage": [
+    "V325 S15 u14400 (fd9def8f5fdb511e1543cbcca264e0021738ff07c6425e8d393cb1c240918e97)",
+    "V325 single5 u416 provisional baseline (97c89251fe8a54b193f7a9348799cf3fab58b487322a5cdfc27cc51fe2a49dce)",
+    "V325 wind-early r5_fast u6247 (e9591ce1eabb2100be31a4a73e58c8a1b2c4bc97c3100edfa5fdf49698ab9666)",
+    "V325 wind-early s2r_v2 11-stage auto-curriculum S00..S09 u7447"
+  ],
+  "files": {
+    "model.pkl": {
+      "source": "pingpong_controller/outputs/rl_sim/fplc_wind_early_20261128_s2r_v2/milestone_S09_D2_dr65_u00007447.pkl",
+      "bytes": 4542345,
+      "sha256": "a40da56cefb1cc6a8928a8199667cf1379a0bbdac9326949befd15a3bc089bcd"
+    },
+    "evaluation_1280x60s.json": {
+      "sha256": "06445642cbe5db1c085a8ad12133339b96d05aba8811dc07f66048afccd77891"
+    },
+    "evaluation_s2r_60s.json": {
+      "sha256": "5696747d68a6a79a356446db0793a245c6a3c37b34c0778956a722a6456d737e"
+    }
+  },
+  "architecture": {
+    "actor_critic_action": [
+      120,
+      453,
+      7
+    ],
+    "actor_layers": {
+      "l1": [
+        120,
+        282
+      ],
+      "l2": [
+        282,
+        282
+      ],
+      "l3": [
+        282,
+        282
+      ],
+      "out": [
+        282,
+        7
+      ]
+    },
+    "activation": "tanh (l1, l2, l3), linear (out)",
+    "requires_actor_runtime": "single5_windfeature120_high_v2",
+    "residual_network": false,
+    "BC": 0,
+    "privileged_wind_in_actor": false,
+    "drop_in_compatible_with": "V325-wind-early-r5fast-u6247"
+  },
+  "control_and_physics": {
+    "control_dt_s": 0.005,
+    "simulation_dt_s": 0.001,
+    "ball_obs_hz": 90,
+    "ball_mass_kg": 0.004,
+    "RP_limit_deg": 5.0,
+    "workspace_xyz_m": {
+      "x": [
+        -0.348,
+        0.348
+      ],
+      "y": [
+        -0.7,
+        -0.28
+      ],
+      "z": [
+        1.0,
+        1.15
+      ]
+    },
+    "arm_vel_limit_deg_s": [
+      210,
+      210,
+      240,
+      240,
+      300,
+      300,
+      300
+    ],
+    "sim2real_training_fixes": [
+      "RMP 200 Hz steady-state Kalman covariance P_warm (100% RealTwin, gain-spaced PSD curriculum S00..S07)",
+      "Omnidirectional gravity/frame tilt DR explicitly covering +Y (+0.08..+0.20 m/s^2) and g_z (-9.85..-9.60)",
+      "Hidden mocap observation latency (0..20 ms) without inflating obs[61:69]",
+      "Static mocap XYZ bias (bz -16..+4 mm, RealTwin -15..-8 mm) + per-step jitter recomputing obs[114:120]",
+      "Contact restitution DR (pair_solref damping), +/-6 mm spawn jitter, RMP kp/kd DR, asymmetric clean critic"
+    ],
+    "trained_wind_domain": {
+      "max_speed_m_s": 1.6,
+      "wind_y_nonpositive": true,
+      "x_axis_half_angle_deg": 45.0,
+      "onset_mode": "stratified_wide (post-hit-5 delays: early 5..100, mid 500..2000, late 2000..15000 steps; 1.0s ramp)"
+    }
+  },
+  "reference_source_sha256": {
+    "pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+    "pingpong_controller/tools/rl_sim/fixed_plane_wind_history.py": "7db5cd69cd6238edc656a2e3be1d55eac646c0961a7020382d39affa3a2d3558",
+    "pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/single5_runtime.py": "7ca619f8218ef58dc1137787becc01f5a8816ffaf4333579116c4aedda54226e",
+    "pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/observed_force.py": "9c004054d77844c0b52766b31f1536ff002cd89e55531a928782920f69c12d23",
+    "pingpong_controller/outputs/rl_sim/v325_single5_windfeature_high_train_20261124_r1/wind_features.py": "770b20d5ae9026f189394f54c2d66c4cc42af84620159ac2e235a3241be8c92c",
+    "pingpong_controller/outputs/rl_sim/v325_single5_early_stability_20261126_r1/sim2real_r5.py": "6a074f3d0cabd90af138a75f5dc9c2489cfed55d9ec4f25cd86934b40937a0bc",
+    "pingpong_controller/outputs/rl_sim/v325_single5_early_stability_20261126_r1/train_sim2real_r5.py": "4d092ccad0cb52945b337394eb16fe890999a25190c34212d3f47cc6562de121",
+    "pingpong_controller/outputs/rl_sim/v325_single5_early_stability_20261126_r1/TRAIN_PLAN_S2R.json": "58e83eddf100406933a416072b14f31204fe7f1adacefafc69018a66c2d4e710"
+  },
+  "frozen_benchmark_1280x60s_Pwarm_summary": {
+    "seed": 2026112701,
+    "pose_deg": 5.0,
+    "overall_strict_60s": "1280/1280 (100.00%)",
+    "clean": {
+      "strict_60s_pct": 100.0,
+      "h1_5_center_rms_mm": 5.76,
+      "h6_15_center_rms_mm": 6.23,
+      "steady_6_115_center_rms_mm": 4.06,
+      "steady_in_band_pct": 98.28
+    },
+    "constant_early": {
+      "strict_60s_pct": 100.0,
+      "h1_5_center_rms_mm": 5.77,
+      "h6_15_center_rms_mm": 6.73,
+      "steady_6_115_center_rms_mm": 3.8,
+      "steady_in_band_pct": 98.31
+    },
+    "dynamic_early": {
+      "strict_60s_pct": 100.0,
+      "h1_5_center_rms_mm": 5.76,
+      "h6_15_center_rms_mm": 6.66,
+      "steady_6_115_center_rms_mm": 4.15,
+      "steady_in_band_pct": 97.51
+    },
+    "constant_late": {
+      "strict_60s_pct": 100.0,
+      "h1_5_center_rms_mm": 5.79,
+      "h6_15_center_rms_mm": 6.22,
+      "steady_6_115_center_rms_mm": 3.84,
+      "steady_in_band_pct": 98.4
+    },
+    "dynamic_late": {
+      "strict_60s_pct": 100.0,
+      "h1_5_center_rms_mm": 5.81,
+      "h6_15_center_rms_mm": 6.34,
+      "steady_6_115_center_rms_mm": 4.11,
+      "steady_in_band_pct": 97.96
+    }
+  },
+  "frozen_benchmark_1280x60s_Pcold_summary": {
+    "overall_phys_60s": "1280/1280 (100.00%)",
+    "overall_strict_60s_pct": 97.19
+  },
+  "real_robot_twin_640x60s_summary": {
+    "overall_strict_60s": "640/640 (100.00%)",
+    "scenarios": {
+      "RealExact_0w": {
+        "n_envs": 128,
+        "phys_60s_pct": 100.0,
+        "strict_60s_pct": 100.0,
+        "mean_duration_s": 60.0,
+        "mean_hits": 112.9,
+        "tilt_avg_deg": 2.73,
+        "tilt_max_deg": 5.18,
+        "center_rms_mm": 6.14
+      },
+      "RealHard_0w": {
+        "n_envs": 128,
+        "phys_60s_pct": 100.0,
+        "strict_60s_pct": 100.0,
+        "mean_duration_s": 60.0,
+        "mean_hits": 107.5,
+        "tilt_avg_deg": 2.75,
+        "tilt_max_deg": 5.18,
+        "center_rms_mm": 7.53
+      },
+      "RealSoft_0w": {
+        "n_envs": 128,
+        "phys_60s_pct": 100.0,
+        "strict_60s_pct": 100.0,
+        "mean_duration_s": 60.0,
+        "mean_hits": 82.8,
+        "tilt_avg_deg": 2.68,
+        "tilt_max_deg": 5.14,
+        "center_rms_mm": 4.92
+      },
+      "RealExact_W16_Const": {
+        "n_envs": 128,
+        "phys_60s_pct": 100.0,
+        "strict_60s_pct": 100.0,
+        "mean_duration_s": 60.0,
+        "mean_hits": 104.3,
+        "tilt_avg_deg": 2.68,
+        "tilt_max_deg": 5.47,
+        "center_rms_mm": 6.03
+      },
+      "RealExact_W16_Dyn": {
+        "n_envs": 128,
+        "phys_60s_pct": 100.0,
+        "strict_60s_pct": 100.0,
+        "mean_duration_s": 60.0,
+        "mean_hits": 110.8,
+        "tilt_avg_deg": 2.62,
+        "tilt_max_deg": 5.39,
+        "center_rms_mm": 6.61
+      }
+    }
+  }
+}

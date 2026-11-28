@@ -749,6 +749,208 @@
       "checkpoint_metadata_sha256": "93106b1bfc2f54a7be30939ba54ed1ac1f600419909142d2152cfd175cd61dde",
       "actor_ball_age_mode": "native_refresh_clock",
       "deployment_revision": "u416_native_age_v2"
+    },
+    {
+      "release_id": "fplc_gpu0_v325_wind_early_r5fast_u6247",
+      "policy_profile": "fplc_gpu0_v325_wind_early_r5fast_u6247",
+      "checkpoint_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/outputs/rl_sim/v325_wind_early_r5fast_u6247_20261127/model.pkl",
+      "checkpoint_sha256": "e9591ce1eabb2100be31a4a73e58c8a1b2c4bc97c3100edfa5fdf49698ab9666",
+      "policy_xml_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+      "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+      "observation_dim": 120,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "single5_windfeature120_high_v2",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_simcode12_model_contracts.json",
+      "model_contract_sha256": "aef461c37f8c98cd25929dc904497b61753cf83beb1cfdc92afd383153e94f23",
+      "reset_preset": "simcode9_native",
+      "supported_deployment_ball_observation_rates_hz": [
+        90.0,
+        120.0,
+        200.0
+      ],
+      "training_status": {
+        "benchmark_1280x60s_passed": true,
+        "strict_60s_successes": 1280,
+        "strict_60s_cases": 1280,
+        "final1200s99accepted": false,
+        "source_model_physics_ball_upper_m": 1.5
+      },
+      "actor_layers": [
+        120,
+        282,
+        282,
+        282,
+        7
+      ],
+      "real_roll_pitch_limit_deg": [
+        7.0,
+        7.0
+      ],
+      "checkpoint_metadata_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/outputs/rl_sim/v325_wind_early_r5fast_u6247_20261127/MANIFEST.json",
+      "checkpoint_metadata_sha256": "d5dc639cd1ef0d33d25605c4fcd568bed9d1a88c32aacd687d1d449b3b623708",
+      "actor_ball_age_mode": "native_refresh_clock",
+      "deployment_revision": "u6247_wind_early_v1",
+      "physical_metadata_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/outputs/rl_sim/v325_single5_provisional416_20261124_r1/MANIFEST.json",
+      "physical_metadata_sha256": "93106b1bfc2f54a7be30939ba54ed1ac1f600419909142d2152cfd175cd61dde"
+    },
+    {
+      "release_id": "fplc_gpu0_v325_wind_early_s2r_u7447",
+      "policy_profile": "fplc_gpu0_v325_wind_early_s2r_u7447",
+      "checkpoint_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/outputs/rl_sim/v325_wind_early_s2r_u7447_20261128/model.pkl",
+      "checkpoint_sha256": "a40da56cefb1cc6a8928a8199667cf1379a0bbdac9326949befd15a3bc089bcd",
+      "policy_xml_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+      "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+      "observation_dim": 120,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "single5_windfeature120_high_v2",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_simcode12_u7447_model_contracts.json",
+      "model_contract_sha256": "d67a58615be817557c030b8fb00eb3713d46a885f490ff855817faee460f5c23",
+      "reset_preset": "simcode9_native",
+      "supported_deployment_ball_observation_rates_hz": [
+        90.0,
+        120.0,
+        200.0
+      ],
+      "training_status": {
+        "benchmark_1280x60s_passed": true,
+        "strict_60s_successes": 1280,
+        "strict_60s_cases": 1280,
+        "final1200s99accepted": false,
+        "source_model_physics_ball_upper_m": 1.5,
+        "s2r_curriculum_stage": {
+          "id": 9,
+          "name": "D2_dr65",
+          "warm_w": 1.0,
+          "dr_scale": 0.65
+        },
+        "p_cold_physical_60s_successes": 1280,
+        "p_cold_physical_60s_cases": 1280,
+        "p_cold_strict_60s_pct": 97.19,
+        "real_twin_strict_60s_successes": 640,
+        "real_twin_strict_60s_cases": 640
+      },
+      "actor_layers": [
+        120,
+        282,
+        282,
+        282,
+        7
+      ],
+      "real_roll_pitch_limit_deg": [
+        7.0,
+        7.0
+      ],
+      "checkpoint_metadata_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/outputs/rl_sim/v325_wind_early_s2r_u7447_20261128/MANIFEST.json",
+      "checkpoint_metadata_sha256": "2404d01b54f5f7cabc4a379f44fa7c33ca3f7b92fb31d159467e94614e541f86",
+      "actor_ball_age_mode": "native_refresh_clock",
+      "deployment_revision": "u7447_wind_early_s2r_v1",
+      "physical_metadata_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/outputs/rl_sim/v325_single5_provisional416_20261124_r1/MANIFEST.json",
+      "physical_metadata_sha256": "93106b1bfc2f54a7be30939ba54ed1ac1f600419909142d2152cfd175cd61dde"
+    },
+    {
+      "release_id": "fplc_gpu0_v325_wind_early_s2r_r6_u7832",
+      "policy_profile": "fplc_gpu0_v325_wind_early_s2r_r6_u7832",
+      "checkpoint_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/outputs/rl_sim/v325_wind_early_s2r_r6_u7832_20261128/model.pkl",
+      "checkpoint_sha256": "cdb2967ec4b3706502d7417d27b11925709d216e49c746fd7c3922f72efdf99a",
+      "policy_xml_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml",
+      "policy_xml_sha256": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+      "observation_dim": 120,
+      "control_rate_hz": 200.0,
+      "deployment_ball_observation_rate_hz": 90.0,
+      "training_ball_observation_rate_hz": 90.0,
+      "action_semantics": "normalized_velocity_persistent_qref_cartesian_projection_to_existing_robot_rmp",
+      "reset_mode": "independent_slow_joint_trajectory_then_atomic_measured_q_dq_history",
+      "policy_dq_mode": "raw_coherent",
+      "policy_plant_matcher_default_mode": "off",
+      "actor_schema": "single5_highwind120_4p5ms_v1",
+      "training_workspace_lower_m": [
+        -0.348,
+        -0.7,
+        1.0
+      ],
+      "training_workspace_upper_m": [
+        0.348,
+        -0.28,
+        1.15
+      ],
+      "safety_intervention": "measured_hold_disarm_reset_history_explicit_rearm",
+      "model_contract_path": "config/fplc_simcode12_u7832_model_contracts.json",
+      "model_contract_sha256": "8548a002ec8b6444940cdf3479a99c71b6f9854195ff7119f8b9fff354a7410c",
+      "reset_preset": "simcode9_native",
+      "supported_deployment_ball_observation_rates_hz": [
+        90.0,
+        120.0,
+        200.0
+      ],
+      "training_status": {
+        "active_max_speed_m_s": 2.8,
+        "obs_wind_max_m_s": 4.5,
+        "pose_limit_deg": 15.0,
+        "s2r_dr_scale": 0.65,
+        "kalman_init": "P_warm",
+        "final1200s99accepted": false,
+        "provisional_highwind_stage2": true,
+        "high_wind_curriculum_stage": {
+          "id": 1,
+          "active_max_speed_m_s": 2.8,
+          "dr_scale": 0.65,
+          "wind_dr_fraction": 0.35
+        },
+        "strict_60s_successes": 460,
+        "strict_60s_cases": 576,
+        "source_model_physics_ball_upper_m": 1.5
+      },
+      "actor_layers": [
+        120,
+        282,
+        282,
+        282,
+        7
+      ],
+      "real_roll_pitch_limit_deg": [
+        17.0,
+        17.0
+      ],
+      "checkpoint_metadata_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/outputs/rl_sim/v325_wind_early_s2r_r6_u7832_20261128/MANIFEST.json",
+      "checkpoint_metadata_sha256": "d7145e93f1f4a51f50584f361f6834c3c203522bf98099c2bf5e6da8415d892e",
+      "actor_ball_age_mode": "native_refresh_clock",
+      "deployment_revision": "u7832_wind_early_s2r_r6_v1",
+      "physical_metadata_path": "simcode12/pingpong_moz1-wind-early/pingpong_controller/outputs/rl_sim/v325_single5_provisional416_20261124_r1/MANIFEST.json",
+      "physical_metadata_sha256": "93106b1bfc2f54a7be30939ba54ed1ac1f600419909142d2152cfd175cd61dde"
     }
   ]
 }

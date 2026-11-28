@@ -1,0 +1,4794 @@
+{
+  "checkpoint": "/home/yangzhe/pingpong/pingpong_moz1/pingpong_controller/outputs/rl_sim/fplc_wind_early_20261128_s2r_r6_fast/best_pareto_w28_u00007832.pkl",
+  "wall_s": 1012.9,
+  "results": [
+    {
+      "regime": "RealExact_0w",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 108.2,
+      "center_rms_mm": 9.3,
+      "apex_mean_m": 1.412,
+      "in_band_pct": 94.7,
+      "wrmse_m_s": 0.011,
+      "tilt_p95_deg": 4.27,
+      "tilt_max_deg": 6.37,
+      "pitch_p50_deg": 0.22,
+      "abs_pitch_p95_deg": 4.0,
+      "rx_cm": [
+        -6.4,
+        3.0
+      ],
+      "ry_cm": [
+        -50.0,
+        -41.8
+      ],
+      "rz_cm": [
+        100.4,
+        112.9
+      ],
+      "max_act": 1.125,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "RealHard_0w",
+      "n_envs": 32,
+      "phys_20s": 93.75,
+      "phys_60s": 93.75,
+      "strict_60s": 93.75,
+      "mean_dur_s": 56.37,
+      "mean_hits": 97.1,
+      "center_rms_mm": 9.6,
+      "apex_mean_m": 1.413,
+      "in_band_pct": 93.9,
+      "wrmse_m_s": 0.19,
+      "tilt_p95_deg": 4.3,
+      "tilt_max_deg": 6.49,
+      "pitch_p50_deg": 0.21,
+      "abs_pitch_p95_deg": 4.02,
+      "rx_cm": [
+        -6.1,
+        3.7
+      ],
+      "ry_cm": [
+        -52.1,
+        -41.3
+      ],
+      "rz_cm": [
+        99.9,
+        113.7
+      ],
+      "max_act": 1.124,
+      "fails": {
+        "rz": 2,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "RealSoft_0w",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 59.38,
+      "mean_dur_s": 60.0,
+      "mean_hits": 71.7,
+      "center_rms_mm": 7.5,
+      "apex_mean_m": 1.408,
+      "in_band_pct": 89.8,
+      "wrmse_m_s": 0.012,
+      "tilt_p95_deg": 4.04,
+      "tilt_max_deg": 6.16,
+      "pitch_p50_deg": 0.37,
+      "abs_pitch_p95_deg": 3.81,
+      "rx_cm": [
+        -6.2,
+        3.4
+      ],
+      "ry_cm": [
+        -51.5,
+        -42.4
+      ],
+      "rz_cm": [
+        100.4,
+        113.2
+      ],
+      "max_act": 1.154,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "P_cold_0w",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 117.7,
+      "center_rms_mm": 4.3,
+      "apex_mean_m": 1.415,
+      "in_band_pct": 97.9,
+      "wrmse_m_s": 0.004,
+      "tilt_p95_deg": 5.01,
+      "tilt_max_deg": 5.85,
+      "pitch_p50_deg": 0.07,
+      "abs_pitch_p95_deg": 3.92,
+      "rx_cm": [
+        -3.9,
+        1.9
+      ],
+      "ry_cm": [
+        -51.1,
+        -43.4
+      ],
+      "rz_cm": [
+        101.7,
+        111.6
+      ],
+      "max_act": 1.073,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "RealExact_PosX_1p6",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 113.0,
+      "center_rms_mm": 8.4,
+      "apex_mean_m": 1.412,
+      "in_band_pct": 93.4,
+      "wrmse_m_s": 0.074,
+      "tilt_p95_deg": 5.19,
+      "tilt_max_deg": 7.38,
+      "pitch_p50_deg": 1.9,
+      "abs_pitch_p95_deg": 5.07,
+      "rx_cm": [
+        -5.3,
+        4.0
+      ],
+      "ry_cm": [
+        -50.1,
+        -43.1
+      ],
+      "rz_cm": [
+        100.4,
+        113.1
+      ],
+      "max_act": 1.102,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "RealExact_PosX_2p4",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 116.1,
+      "center_rms_mm": 7.8,
+      "apex_mean_m": 1.411,
+      "in_band_pct": 90.9,
+      "wrmse_m_s": 0.044,
+      "tilt_p95_deg": 6.44,
+      "tilt_max_deg": 8.29,
+      "pitch_p50_deg": 3.44,
+      "abs_pitch_p95_deg": 6.37,
+      "rx_cm": [
+        -3.0,
+        8.0
+      ],
+      "ry_cm": [
+        -50.5,
+        -43.5
+      ],
+      "rz_cm": [
+        100.5,
+        113.2
+      ],
+      "max_act": 1.134,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "RealExact_PosX_2p8",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 117.1,
+      "center_rms_mm": 8.3,
+      "apex_mean_m": 1.411,
+      "in_band_pct": 88.7,
+      "wrmse_m_s": 0.043,
+      "tilt_p95_deg": 7.12,
+      "tilt_max_deg": 9.44,
+      "pitch_p50_deg": 4.33,
+      "abs_pitch_p95_deg": 7.06,
+      "rx_cm": [
+        -4.6,
+        13.6
+      ],
+      "ry_cm": [
+        -50.4,
+        -42.8
+      ],
+      "rz_cm": [
+        100.3,
+        114.9
+      ],
+      "max_act": 1.128,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "RealExact_NegX_2p8",
+      "n_envs": 32,
+      "phys_20s": 68.75,
+      "phys_60s": 68.75,
+      "strict_60s": 68.75,
+      "mean_dur_s": 43.42,
+      "mean_hits": 65.1,
+      "center_rms_mm": 12.4,
+      "apex_mean_m": 1.4,
+      "in_band_pct": 61.6,
+      "wrmse_m_s": 0.051,
+      "tilt_p95_deg": 7.39,
+      "tilt_max_deg": 10.89,
+      "pitch_p50_deg": -4.04,
+      "abs_pitch_p95_deg": 7.23,
+      "rx_cm": [
+        -14.4,
+        2.3
+      ],
+      "ry_cm": [
+        -50.1,
+        -35.0
+      ],
+      "rz_cm": [
+        100.0,
+        112.8
+      ],
+      "max_act": 1.128,
+      "fails": {
+        "rz": 2,
+        "rec": 8,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "RealExact_W24_Dyn",
+      "n_envs": 32,
+      "phys_20s": 18.75,
+      "phys_60s": 0.0,
+      "strict_60s": 0.0,
+      "mean_dur_s": 16.01,
+      "mean_hits": 27.6,
+      "center_rms_mm": 16.0,
+      "apex_mean_m": 1.404,
+      "in_band_pct": 80.0,
+      "wrmse_m_s": 0.448,
+      "tilt_p95_deg": 6.35,
+      "tilt_max_deg": 15.42,
+      "pitch_p50_deg": 0.15,
+      "abs_pitch_p95_deg": 5.67,
+      "rx_cm": [
+        -18.5,
+        16.4
+      ],
+      "ry_cm": [
+        -58.8,
+        -30.6
+      ],
+      "rz_cm": [
+        100.2,
+        115.1
+      ],
+      "max_act": 1.189,
+      "fails": {
+        "rz": 19,
+        "rec": 3,
+        "low": 0,
+        "high": 6,
+        "oob": 4
+      }
+    },
+    {
+      "regime": "RealExact_W28_Dyn",
+      "n_envs": 32,
+      "phys_20s": 18.75,
+      "phys_60s": 0.0,
+      "strict_60s": 0.0,
+      "mean_dur_s": 12.81,
+      "mean_hits": 21.7,
+      "center_rms_mm": 16.8,
+      "apex_mean_m": 1.401,
+      "in_band_pct": 77.8,
+      "wrmse_m_s": 0.48,
+      "tilt_p95_deg": 6.85,
+      "tilt_max_deg": 14.01,
+      "pitch_p50_deg": -0.09,
+      "abs_pitch_p95_deg": 6.03,
+      "rx_cm": [
+        -21.8,
+        15.5
+      ],
+      "ry_cm": [
+        -60.9,
+        -32.4
+      ],
+      "rz_cm": [
+        100.0,
+        115.1
+      ],
+      "max_act": 1.174,
+      "fails": {
+        "rz": 18,
+        "rec": 2,
+        "low": 0,
+        "high": 7,
+        "oob": 5
+      }
+    },
+    {
+      "regime": "CleanPW_PosX_2p4",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 120.7,
+      "center_rms_mm": 2.9,
+      "apex_mean_m": 1.415,
+      "in_band_pct": 97.3,
+      "wrmse_m_s": 0.028,
+      "tilt_p95_deg": 6.55,
+      "tilt_max_deg": 7.4,
+      "pitch_p50_deg": 3.26,
+      "abs_pitch_p95_deg": 6.1,
+      "rx_cm": [
+        -3.2,
+        1.8
+      ],
+      "ry_cm": [
+        -51.1,
+        -45.1
+      ],
+      "rz_cm": [
+        101.7,
+        112.3
+      ],
+      "max_act": 1.055,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "CleanPW_NegX_2p4",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 114.8,
+      "center_rms_mm": 4.6,
+      "apex_mean_m": 1.421,
+      "in_band_pct": 97.5,
+      "wrmse_m_s": 0.029,
+      "tilt_p95_deg": 6.58,
+      "tilt_max_deg": 8.06,
+      "pitch_p50_deg": -3.21,
+      "abs_pitch_p95_deg": 6.41,
+      "rx_cm": [
+        -7.5,
+        1.4
+      ],
+      "ry_cm": [
+        -51.5,
+        -39.8
+      ],
+      "rz_cm": [
+        101.6,
+        112.3
+      ],
+      "max_act": 1.119,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "CleanPW_PosX_2p8",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 121.5,
+      "center_rms_mm": 4.6,
+      "apex_mean_m": 1.416,
+      "in_band_pct": 96.8,
+      "wrmse_m_s": 0.032,
+      "tilt_p95_deg": 7.05,
+      "tilt_max_deg": 8.04,
+      "pitch_p50_deg": 4.23,
+      "abs_pitch_p95_deg": 6.73,
+      "rx_cm": [
+        -2.6,
+        3.4
+      ],
+      "ry_cm": [
+        -51.1,
+        -45.4
+      ],
+      "rz_cm": [
+        101.7,
+        112.9
+      ],
+      "max_act": 1.094,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "CleanPW_NegX_2p8",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 113.8,
+      "center_rms_mm": 4.7,
+      "apex_mean_m": 1.42,
+      "in_band_pct": 96.8,
+      "wrmse_m_s": 0.032,
+      "tilt_p95_deg": 7.4,
+      "tilt_max_deg": 8.71,
+      "pitch_p50_deg": -4.27,
+      "abs_pitch_p95_deg": 7.29,
+      "rx_cm": [
+        -9.0,
+        2.9
+      ],
+      "ry_cm": [
+        -51.4,
+        -38.4
+      ],
+      "rz_cm": [
+        101.3,
+        112.3
+      ],
+      "max_act": 1.114,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "CleanPW_ConePosX_2p8",
+      "n_envs": 32,
+      "phys_20s": 75.0,
+      "phys_60s": 75.0,
+      "strict_60s": 75.0,
+      "mean_dur_s": 46.12,
+      "mean_hits": 93.9,
+      "center_rms_mm": 5.3,
+      "apex_mean_m": 1.421,
+      "in_band_pct": 96.5,
+      "wrmse_m_s": 0.04,
+      "tilt_p95_deg": 7.75,
+      "tilt_max_deg": 8.89,
+      "pitch_p50_deg": 3.69,
+      "abs_pitch_p95_deg": 6.62,
+      "rx_cm": [
+        -4.0,
+        3.5
+      ],
+      "ry_cm": [
+        -53.7,
+        -38.2
+      ],
+      "rz_cm": [
+        101.6,
+        115.0
+      ],
+      "max_act": 1.125,
+      "fails": {
+        "rz": 6,
+        "rec": 2,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "CleanPW_ConeNegX_2p8",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 116.9,
+      "center_rms_mm": 5.5,
+      "apex_mean_m": 1.419,
+      "in_band_pct": 97.6,
+      "wrmse_m_s": 0.033,
+      "tilt_p95_deg": 7.23,
+      "tilt_max_deg": 8.4,
+      "pitch_p50_deg": -4.06,
+      "abs_pitch_p95_deg": 7.17,
+      "rx_cm": [
+        -8.7,
+        2.6
+      ],
+      "ry_cm": [
+        -54.2,
+        -39.2
+      ],
+      "rz_cm": [
+        101.6,
+        113.9
+      ],
+      "max_act": 1.126,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "CleanPW_PosX_3p2",
+      "n_envs": 32,
+      "phys_20s": 100.0,
+      "phys_60s": 100.0,
+      "strict_60s": 100.0,
+      "mean_dur_s": 60.0,
+      "mean_hits": 122.6,
+      "center_rms_mm": 7.8,
+      "apex_mean_m": 1.419,
+      "in_band_pct": 97.6,
+      "wrmse_m_s": 0.037,
+      "tilt_p95_deg": 7.78,
+      "tilt_max_deg": 8.65,
+      "pitch_p50_deg": 5.25,
+      "abs_pitch_p95_deg": 7.52,
+      "rx_cm": [
+        -2.6,
+        8.4
+      ],
+      "ry_cm": [
+        -51.0,
+        -45.2
+      ],
+      "rz_cm": [
+        101.7,
+        113.9
+      ],
+      "max_act": 1.143,
+      "fails": {
+        "rz": 0,
+        "rec": 0,
+        "low": 0,
+        "high": 0,
+        "oob": 0
+      }
+    },
+    {
+      "regime": "CleanPW_NegX_3p2",
+      "n_envs": 32,
+      "phys_20s": 40.62,
+      "phys_60s": 40.62,
+      "strict_60s": 40.62,
+      "mean_dur_s": 28.54,
+      "mean_hits": 50.4,
+      "center_rms_mm": 15.8,
+      "apex_mean_m": 1.409,
+      "in_band_pct": 84.6,
+      "wrmse_m_s": 0.052,
+      "tilt_p95_deg": 8.59,
+      "tilt_max_deg": 13.31,
+      "pitch_p50_deg": -5.34,
+      "abs_pitch_p95_deg": 8.48,
+      "rx_cm": [
+        -13.4,
+        13.9
+      ],
+      "ry_cm": [
+        -52.6,
+        -29.2
+      ],
+      "rz_cm": [
+        99.9,
+        114.1
+      ],
+      "max_act": 1.168,
+      "fails": {
+        "rz": 10,
+        "rec": 3,
+        "low": 0,
+        "high": 0,
+        "oob": 6
+      }
+    }
+  ],
+  "failures": [
+    {
+      "lane": 34,
+      "scen": "RealHard_0w",
+      "sec": 1.09,
+      "hits": 2,
+      "cause": "racket_z",
+      "bpos": [
+        -0.012,
+        -0.433,
+        1.333
+      ],
+      "rpos": [
+        -0.005,
+        -0.447,
+        0.999
+      ],
+      "roll": -3.31,
+      "pitch": -0.4,
+      "est_w": [
+        0.92,
+        0.0
+      ],
+      "true_w": [
+        0.0,
+        0.0
+      ],
+      "rx_rng": [
+        -0.005,
+        0.017
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.447
+      ],
+      "rz_rng": [
+        0.999,
+        1.136
+      ],
+      "max_tilt": 4.5
+    },
+    {
+      "lane": 51,
+      "scen": "RealHard_0w",
+      "sec": 2.61,
+      "hits": 4,
+      "cause": "racket_z",
+      "bpos": [
+        -0.013,
+        -0.471,
+        1.381
+      ],
+      "rpos": [
+        -0.003,
+        -0.45,
+        1.0
+      ],
+      "roll": -3.04,
+      "pitch": -0.72,
+      "est_w": [
+        -2.98,
+        0.0
+      ],
+      "true_w": [
+        0.0,
+        0.0
+      ],
+      "rx_rng": [
+        -0.008,
+        0.014
+      ],
+      "ry_rng": [
+        -0.492,
+        -0.428
+      ],
+      "rz_rng": [
+        1.0,
+        1.137
+      ],
+      "max_tilt": 4.83
+    },
+    {
+      "lane": 226,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 7.38,
+      "hits": 8,
+      "cause": "recontact",
+      "bpos": [
+        0.014,
+        -0.345,
+        1.055
+      ],
+      "rpos": [
+        0.001,
+        -0.351,
+        1.032
+      ],
+      "roll": -2.7,
+      "pitch": -3.8,
+      "est_w": [
+        -1.64,
+        0.0
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.116,
+        0.01
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.35
+      ],
+      "rz_rng": [
+        1.002,
+        1.124
+      ],
+      "max_tilt": 10.24
+    },
+    {
+      "lane": 228,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 7.4,
+      "hits": 9,
+      "cause": "recontact",
+      "bpos": [
+        0.032,
+        -0.414,
+        1.078
+      ],
+      "rpos": [
+        0.006,
+        -0.403,
+        1.056
+      ],
+      "roll": 0.14,
+      "pitch": -3.38,
+      "est_w": [
+        -3.26,
+        -0.0
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.125,
+        0.021
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.377
+      ],
+      "rz_rng": [
+        1.004,
+        1.121
+      ],
+      "max_tilt": 9.76
+    },
+    {
+      "lane": 233,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 4.09,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        -0.11,
+        -0.442,
+        1.372
+      ],
+      "rpos": [
+        -0.089,
+        -0.438,
+        1.0
+      ],
+      "roll": -1.42,
+      "pitch": -3.7,
+      "est_w": [
+        -3.04,
+        0.0
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.102,
+        0.01
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.438
+      ],
+      "rz_rng": [
+        1.0,
+        1.122
+      ],
+      "max_tilt": 7.19
+    },
+    {
+      "lane": 237,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 4.71,
+      "hits": 7,
+      "cause": "racket_z",
+      "bpos": [
+        -0.127,
+        -0.433,
+        1.255
+      ],
+      "rpos": [
+        -0.105,
+        -0.42,
+        1.0
+      ],
+      "roll": -0.86,
+      "pitch": -1.13,
+      "est_w": [
+        -1.34,
+        0.0
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.131,
+        0.014
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.42
+      ],
+      "rz_rng": [
+        1.0,
+        1.125
+      ],
+      "max_tilt": 8.32
+    },
+    {
+      "lane": 238,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 7.42,
+      "hits": 8,
+      "cause": "recontact",
+      "bpos": [
+        -0.012,
+        -0.366,
+        1.094
+      ],
+      "rpos": [
+        -0.023,
+        -0.382,
+        1.071
+      ],
+      "roll": -0.41,
+      "pitch": -3.64,
+      "est_w": [
+        -3.01,
+        0.0
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.118,
+        0.014
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.376
+      ],
+      "rz_rng": [
+        1.002,
+        1.122
+      ],
+      "max_tilt": 10.01
+    },
+    {
+      "lane": 239,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 7.91,
+      "hits": 8,
+      "cause": "recontact",
+      "bpos": [
+        0.003,
+        -0.41,
+        1.074
+      ],
+      "rpos": [
+        -0.024,
+        -0.414,
+        1.054
+      ],
+      "roll": 0.38,
+      "pitch": -5.13,
+      "est_w": [
+        -1.21,
+        0.0
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.117,
+        0.02
+      ],
+      "ry_rng": [
+        -0.495,
+        -0.408
+      ],
+      "rz_rng": [
+        1.003,
+        1.128
+      ],
+      "max_tilt": 8.96
+    },
+    {
+      "lane": 243,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 7.3,
+      "hits": 7,
+      "cause": "recontact",
+      "bpos": [
+        0.011,
+        -0.388,
+        1.041
+      ],
+      "rpos": [
+        -0.025,
+        -0.406,
+        1.022
+      ],
+      "roll": -0.29,
+      "pitch": -6.63,
+      "est_w": [
+        0.25,
+        -3.36
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.144,
+        0.011
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.404
+      ],
+      "rz_rng": [
+        1.003,
+        1.125
+      ],
+      "max_tilt": 10.89
+    },
+    {
+      "lane": 246,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 7.25,
+      "hits": 7,
+      "cause": "recontact",
+      "bpos": [
+        0.07,
+        -0.323,
+        1.04
+      ],
+      "rpos": [
+        0.017,
+        -0.354,
+        1.017
+      ],
+      "roll": -2.16,
+      "pitch": -1.27,
+      "est_w": [
+        -1.97,
+        0.0
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.136,
+        0.017
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.354
+      ],
+      "rz_rng": [
+        1.003,
+        1.124
+      ],
+      "max_tilt": 10.8
+    },
+    {
+      "lane": 251,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 7.95,
+      "hits": 8,
+      "cause": "recontact",
+      "bpos": [
+        -0.01,
+        -0.415,
+        1.079
+      ],
+      "rpos": [
+        -0.025,
+        -0.423,
+        1.057
+      ],
+      "roll": 0.25,
+      "pitch": -4.71,
+      "est_w": [
+        -2.33,
+        0.0
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.12,
+        0.018
+      ],
+      "ry_rng": [
+        -0.492,
+        -0.387
+      ],
+      "rz_rng": [
+        1.003,
+        1.128
+      ],
+      "max_tilt": 10.16
+    },
+    {
+      "lane": 255,
+      "scen": "RealExact_NegX_2p8",
+      "sec": 7.87,
+      "hits": 8,
+      "cause": "recontact",
+      "bpos": [
+        0.032,
+        -0.405,
+        1.063
+      ],
+      "rpos": [
+        0.007,
+        -0.415,
+        1.042
+      ],
+      "roll": 0.38,
+      "pitch": -4.81,
+      "est_w": [
+        -3.64,
+        -0.24
+      ],
+      "true_w": [
+        -2.8,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.129,
+        0.012
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.406
+      ],
+      "rz_rng": [
+        1.005,
+        1.123
+      ],
+      "max_tilt": 10.15
+    },
+    {
+      "lane": 256,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 7.28,
+      "hits": 9,
+      "cause": "recontact",
+      "bpos": [
+        -0.005,
+        -0.414,
+        1.057
+      ],
+      "rpos": [
+        -0.042,
+        -0.419,
+        1.041
+      ],
+      "roll": 1.55,
+      "pitch": -8.2,
+      "est_w": [
+        -2.46,
+        -1.91
+      ],
+      "true_w": [
+        -1.5,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.139,
+        0.01
+      ],
+      "ry_rng": [
+        -0.494,
+        -0.395
+      ],
+      "rz_rng": [
+        1.002,
+        1.122
+      ],
+      "max_tilt": 12.81
+    },
+    {
+      "lane": 257,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 20.5,
+      "hits": 34,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        -0.061,
+        -0.655,
+        0.998
+      ],
+      "rpos": [
+        -0.106,
+        -0.551,
+        1.118
+      ],
+      "roll": 3.12,
+      "pitch": -7.94,
+      "est_w": [
+        -0.54,
+        0.0
+      ],
+      "true_w": [
+        -1.47,
+        -0.31
+      ],
+      "rx_rng": [
+        -0.154,
+        0.125
+      ],
+      "ry_rng": [
+        -0.552,
+        -0.308
+      ],
+      "rz_rng": [
+        1.005,
+        1.123
+      ],
+      "max_tilt": 11.76
+    },
+    {
+      "lane": 258,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 18.43,
+      "hits": 33,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.055,
+        -0.591,
+        0.994
+      ],
+      "rpos": [
+        -0.012,
+        -0.492,
+        1.117
+      ],
+      "roll": 5.51,
+      "pitch": -5.8,
+      "est_w": [
+        -2.4,
+        -1.6
+      ],
+      "true_w": [
+        -1.37,
+        -0.61
+      ],
+      "rx_rng": [
+        -0.13,
+        0.013
+      ],
+      "ry_rng": [
+        -0.513,
+        -0.406
+      ],
+      "rz_rng": [
+        1.01,
+        1.123
+      ],
+      "max_tilt": 10.2
+    },
+    {
+      "lane": 259,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 11.88,
+      "hits": 16,
+      "cause": "recontact",
+      "bpos": [
+        -0.063,
+        -0.389,
+        1.049
+      ],
+      "rpos": [
+        -0.058,
+        -0.422,
+        1.028
+      ],
+      "roll": 1.06,
+      "pitch": -5.18,
+      "est_w": [
+        -3.33,
+        0.0
+      ],
+      "true_w": [
+        -1.21,
+        -0.88
+      ],
+      "rx_rng": [
+        -0.14,
+        0.079
+      ],
+      "ry_rng": [
+        -0.531,
+        -0.306
+      ],
+      "rz_rng": [
+        1.011,
+        1.127
+      ],
+      "max_tilt": 11.85
+    },
+    {
+      "lane": 260,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 4.29,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        -0.013,
+        -0.632,
+        1.177
+      ],
+      "rpos": [
+        -0.02,
+        -0.586,
+        1.151
+      ],
+      "roll": 4.39,
+      "pitch": -0.1,
+      "est_w": [
+        0.39,
+        -2.83
+      ],
+      "true_w": [
+        -1.0,
+        -1.11
+      ],
+      "rx_rng": [
+        -0.04,
+        0.01
+      ],
+      "ry_rng": [
+        -0.586,
+        -0.451
+      ],
+      "rz_rng": [
+        1.011,
+        1.151
+      ],
+      "max_tilt": 8.74
+    },
+    {
+      "lane": 261,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 8.32,
+      "hits": 16,
+      "cause": "racket_z",
+      "bpos": [
+        0.206,
+        -0.51,
+        1.188
+      ],
+      "rpos": [
+        0.126,
+        -0.477,
+        1.15
+      ],
+      "roll": 9.29,
+      "pitch": -1.57,
+      "est_w": [
+        -1.17,
+        -1.52
+      ],
+      "true_w": [
+        -0.75,
+        -1.3
+      ],
+      "rx_rng": [
+        -0.125,
+        0.126
+      ],
+      "ry_rng": [
+        -0.542,
+        -0.442
+      ],
+      "rz_rng": [
+        1.01,
+        1.15
+      ],
+      "max_tilt": 11.5
+    },
+    {
+      "lane": 262,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 4.31,
+      "hits": 7,
+      "cause": "racket_z",
+      "bpos": [
+        -0.037,
+        -0.621,
+        1.204
+      ],
+      "rpos": [
+        -0.037,
+        -0.582,
+        1.15
+      ],
+      "roll": 3.85,
+      "pitch": -0.33,
+      "est_w": [
+        -0.32,
+        -2.27
+      ],
+      "true_w": [
+        -0.46,
+        -1.43
+      ],
+      "rx_rng": [
+        -0.037,
+        0.012
+      ],
+      "ry_rng": [
+        -0.582,
+        -0.454
+      ],
+      "rz_rng": [
+        1.01,
+        1.15
+      ],
+      "max_tilt": 7.66
+    },
+    {
+      "lane": 263,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 17.17,
+      "hits": 30,
+      "cause": "racket_z",
+      "bpos": [
+        0.062,
+        -0.61,
+        1.24
+      ],
+      "rpos": [
+        0.03,
+        -0.556,
+        1.151
+      ],
+      "roll": 5.17,
+      "pitch": -2.67,
+      "est_w": [
+        -1.15,
+        -2.68
+      ],
+      "true_w": [
+        -0.16,
+        -1.49
+      ],
+      "rx_rng": [
+        -0.102,
+        0.074
+      ],
+      "ry_rng": [
+        -0.556,
+        -0.342
+      ],
+      "rz_rng": [
+        1.012,
+        1.151
+      ],
+      "max_tilt": 11.71
+    },
+    {
+      "lane": 264,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 4.29,
+      "hits": 10,
+      "cause": "racket_z",
+      "bpos": [
+        -0.005,
+        -0.632,
+        1.231
+      ],
+      "rpos": [
+        -0.012,
+        -0.575,
+        1.15
+      ],
+      "roll": 4.82,
+      "pitch": 0.25,
+      "est_w": [
+        0.15,
+        -3.75
+      ],
+      "true_w": [
+        0.16,
+        -1.49
+      ],
+      "rx_rng": [
+        -0.03,
+        0.014
+      ],
+      "ry_rng": [
+        -0.575,
+        -0.453
+      ],
+      "rz_rng": [
+        1.013,
+        1.15
+      ],
+      "max_tilt": 8.62
+    },
+    {
+      "lane": 265,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 3.31,
+      "hits": 7,
+      "cause": "racket_z",
+      "bpos": [
+        -0.008,
+        -0.591,
+        1.253
+      ],
+      "rpos": [
+        0.003,
+        -0.559,
+        1.15
+      ],
+      "roll": 2.94,
+      "pitch": 1.98,
+      "est_w": [
+        0.46,
+        0.0
+      ],
+      "true_w": [
+        0.46,
+        -1.43
+      ],
+      "rx_rng": [
+        -0.019,
+        0.005
+      ],
+      "ry_rng": [
+        -0.56,
+        -0.448
+      ],
+      "rz_rng": [
+        1.012,
+        1.15
+      ],
+      "max_tilt": 6.57
+    },
+    {
+      "lane": 266,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 6.33,
+      "hits": 11,
+      "cause": "racket_z",
+      "bpos": [
+        0.09,
+        -0.637,
+        1.194
+      ],
+      "rpos": [
+        0.073,
+        -0.564,
+        1.151
+      ],
+      "roll": 2.8,
+      "pitch": 2.95,
+      "est_w": [
+        3.15,
+        -3.02
+      ],
+      "true_w": [
+        0.75,
+        -1.3
+      ],
+      "rx_rng": [
+        -0.027,
+        0.073
+      ],
+      "ry_rng": [
+        -0.564,
+        -0.444
+      ],
+      "rz_rng": [
+        1.009,
+        1.151
+      ],
+      "max_tilt": 10.96
+    },
+    {
+      "lane": 267,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 4.34,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        0.06,
+        -0.555,
+        1.237
+      ],
+      "rpos": [
+        0.059,
+        -0.538,
+        1.15
+      ],
+      "roll": 2.07,
+      "pitch": 3.01,
+      "est_w": [
+        1.2,
+        -1.38
+      ],
+      "true_w": [
+        1.0,
+        -1.11
+      ],
+      "rx_rng": [
+        -0.015,
+        0.062
+      ],
+      "ry_rng": [
+        -0.538,
+        -0.443
+      ],
+      "rz_rng": [
+        1.009,
+        1.15
+      ],
+      "max_tilt": 8.15
+    },
+    {
+      "lane": 268,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 4.28,
+      "hits": 7,
+      "cause": "racket_z",
+      "bpos": [
+        0.073,
+        -0.612,
+        1.183
+      ],
+      "rpos": [
+        0.066,
+        -0.558,
+        1.15
+      ],
+      "roll": 3.16,
+      "pitch": 2.79,
+      "est_w": [
+        2.58,
+        -1.64
+      ],
+      "true_w": [
+        1.21,
+        -0.88
+      ],
+      "rx_rng": [
+        -0.013,
+        0.066
+      ],
+      "ry_rng": [
+        -0.558,
+        -0.439
+      ],
+      "rz_rng": [
+        1.005,
+        1.15
+      ],
+      "max_tilt": 9.63
+    },
+    {
+      "lane": 269,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 14.61,
+      "hits": 23,
+      "cause": "racket_z",
+      "bpos": [
+        -0.053,
+        -0.622,
+        1.213
+      ],
+      "rpos": [
+        -0.09,
+        -0.568,
+        1.15
+      ],
+      "roll": 4.71,
+      "pitch": -2.77,
+      "est_w": [
+        0.82,
+        -2.25
+      ],
+      "true_w": [
+        1.37,
+        -0.61
+      ],
+      "rx_rng": [
+        -0.09,
+        0.04
+      ],
+      "ry_rng": [
+        -0.574,
+        -0.44
+      ],
+      "rz_rng": [
+        1.011,
+        1.15
+      ],
+      "max_tilt": 8.14
+    },
+    {
+      "lane": 270,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 41.16,
+      "hits": 72,
+      "cause": "racket_z",
+      "bpos": [
+        0.055,
+        -0.548,
+        1.212
+      ],
+      "rpos": [
+        0.05,
+        -0.528,
+        1.151
+      ],
+      "roll": 1.74,
+      "pitch": 3.57,
+      "est_w": [
+        1.65,
+        -0.48
+      ],
+      "true_w": [
+        1.47,
+        -0.31
+      ],
+      "rx_rng": [
+        -0.089,
+        0.071
+      ],
+      "ry_rng": [
+        -0.534,
+        -0.422
+      ],
+      "rz_rng": [
+        1.008,
+        1.151
+      ],
+      "max_tilt": 9.45
+    },
+    {
+      "lane": 271,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 20.26,
+      "hits": 37,
+      "cause": "racket_z",
+      "bpos": [
+        0.104,
+        -0.534,
+        1.222
+      ],
+      "rpos": [
+        0.075,
+        -0.507,
+        1.15
+      ],
+      "roll": 1.86,
+      "pitch": 5.55,
+      "est_w": [
+        3.03,
+        -0.29
+      ],
+      "true_w": [
+        1.5,
+        0.0
+      ],
+      "rx_rng": [
+        -0.084,
+        0.085
+      ],
+      "ry_rng": [
+        -0.518,
+        -0.433
+      ],
+      "rz_rng": [
+        1.01,
+        1.15
+      ],
+      "max_tilt": 9.68
+    },
+    {
+      "lane": 272,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 33.98,
+      "hits": 57,
+      "cause": "racket_z",
+      "bpos": [
+        -0.065,
+        -0.63,
+        1.258
+      ],
+      "rpos": [
+        -0.087,
+        -0.583,
+        1.151
+      ],
+      "roll": 7.11,
+      "pitch": -4.93,
+      "est_w": [
+        -0.67,
+        -3.1
+      ],
+      "true_w": [
+        -0.36,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.101,
+        0.058
+      ],
+      "ry_rng": [
+        -0.583,
+        -0.38
+      ],
+      "rz_rng": [
+        1.009,
+        1.151
+      ],
+      "max_tilt": 10.83
+    },
+    {
+      "lane": 273,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 15.49,
+      "hits": 26,
+      "cause": "ball_high",
+      "bpos": [
+        0.042,
+        -0.537,
+        1.505
+      ],
+      "rpos": [
+        0.046,
+        -0.507,
+        1.104
+      ],
+      "roll": 2.71,
+      "pitch": 3.2,
+      "est_w": [
+        2.16,
+        -0.88
+      ],
+      "true_w": [
+        -0.35,
+        -0.07
+      ],
+      "rx_rng": [
+        -0.108,
+        0.06
+      ],
+      "ry_rng": [
+        -0.509,
+        -0.337
+      ],
+      "rz_rng": [
+        1.007,
+        1.137
+      ],
+      "max_tilt": 8.54
+    },
+    {
+      "lane": 274,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 14.71,
+      "hits": 24,
+      "cause": "racket_z",
+      "bpos": [
+        0.166,
+        -0.483,
+        1.172
+      ],
+      "rpos": [
+        0.134,
+        -0.461,
+        1.15
+      ],
+      "roll": -0.07,
+      "pitch": 3.82,
+      "est_w": [
+        2.16,
+        0.0
+      ],
+      "true_w": [
+        -0.33,
+        -0.15
+      ],
+      "rx_rng": [
+        -0.074,
+        0.142
+      ],
+      "ry_rng": [
+        -0.502,
+        -0.375
+      ],
+      "rz_rng": [
+        1.007,
+        1.15
+      ],
+      "max_tilt": 10.33
+    },
+    {
+      "lane": 275,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 19.35,
+      "hits": 31,
+      "cause": "recontact",
+      "bpos": [
+        0.017,
+        -0.434,
+        1.06
+      ],
+      "rpos": [
+        0.004,
+        -0.443,
+        1.039
+      ],
+      "roll": -0.79,
+      "pitch": -0.9,
+      "est_w": [
+        -1.58,
+        0.0
+      ],
+      "true_w": [
+        -0.29,
+        -0.21
+      ],
+      "rx_rng": [
+        -0.071,
+        0.074
+      ],
+      "ry_rng": [
+        -0.542,
+        -0.388
+      ],
+      "rz_rng": [
+        1.007,
+        1.146
+      ],
+      "max_tilt": 7.89
+    },
+    {
+      "lane": 276,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 19.09,
+      "hits": 35,
+      "cause": "ball_high",
+      "bpos": [
+        0.037,
+        -0.508,
+        1.501
+      ],
+      "rpos": [
+        0.042,
+        -0.484,
+        1.078
+      ],
+      "roll": 1.83,
+      "pitch": 2.62,
+      "est_w": [
+        1.12,
+        0.0
+      ],
+      "true_w": [
+        -0.24,
+        -0.27
+      ],
+      "rx_rng": [
+        -0.087,
+        0.076
+      ],
+      "ry_rng": [
+        -0.517,
+        -0.413
+      ],
+      "rz_rng": [
+        1.007,
+        1.139
+      ],
+      "max_tilt": 8.38
+    },
+    {
+      "lane": 277,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 14.45,
+      "hits": 26,
+      "cause": "ball_high",
+      "bpos": [
+        -0.034,
+        -0.554,
+        1.502
+      ],
+      "rpos": [
+        -0.023,
+        -0.522,
+        1.071
+      ],
+      "roll": 3.25,
+      "pitch": -2.7,
+      "est_w": [
+        0.0,
+        0.0
+      ],
+      "true_w": [
+        -0.18,
+        -0.31
+      ],
+      "rx_rng": [
+        -0.051,
+        0.02
+      ],
+      "ry_rng": [
+        -0.526,
+        -0.435
+      ],
+      "rz_rng": [
+        1.003,
+        1.134
+      ],
+      "max_tilt": 5.68
+    },
+    {
+      "lane": 278,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 13.14,
+      "hits": 24,
+      "cause": "racket_z",
+      "bpos": [
+        0.149,
+        -0.467,
+        1.29
+      ],
+      "rpos": [
+        0.138,
+        -0.457,
+        1.15
+      ],
+      "roll": 2.52,
+      "pitch": 5.68,
+      "est_w": [
+        1.95,
+        0.0
+      ],
+      "true_w": [
+        -0.11,
+        -0.34
+      ],
+      "rx_rng": [
+        -0.074,
+        0.139
+      ],
+      "ry_rng": [
+        -0.548,
+        -0.411
+      ],
+      "rz_rng": [
+        1.008,
+        1.15
+      ],
+      "max_tilt": 10.57
+    },
+    {
+      "lane": 279,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 12.66,
+      "hits": 20,
+      "cause": "racket_z",
+      "bpos": [
+        0.056,
+        -0.589,
+        1.178
+      ],
+      "rpos": [
+        0.053,
+        -0.559,
+        1.151
+      ],
+      "roll": 3.0,
+      "pitch": 1.17,
+      "est_w": [
+        -0.06,
+        -1.82
+      ],
+      "true_w": [
+        -0.04,
+        -0.36
+      ],
+      "rx_rng": [
+        -0.039,
+        0.054
+      ],
+      "ry_rng": [
+        -0.559,
+        -0.414
+      ],
+      "rz_rng": [
+        1.006,
+        1.151
+      ],
+      "max_tilt": 10.26
+    },
+    {
+      "lane": 280,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 13.17,
+      "hits": 23,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.269,
+        -0.356,
+        1.0
+      ],
+      "rpos": [
+        0.163,
+        -0.331,
+        1.118
+      ],
+      "roll": -1.73,
+      "pitch": 5.58,
+      "est_w": [
+        0.28,
+        0.0
+      ],
+      "true_w": [
+        0.04,
+        -0.36
+      ],
+      "rx_rng": [
+        -0.182,
+        0.164
+      ],
+      "ry_rng": [
+        -0.544,
+        -0.331
+      ],
+      "rz_rng": [
+        1.007,
+        1.148
+      ],
+      "max_tilt": 15.42
+    },
+    {
+      "lane": 281,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 17.05,
+      "hits": 30,
+      "cause": "ball_high",
+      "bpos": [
+        0.026,
+        -0.529,
+        1.503
+      ],
+      "rpos": [
+        0.018,
+        -0.496,
+        1.064
+      ],
+      "roll": 1.21,
+      "pitch": 0.21,
+      "est_w": [
+        2.94,
+        0.0
+      ],
+      "true_w": [
+        0.11,
+        -0.34
+      ],
+      "rx_rng": [
+        -0.065,
+        0.041
+      ],
+      "ry_rng": [
+        -0.517,
+        -0.426
+      ],
+      "rz_rng": [
+        1.003,
+        1.132
+      ],
+      "max_tilt": 7.18
+    },
+    {
+      "lane": 282,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 19.34,
+      "hits": 33,
+      "cause": "racket_z",
+      "bpos": [
+        0.026,
+        -0.623,
+        1.308
+      ],
+      "rpos": [
+        0.029,
+        -0.588,
+        1.15
+      ],
+      "roll": 4.75,
+      "pitch": -0.59,
+      "est_w": [
+        -1.02,
+        0.0
+      ],
+      "true_w": [
+        0.18,
+        -0.31
+      ],
+      "rx_rng": [
+        -0.091,
+        0.068
+      ],
+      "ry_rng": [
+        -0.588,
+        -0.358
+      ],
+      "rz_rng": [
+        1.008,
+        1.15
+      ],
+      "max_tilt": 11.14
+    },
+    {
+      "lane": 283,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 11.87,
+      "hits": 20,
+      "cause": "ball_high",
+      "bpos": [
+        -0.062,
+        -0.591,
+        1.501
+      ],
+      "rpos": [
+        -0.076,
+        -0.536,
+        1.08
+      ],
+      "roll": 3.48,
+      "pitch": -5.8,
+      "est_w": [
+        -2.95,
+        -2.52
+      ],
+      "true_w": [
+        0.24,
+        -0.27
+      ],
+      "rx_rng": [
+        -0.082,
+        0.012
+      ],
+      "ry_rng": [
+        -0.536,
+        -0.428
+      ],
+      "rz_rng": [
+        1.006,
+        1.133
+      ],
+      "max_tilt": 9.3
+    },
+    {
+      "lane": 284,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 37.25,
+      "hits": 67,
+      "cause": "ball_high",
+      "bpos": [
+        0.001,
+        -0.542,
+        1.503
+      ],
+      "rpos": [
+        0.014,
+        -0.521,
+        1.069
+      ],
+      "roll": 0.21,
+      "pitch": 0.96,
+      "est_w": [
+        0.8,
+        -0.66
+      ],
+      "true_w": [
+        0.29,
+        -0.21
+      ],
+      "rx_rng": [
+        -0.04,
+        0.028
+      ],
+      "ry_rng": [
+        -0.542,
+        -0.386
+      ],
+      "rz_rng": [
+        1.01,
+        1.144
+      ],
+      "max_tilt": 6.81
+    },
+    {
+      "lane": 285,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 26.68,
+      "hits": 44,
+      "cause": "racket_z",
+      "bpos": [
+        0.067,
+        -0.586,
+        1.181
+      ],
+      "rpos": [
+        0.066,
+        -0.557,
+        1.15
+      ],
+      "roll": 2.23,
+      "pitch": 2.32,
+      "est_w": [
+        0.95,
+        -0.77
+      ],
+      "true_w": [
+        0.33,
+        -0.15
+      ],
+      "rx_rng": [
+        -0.057,
+        0.067
+      ],
+      "ry_rng": [
+        -0.557,
+        -0.415
+      ],
+      "rz_rng": [
+        1.006,
+        1.15
+      ],
+      "max_tilt": 10.39
+    },
+    {
+      "lane": 286,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 33.86,
+      "hits": 61,
+      "cause": "racket_z",
+      "bpos": [
+        0.144,
+        -0.668,
+        1.201
+      ],
+      "rpos": [
+        0.089,
+        -0.562,
+        1.151
+      ],
+      "roll": 2.81,
+      "pitch": 1.92,
+      "est_w": [
+        2.73,
+        -1.99
+      ],
+      "true_w": [
+        0.35,
+        -0.07
+      ],
+      "rx_rng": [
+        -0.059,
+        0.089
+      ],
+      "ry_rng": [
+        -0.562,
+        -0.433
+      ],
+      "rz_rng": [
+        1.011,
+        1.151
+      ],
+      "max_tilt": 11.43
+    },
+    {
+      "lane": 287,
+      "scen": "RealExact_W24_Dyn",
+      "sec": 19.36,
+      "hits": 35,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.266,
+        -0.315,
+        0.996
+      ],
+      "rpos": [
+        0.154,
+        -0.311,
+        1.086
+      ],
+      "roll": -5.22,
+      "pitch": 10.89,
+      "est_w": [
+        3.72,
+        0.0
+      ],
+      "true_w": [
+        0.36,
+        0.0
+      ],
+      "rx_rng": [
+        -0.185,
+        0.154
+      ],
+      "ry_rng": [
+        -0.538,
+        -0.311
+      ],
+      "rz_rng": [
+        1.012,
+        1.139
+      ],
+      "max_tilt": 14.77
+    },
+    {
+      "lane": 288,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 42.45,
+      "hits": 65,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.353,
+        -0.453,
+        1.183
+      ],
+      "rpos": [
+        0.139,
+        -0.426,
+        1.134
+      ],
+      "roll": 2.64,
+      "pitch": 2.04,
+      "est_w": [
+        0.18,
+        0.0
+      ],
+      "true_w": [
+        -1.75,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.135,
+        0.139
+      ],
+      "ry_rng": [
+        -0.536,
+        -0.344
+      ],
+      "rz_rng": [
+        1.005,
+        1.147
+      ],
+      "max_tilt": 11.2
+    },
+    {
+      "lane": 289,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 29.59,
+      "hits": 50,
+      "cause": "racket_z",
+      "bpos": [
+        0.025,
+        -0.413,
+        1.239
+      ],
+      "rpos": [
+        0.031,
+        -0.362,
+        1.0
+      ],
+      "roll": 1.72,
+      "pitch": -5.41,
+      "est_w": [
+        -3.25,
+        -0.52
+      ],
+      "true_w": [
+        -1.71,
+        -0.36
+      ],
+      "rx_rng": [
+        -0.114,
+        0.087
+      ],
+      "ry_rng": [
+        -0.535,
+        -0.331
+      ],
+      "rz_rng": [
+        1.0,
+        1.132
+      ],
+      "max_tilt": 10.01
+    },
+    {
+      "lane": 290,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 4.33,
+      "hits": 7,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        -0.307,
+        -0.683,
+        1.07
+      ],
+      "rpos": [
+        -0.218,
+        -0.5,
+        1.056
+      ],
+      "roll": -0.2,
+      "pitch": -11.79,
+      "est_w": [
+        -2.33,
+        0.0
+      ],
+      "true_w": [
+        -1.6,
+        -0.71
+      ],
+      "rx_rng": [
+        -0.218,
+        0.01
+      ],
+      "ry_rng": [
+        -0.557,
+        -0.447
+      ],
+      "rz_rng": [
+        1.007,
+        1.138
+      ],
+      "max_tilt": 13.12
+    },
+    {
+      "lane": 291,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 11.34,
+      "hits": 19,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.195,
+        -0.715,
+        1.15
+      ],
+      "rpos": [
+        0.061,
+        -0.456,
+        1.097
+      ],
+      "roll": 6.43,
+      "pitch": 0.84,
+      "est_w": [
+        1.82,
+        -0.73
+      ],
+      "true_w": [
+        -1.42,
+        -1.03
+      ],
+      "rx_rng": [
+        -0.069,
+        0.071
+      ],
+      "ry_rng": [
+        -0.529,
+        -0.389
+      ],
+      "rz_rng": [
+        1.011,
+        1.148
+      ],
+      "max_tilt": 10.22
+    },
+    {
+      "lane": 292,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 4.3,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        -0.071,
+        -0.641,
+        1.23
+      ],
+      "rpos": [
+        -0.071,
+        -0.581,
+        1.15
+      ],
+      "roll": 5.73,
+      "pitch": -2.98,
+      "est_w": [
+        -1.35,
+        -2.73
+      ],
+      "true_w": [
+        -1.17,
+        -1.3
+      ],
+      "rx_rng": [
+        -0.071,
+        0.015
+      ],
+      "ry_rng": [
+        -0.581,
+        -0.449
+      ],
+      "rz_rng": [
+        1.01,
+        1.15
+      ],
+      "max_tilt": 7.93
+    },
+    {
+      "lane": 293,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 4.05,
+      "hits": 7,
+      "cause": "ball_high",
+      "bpos": [
+        -0.023,
+        -0.596,
+        1.501
+      ],
+      "rpos": [
+        -0.023,
+        -0.535,
+        1.068
+      ],
+      "roll": 4.58,
+      "pitch": -2.8,
+      "est_w": [
+        -0.94,
+        -2.9
+      ],
+      "true_w": [
+        -0.88,
+        -1.52
+      ],
+      "rx_rng": [
+        -0.027,
+        0.009
+      ],
+      "ry_rng": [
+        -0.535,
+        -0.455
+      ],
+      "rz_rng": [
+        1.007,
+        1.128
+      ],
+      "max_tilt": 5.37
+    },
+    {
+      "lane": 294,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 8.12,
+      "hits": 13,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.187,
+        -0.445,
+        0.998
+      ],
+      "rpos": [
+        0.081,
+        -0.429,
+        1.084
+      ],
+      "roll": 2.18,
+      "pitch": 3.36,
+      "est_w": [
+        3.83,
+        -0.53
+      ],
+      "true_w": [
+        -0.54,
+        -1.66
+      ],
+      "rx_rng": [
+        -0.114,
+        0.081
+      ],
+      "ry_rng": [
+        -0.579,
+        -0.429
+      ],
+      "rz_rng": [
+        1.011,
+        1.15
+      ],
+      "max_tilt": 10.58
+    },
+    {
+      "lane": 295,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 5.33,
+      "hits": 10,
+      "cause": "racket_z",
+      "bpos": [
+        0.03,
+        -0.543,
+        1.253
+      ],
+      "rpos": [
+        0.007,
+        -0.531,
+        1.151
+      ],
+      "roll": 2.43,
+      "pitch": 3.21,
+      "est_w": [
+        1.07,
+        -2.08
+      ],
+      "true_w": [
+        -0.18,
+        -1.74
+      ],
+      "rx_rng": [
+        -0.039,
+        0.025
+      ],
+      "ry_rng": [
+        -0.559,
+        -0.447
+      ],
+      "rz_rng": [
+        1.008,
+        1.151
+      ],
+      "max_tilt": 7.85
+    },
+    {
+      "lane": 296,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 20.93,
+      "hits": 30,
+      "cause": "recontact",
+      "bpos": [
+        -0.063,
+        -0.406,
+        1.104
+      ],
+      "rpos": [
+        -0.054,
+        -0.419,
+        1.081
+      ],
+      "roll": 1.91,
+      "pitch": -5.77,
+      "est_w": [
+        -1.99,
+        -1.86
+      ],
+      "true_w": [
+        0.18,
+        -1.74
+      ],
+      "rx_rng": [
+        -0.08,
+        0.067
+      ],
+      "ry_rng": [
+        -0.531,
+        -0.407
+      ],
+      "rz_rng": [
+        1.008,
+        1.146
+      ],
+      "max_tilt": 8.78
+    },
+    {
+      "lane": 297,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 4.84,
+      "hits": 11,
+      "cause": "racket_z",
+      "bpos": [
+        0.027,
+        -0.575,
+        1.234
+      ],
+      "rpos": [
+        0.011,
+        -0.538,
+        1.151
+      ],
+      "roll": 3.62,
+      "pitch": 3.96,
+      "est_w": [
+        3.11,
+        -0.44
+      ],
+      "true_w": [
+        0.54,
+        -1.66
+      ],
+      "rx_rng": [
+        -0.031,
+        0.018
+      ],
+      "ry_rng": [
+        -0.54,
+        -0.444
+      ],
+      "rz_rng": [
+        1.01,
+        1.151
+      ],
+      "max_tilt": 7.8
+    },
+    {
+      "lane": 298,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 4.29,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        -0.007,
+        -0.58,
+        1.209
+      ],
+      "rpos": [
+        0.003,
+        -0.559,
+        1.15
+      ],
+      "roll": 2.9,
+      "pitch": 1.21,
+      "est_w": [
+        1.0,
+        -2.72
+      ],
+      "true_w": [
+        0.88,
+        -1.52
+      ],
+      "rx_rng": [
+        -0.021,
+        0.016
+      ],
+      "ry_rng": [
+        -0.56,
+        -0.443
+      ],
+      "rz_rng": [
+        1.006,
+        1.15
+      ],
+      "max_tilt": 7.88
+    },
+    {
+      "lane": 299,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 3.29,
+      "hits": 7,
+      "cause": "racket_z",
+      "bpos": [
+        0.022,
+        -0.6,
+        1.222
+      ],
+      "rpos": [
+        0.016,
+        -0.561,
+        1.15
+      ],
+      "roll": 3.21,
+      "pitch": 3.31,
+      "est_w": [
+        1.52,
+        -2.36
+      ],
+      "true_w": [
+        1.17,
+        -1.3
+      ],
+      "rx_rng": [
+        -0.021,
+        0.016
+      ],
+      "ry_rng": [
+        -0.561,
+        -0.447
+      ],
+      "rz_rng": [
+        1.011,
+        1.15
+      ],
+      "max_tilt": 7.13
+    },
+    {
+      "lane": 300,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 4.22,
+      "hits": 6,
+      "cause": "racket_z",
+      "bpos": [
+        0.114,
+        -0.615,
+        1.288
+      ],
+      "rpos": [
+        0.1,
+        -0.552,
+        1.15
+      ],
+      "roll": 3.15,
+      "pitch": 3.93,
+      "est_w": [
+        2.21,
+        -1.66
+      ],
+      "true_w": [
+        1.42,
+        -1.03
+      ],
+      "rx_rng": [
+        -0.008,
+        0.1
+      ],
+      "ry_rng": [
+        -0.552,
+        -0.45
+      ],
+      "rz_rng": [
+        1.012,
+        1.15
+      ],
+      "max_tilt": 10.57
+    },
+    {
+      "lane": 301,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 4.26,
+      "hits": 6,
+      "cause": "racket_z",
+      "bpos": [
+        0.157,
+        -0.605,
+        1.254
+      ],
+      "rpos": [
+        0.131,
+        -0.54,
+        1.15
+      ],
+      "roll": 1.9,
+      "pitch": 3.56,
+      "est_w": [
+        2.67,
+        0.0
+      ],
+      "true_w": [
+        1.6,
+        -0.71
+      ],
+      "rx_rng": [
+        -0.016,
+        0.131
+      ],
+      "ry_rng": [
+        -0.54,
+        -0.444
+      ],
+      "rz_rng": [
+        1.002,
+        1.15
+      ],
+      "max_tilt": 11.01
+    },
+    {
+      "lane": 302,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 16.35,
+      "hits": 28,
+      "cause": "racket_z",
+      "bpos": [
+        0.144,
+        -0.539,
+        1.248
+      ],
+      "rpos": [
+        0.121,
+        -0.497,
+        1.151
+      ],
+      "roll": 0.57,
+      "pitch": 5.04,
+      "est_w": [
+        1.65,
+        0.0
+      ],
+      "true_w": [
+        1.71,
+        -0.36
+      ],
+      "rx_rng": [
+        -0.065,
+        0.121
+      ],
+      "ry_rng": [
+        -0.515,
+        -0.435
+      ],
+      "rz_rng": [
+        1.006,
+        1.151
+      ],
+      "max_tilt": 9.62
+    },
+    {
+      "lane": 303,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 11.46,
+      "hits": 24,
+      "cause": "racket_z",
+      "bpos": [
+        0.033,
+        -0.509,
+        1.257
+      ],
+      "rpos": [
+        0.014,
+        -0.494,
+        1.151
+      ],
+      "roll": 0.53,
+      "pitch": 4.72,
+      "est_w": [
+        2.92,
+        -0.57
+      ],
+      "true_w": [
+        1.75,
+        0.0
+      ],
+      "rx_rng": [
+        -0.045,
+        0.039
+      ],
+      "ry_rng": [
+        -0.521,
+        -0.44
+      ],
+      "rz_rng": [
+        1.006,
+        1.151
+      ],
+      "max_tilt": 8.18
+    },
+    {
+      "lane": 304,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 10.94,
+      "hits": 18,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.249,
+        -0.366,
+        0.993
+      ],
+      "rpos": [
+        0.123,
+        -0.336,
+        1.061
+      ],
+      "roll": -3.35,
+      "pitch": 8.75,
+      "est_w": [
+        -0.35,
+        0.0
+      ],
+      "true_w": [
+        -0.42,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.167,
+        0.123
+      ],
+      "ry_rng": [
+        -0.524,
+        -0.336
+      ],
+      "rz_rng": [
+        1.004,
+        1.122
+      ],
+      "max_tilt": 14.01
+    },
+    {
+      "lane": 305,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 8.21,
+      "hits": 16,
+      "cause": "ball_high",
+      "bpos": [
+        -0.018,
+        -0.541,
+        1.504
+      ],
+      "rpos": [
+        -0.024,
+        -0.536,
+        1.073
+      ],
+      "roll": 0.04,
+      "pitch": -0.83,
+      "est_w": [
+        -1.96,
+        0.0
+      ],
+      "true_w": [
+        -0.41,
+        -0.09
+      ],
+      "rx_rng": [
+        -0.083,
+        0.029
+      ],
+      "ry_rng": [
+        -0.551,
+        -0.423
+      ],
+      "rz_rng": [
+        1.009,
+        1.142
+      ],
+      "max_tilt": 7.23
+    },
+    {
+      "lane": 306,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 13.68,
+      "hits": 21,
+      "cause": "racket_z",
+      "bpos": [
+        0.178,
+        -0.467,
+        1.29
+      ],
+      "rpos": [
+        0.154,
+        -0.449,
+        1.151
+      ],
+      "roll": 2.5,
+      "pitch": 5.22,
+      "est_w": [
+        2.71,
+        -0.66
+      ],
+      "true_w": [
+        -0.38,
+        -0.17
+      ],
+      "rx_rng": [
+        -0.121,
+        0.155
+      ],
+      "ry_rng": [
+        -0.506,
+        -0.361
+      ],
+      "rz_rng": [
+        1.002,
+        1.151
+      ],
+      "max_tilt": 11.31
+    },
+    {
+      "lane": 307,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 9.6,
+      "hits": 18,
+      "cause": "racket_z",
+      "bpos": [
+        0.155,
+        -0.586,
+        1.297
+      ],
+      "rpos": [
+        0.089,
+        -0.501,
+        1.151
+      ],
+      "roll": 4.34,
+      "pitch": 5.99,
+      "est_w": [
+        3.31,
+        -2.49
+      ],
+      "true_w": [
+        -0.34,
+        -0.25
+      ],
+      "rx_rng": [
+        -0.117,
+        0.089
+      ],
+      "ry_rng": [
+        -0.507,
+        -0.38
+      ],
+      "rz_rng": [
+        1.005,
+        1.151
+      ],
+      "max_tilt": 8.81
+    },
+    {
+      "lane": 308,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 10.55,
+      "hits": 19,
+      "cause": "racket_z",
+      "bpos": [
+        -0.004,
+        -0.647,
+        1.248
+      ],
+      "rpos": [
+        -0.021,
+        -0.609,
+        1.151
+      ],
+      "roll": 3.7,
+      "pitch": -3.73,
+      "est_w": [
+        0.46,
+        0.0
+      ],
+      "true_w": [
+        -0.28,
+        -0.31
+      ],
+      "rx_rng": [
+        -0.056,
+        0.014
+      ],
+      "ry_rng": [
+        -0.609,
+        -0.425
+      ],
+      "rz_rng": [
+        1.011,
+        1.151
+      ],
+      "max_tilt": 11.85
+    },
+    {
+      "lane": 309,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 15.73,
+      "hits": 27,
+      "cause": "racket_z",
+      "bpos": [
+        0.019,
+        -0.657,
+        1.203
+      ],
+      "rpos": [
+        0.007,
+        -0.594,
+        1.15
+      ],
+      "roll": 5.37,
+      "pitch": -0.59,
+      "est_w": [
+        1.06,
+        -1.73
+      ],
+      "true_w": [
+        -0.21,
+        -0.36
+      ],
+      "rx_rng": [
+        -0.098,
+        0.052
+      ],
+      "ry_rng": [
+        -0.594,
+        -0.372
+      ],
+      "rz_rng": [
+        1.011,
+        1.15
+      ],
+      "max_tilt": 11.27
+    },
+    {
+      "lane": 310,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 14.58,
+      "hits": 21,
+      "cause": "recontact",
+      "bpos": [
+        0.104,
+        -0.358,
+        1.09
+      ],
+      "rpos": [
+        0.094,
+        -0.324,
+        1.069
+      ],
+      "roll": -4.69,
+      "pitch": 5.11,
+      "est_w": [
+        -0.14,
+        -1.69
+      ],
+      "true_w": [
+        -0.13,
+        -0.4
+      ],
+      "rx_rng": [
+        -0.109,
+        0.094
+      ],
+      "ry_rng": [
+        -0.537,
+        -0.324
+      ],
+      "rz_rng": [
+        1.006,
+        1.13
+      ],
+      "max_tilt": 9.55
+    },
+    {
+      "lane": 311,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 16.32,
+      "hits": 27,
+      "cause": "racket_z",
+      "bpos": [
+        0.085,
+        -0.556,
+        1.278
+      ],
+      "rpos": [
+        0.084,
+        -0.522,
+        1.151
+      ],
+      "roll": 4.09,
+      "pitch": 4.47,
+      "est_w": [
+        2.33,
+        -0.34
+      ],
+      "true_w": [
+        -0.04,
+        -0.42
+      ],
+      "rx_rng": [
+        -0.079,
+        0.084
+      ],
+      "ry_rng": [
+        -0.549,
+        -0.383
+      ],
+      "rz_rng": [
+        1.009,
+        1.151
+      ],
+      "max_tilt": 9.01
+    },
+    {
+      "lane": 312,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 21.64,
+      "hits": 36,
+      "cause": "ball_high",
+      "bpos": [
+        0.012,
+        -0.555,
+        1.5
+      ],
+      "rpos": [
+        0.014,
+        -0.522,
+        1.094
+      ],
+      "roll": 3.64,
+      "pitch": 0.89,
+      "est_w": [
+        0.0,
+        0.0
+      ],
+      "true_w": [
+        0.04,
+        -0.42
+      ],
+      "rx_rng": [
+        -0.06,
+        0.028
+      ],
+      "ry_rng": [
+        -0.53,
+        -0.433
+      ],
+      "rz_rng": [
+        1.005,
+        1.149
+      ],
+      "max_tilt": 7.72
+    },
+    {
+      "lane": 313,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 6.06,
+      "hits": 10,
+      "cause": "ball_high",
+      "bpos": [
+        -0.021,
+        -0.556,
+        1.503
+      ],
+      "rpos": [
+        -0.006,
+        -0.538,
+        1.081
+      ],
+      "roll": 1.14,
+      "pitch": 0.97,
+      "est_w": [
+        0.29,
+        -1.86
+      ],
+      "true_w": [
+        0.13,
+        -0.4
+      ],
+      "rx_rng": [
+        -0.028,
+        0.011
+      ],
+      "ry_rng": [
+        -0.547,
+        -0.453
+      ],
+      "rz_rng": [
+        1.011,
+        1.139
+      ],
+      "max_tilt": 5.6
+    },
+    {
+      "lane": 314,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 7.51,
+      "hits": 15,
+      "cause": "racket_z",
+      "bpos": [
+        0.052,
+        -0.552,
+        1.305
+      ],
+      "rpos": [
+        0.048,
+        -0.521,
+        1.15
+      ],
+      "roll": 3.93,
+      "pitch": 5.33,
+      "est_w": [
+        2.37,
+        -2.32
+      ],
+      "true_w": [
+        0.21,
+        -0.36
+      ],
+      "rx_rng": [
+        -0.063,
+        0.048
+      ],
+      "ry_rng": [
+        -0.542,
+        -0.443
+      ],
+      "rz_rng": [
+        1.009,
+        1.15
+      ],
+      "max_tilt": 7.61
+    },
+    {
+      "lane": 315,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 10.0,
+      "hits": 18,
+      "cause": "racket_z",
+      "bpos": [
+        -0.016,
+        -0.693,
+        1.184
+      ],
+      "rpos": [
+        -0.035,
+        -0.602,
+        1.151
+      ],
+      "roll": 6.69,
+      "pitch": -3.3,
+      "est_w": [
+        -0.42,
+        -3.39
+      ],
+      "true_w": [
+        0.28,
+        -0.31
+      ],
+      "rx_rng": [
+        -0.063,
+        0.012
+      ],
+      "ry_rng": [
+        -0.602,
+        -0.42
+      ],
+      "rz_rng": [
+        1.008,
+        1.151
+      ],
+      "max_tilt": 11.6
+    },
+    {
+      "lane": 316,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 17.81,
+      "hits": 30,
+      "cause": "racket_z",
+      "bpos": [
+        0.027,
+        -0.54,
+        1.232
+      ],
+      "rpos": [
+        0.038,
+        -0.534,
+        1.151
+      ],
+      "roll": 2.63,
+      "pitch": 1.96,
+      "est_w": [
+        1.91,
+        -1.03
+      ],
+      "true_w": [
+        0.34,
+        -0.25
+      ],
+      "rx_rng": [
+        -0.09,
+        0.048
+      ],
+      "ry_rng": [
+        -0.536,
+        -0.364
+      ],
+      "rz_rng": [
+        1.014,
+        1.151
+      ],
+      "max_tilt": 9.06
+    },
+    {
+      "lane": 317,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 22.27,
+      "hits": 39,
+      "cause": "ball_high",
+      "bpos": [
+        -0.026,
+        -0.535,
+        1.501
+      ],
+      "rpos": [
+        -0.024,
+        -0.524,
+        1.069
+      ],
+      "roll": 0.64,
+      "pitch": -1.13,
+      "est_w": [
+        1.83,
+        0.0
+      ],
+      "true_w": [
+        0.38,
+        -0.17
+      ],
+      "rx_rng": [
+        -0.057,
+        0.082
+      ],
+      "ry_rng": [
+        -0.541,
+        -0.43
+      ],
+      "rz_rng": [
+        1.005,
+        1.138
+      ],
+      "max_tilt": 8.33
+    },
+    {
+      "lane": 318,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 34.08,
+      "hits": 59,
+      "cause": "ball_high",
+      "bpos": [
+        0.012,
+        -0.539,
+        1.502
+      ],
+      "rpos": [
+        0.023,
+        -0.522,
+        1.088
+      ],
+      "roll": 1.2,
+      "pitch": 1.86,
+      "est_w": [
+        2.45,
+        0.0
+      ],
+      "true_w": [
+        0.41,
+        -0.09
+      ],
+      "rx_rng": [
+        -0.08,
+        0.057
+      ],
+      "ry_rng": [
+        -0.53,
+        -0.386
+      ],
+      "rz_rng": [
+        1.007,
+        1.144
+      ],
+      "max_tilt": 8.02
+    },
+    {
+      "lane": 319,
+      "scen": "RealExact_W28_Dyn",
+      "sec": 11.73,
+      "hits": 20,
+      "cause": "ball_high",
+      "bpos": [
+        0.091,
+        -0.502,
+        1.503
+      ],
+      "rpos": [
+        0.097,
+        -0.486,
+        1.12
+      ],
+      "roll": 1.07,
+      "pitch": 7.32,
+      "est_w": [
+        2.12,
+        0.0
+      ],
+      "true_w": [
+        0.42,
+        0.0
+      ],
+      "rx_rng": [
+        -0.084,
+        0.097
+      ],
+      "ry_rng": [
+        -0.49,
+        -0.438
+      ],
+      "rz_rng": [
+        1.01,
+        1.144
+      ],
+      "max_tilt": 8.28
+    },
+    {
+      "lane": 448,
+      "scen": "CleanPW_ConePosX_2p8",
+      "sec": 3.29,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        -0.003,
+        -0.55,
+        1.246
+      ],
+      "rpos": [
+        -0.016,
+        -0.536,
+        1.15
+      ],
+      "roll": 3.09,
+      "pitch": 2.52,
+      "est_w": [
+        1.98,
+        -1.98
+      ],
+      "true_w": [
+        1.98,
+        -1.98
+      ],
+      "rx_rng": [
+        -0.022,
+        0.012
+      ],
+      "ry_rng": [
+        -0.537,
+        -0.475
+      ],
+      "rz_rng": [
+        1.02,
+        1.15
+      ],
+      "max_tilt": 8.16
+    },
+    {
+      "lane": 449,
+      "scen": "CleanPW_ConePosX_2p8",
+      "sec": 3.29,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        0.006,
+        -0.543,
+        1.247
+      ],
+      "rpos": [
+        -0.009,
+        -0.531,
+        1.15
+      ],
+      "roll": 3.3,
+      "pitch": 2.85,
+      "est_w": [
+        2.03,
+        -1.93
+      ],
+      "true_w": [
+        2.03,
+        -1.93
+      ],
+      "rx_rng": [
+        -0.021,
+        0.01
+      ],
+      "ry_rng": [
+        -0.532,
+        -0.474
+      ],
+      "rz_rng": [
+        1.018,
+        1.15
+      ],
+      "max_tilt": 7.98
+    },
+    {
+      "lane": 450,
+      "scen": "CleanPW_ConePosX_2p8",
+      "sec": 8.08,
+      "hits": 13,
+      "cause": "recontact",
+      "bpos": [
+        0.039,
+        -0.361,
+        1.136
+      ],
+      "rpos": [
+        0.031,
+        -0.387,
+        1.112
+      ],
+      "roll": 0.39,
+      "pitch": 3.13,
+      "est_w": [
+        2.07,
+        -1.88
+      ],
+      "true_w": [
+        2.08,
+        -1.88
+      ],
+      "rx_rng": [
+        -0.037,
+        0.035
+      ],
+      "ry_rng": [
+        -0.532,
+        -0.382
+      ],
+      "rz_rng": [
+        1.019,
+        1.15
+      ],
+      "max_tilt": 8.27
+    },
+    {
+      "lane": 451,
+      "scen": "CleanPW_ConePosX_2p8",
+      "sec": 7.95,
+      "hits": 14,
+      "cause": "recontact",
+      "bpos": [
+        0.001,
+        -0.389,
+        1.098
+      ],
+      "rpos": [
+        -0.002,
+        -0.417,
+        1.077
+      ],
+      "roll": 2.1,
+      "pitch": 3.09,
+      "est_w": [
+        2.13,
+        -1.82
+      ],
+      "true_w": [
+        2.12,
+        -1.82
+      ],
+      "rx_rng": [
+        -0.04,
+        0.014
+      ],
+      "ry_rng": [
+        -0.531,
+        -0.417
+      ],
+      "rz_rng": [
+        1.017,
+        1.15
+      ],
+      "max_tilt": 8.34
+    },
+    {
+      "lane": 452,
+      "scen": "CleanPW_ConePosX_2p8",
+      "sec": 3.29,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        0.015,
+        -0.549,
+        1.25
+      ],
+      "rpos": [
+        -0.004,
+        -0.532,
+        1.15
+      ],
+      "roll": 2.29,
+      "pitch": 3.12,
+      "est_w": [
+        2.17,
+        -1.77
+      ],
+      "true_w": [
+        2.17,
+        -1.77
+      ],
+      "rx_rng": [
+        -0.019,
+        0.011
+      ],
+      "ry_rng": [
+        -0.534,
+        -0.475
+      ],
+      "rz_rng": [
+        1.019,
+        1.15
+      ],
+      "max_tilt": 8.43
+    },
+    {
+      "lane": 453,
+      "scen": "CleanPW_ConePosX_2p8",
+      "sec": 3.3,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        0.006,
+        -0.533,
+        1.279
+      ],
+      "rpos": [
+        -0.004,
+        -0.527,
+        1.15
+      ],
+      "roll": 2.52,
+      "pitch": 3.15,
+      "est_w": [
+        2.21,
+        -1.71
+      ],
+      "true_w": [
+        2.21,
+        -1.71
+      ],
+      "rx_rng": [
+        -0.018,
+        0.009
+      ],
+      "ry_rng": [
+        -0.529,
+        -0.473
+      ],
+      "rz_rng": [
+        1.019,
+        1.15
+      ],
+      "max_tilt": 8.1
+    },
+    {
+      "lane": 457,
+      "scen": "CleanPW_ConePosX_2p8",
+      "sec": 3.27,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        0.01,
+        -0.532,
+        1.265
+      ],
+      "rpos": [
+        0.0,
+        -0.523,
+        1.15
+      ],
+      "roll": 2.63,
+      "pitch": 3.71,
+      "est_w": [
+        2.38,
+        -1.48
+      ],
+      "true_w": [
+        2.38,
+        -1.48
+      ],
+      "rx_rng": [
+        -0.017,
+        0.019
+      ],
+      "ry_rng": [
+        -0.524,
+        -0.474
+      ],
+      "rz_rng": [
+        1.02,
+        1.15
+      ],
+      "max_tilt": 7.62
+    },
+    {
+      "lane": 458,
+      "scen": "CleanPW_ConePosX_2p8",
+      "sec": 3.29,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        0.016,
+        -0.536,
+        1.25
+      ],
+      "rpos": [
+        -0.004,
+        -0.521,
+        1.15
+      ],
+      "roll": 2.12,
+      "pitch": 3.54,
+      "est_w": [
+        2.41,
+        -1.42
+      ],
+      "true_w": [
+        2.41,
+        -1.42
+      ],
+      "rx_rng": [
+        -0.014,
+        0.02
+      ],
+      "ry_rng": [
+        -0.523,
+        -0.472
+      ],
+      "rz_rng": [
+        1.019,
+        1.15
+      ],
+      "max_tilt": 7.93
+    },
+    {
+      "lane": 546,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 10.23,
+      "hits": 11,
+      "cause": "recontact",
+      "bpos": [
+        0.063,
+        -0.358,
+        1.061
+      ],
+      "rpos": [
+        0.03,
+        -0.369,
+        1.04
+      ],
+      "roll": -2.23,
+      "pitch": -2.45,
+      "est_w": [
+        -3.2,
+        -0.08
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.119,
+        0.084
+      ],
+      "ry_rng": [
+        -0.506,
+        -0.349
+      ],
+      "rz_rng": [
+        1.005,
+        1.122
+      ],
+      "max_tilt": 12.65
+    },
+    {
+      "lane": 548,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.63,
+      "hits": 9,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.131,
+        -0.289,
+        1.028
+      ],
+      "rpos": [
+        0.098,
+        -0.292,
+        1.002
+      ],
+      "roll": -4.34,
+      "pitch": 0.79,
+      "est_w": [
+        -3.2,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.117,
+        0.139
+      ],
+      "ry_rng": [
+        -0.51,
+        -0.292
+      ],
+      "rz_rng": [
+        1.002,
+        1.129
+      ],
+      "max_tilt": 9.42
+    },
+    {
+      "lane": 549,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.63,
+      "hits": 10,
+      "cause": "racket_z",
+      "bpos": [
+        0.059,
+        -0.354,
+        1.02
+      ],
+      "rpos": [
+        0.056,
+        -0.335,
+        1.0
+      ],
+      "roll": -0.84,
+      "pitch": -0.9,
+      "est_w": [
+        -3.2,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.113,
+        0.112
+      ],
+      "ry_rng": [
+        -0.507,
+        -0.335
+      ],
+      "rz_rng": [
+        1.0,
+        1.122
+      ],
+      "max_tilt": 9.35
+    },
+    {
+      "lane": 551,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 5.87,
+      "hits": 10,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.088,
+        -0.704,
+        1.034
+      ],
+      "rpos": [
+        0.022,
+        -0.518,
+        1.127
+      ],
+      "roll": 2.75,
+      "pitch": -6.23,
+      "est_w": [
+        -3.2,
+        -0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.117,
+        0.06
+      ],
+      "ry_rng": [
+        -0.519,
+        -0.459
+      ],
+      "rz_rng": [
+        1.004,
+        1.132
+      ],
+      "max_tilt": 9.61
+    },
+    {
+      "lane": 552,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.71,
+      "hits": 10,
+      "cause": "racket_z",
+      "bpos": [
+        0.046,
+        -0.369,
+        1.186
+      ],
+      "rpos": [
+        0.042,
+        -0.359,
+        1.0
+      ],
+      "roll": -0.72,
+      "pitch": -1.31,
+      "est_w": [
+        -3.21,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.11,
+        0.089
+      ],
+      "ry_rng": [
+        -0.51,
+        -0.356
+      ],
+      "rz_rng": [
+        1.0,
+        1.123
+      ],
+      "max_tilt": 9.41
+    },
+    {
+      "lane": 553,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 5.85,
+      "hits": 10,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.132,
+        -0.579,
+        0.998
+      ],
+      "rpos": [
+        0.084,
+        -0.493,
+        1.136
+      ],
+      "roll": 3.65,
+      "pitch": -6.91,
+      "est_w": [
+        -3.2,
+        -0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.124,
+        0.107
+      ],
+      "ry_rng": [
+        -0.516,
+        -0.457
+      ],
+      "rz_rng": [
+        1.001,
+        1.141
+      ],
+      "max_tilt": 10.05
+    },
+    {
+      "lane": 554,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 9.13,
+      "hits": 10,
+      "cause": "racket_z",
+      "bpos": [
+        0.059,
+        -0.29,
+        1.04
+      ],
+      "rpos": [
+        0.046,
+        -0.296,
+        1.0
+      ],
+      "roll": -6.97,
+      "pitch": -2.38,
+      "est_w": [
+        -3.2,
+        -0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.107,
+        0.067
+      ],
+      "ry_rng": [
+        -0.505,
+        -0.296
+      ],
+      "rz_rng": [
+        1.0,
+        1.122
+      ],
+      "max_tilt": 10.34
+    },
+    {
+      "lane": 558,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.65,
+      "hits": 10,
+      "cause": "racket_z",
+      "bpos": [
+        0.048,
+        -0.347,
+        1.023
+      ],
+      "rpos": [
+        0.05,
+        -0.336,
+        1.0
+      ],
+      "roll": -1.21,
+      "pitch": -1.09,
+      "est_w": [
+        -3.2,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.119,
+        0.106
+      ],
+      "ry_rng": [
+        -0.509,
+        -0.336
+      ],
+      "rz_rng": [
+        1.0,
+        1.124
+      ],
+      "max_tilt": 9.32
+    },
+    {
+      "lane": 560,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.67,
+      "hits": 9,
+      "cause": "racket_z",
+      "bpos": [
+        0.057,
+        -0.369,
+        1.167
+      ],
+      "rpos": [
+        0.053,
+        -0.35,
+        1.0
+      ],
+      "roll": -0.24,
+      "pitch": -0.59,
+      "est_w": [
+        -3.2,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.122,
+        0.115
+      ],
+      "ry_rng": [
+        -0.507,
+        -0.348
+      ],
+      "rz_rng": [
+        1.0,
+        1.121
+      ],
+      "max_tilt": 9.46
+    },
+    {
+      "lane": 561,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 5.53,
+      "hits": 10,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        0.258,
+        -0.703,
+        1.197
+      ],
+      "rpos": [
+        0.032,
+        -0.482,
+        1.107
+      ],
+      "roll": 5.48,
+      "pitch": -4.6,
+      "est_w": [
+        -3.2,
+        -0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.121,
+        0.032
+      ],
+      "ry_rng": [
+        -0.504,
+        -0.455
+      ],
+      "rz_rng": [
+        1.005,
+        1.121
+      ],
+      "max_tilt": 9.78
+    },
+    {
+      "lane": 562,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.66,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        0.041,
+        -0.373,
+        1.179
+      ],
+      "rpos": [
+        0.049,
+        -0.351,
+        1.0
+      ],
+      "roll": 0.25,
+      "pitch": -0.98,
+      "est_w": [
+        -3.2,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.12,
+        0.105
+      ],
+      "ry_rng": [
+        -0.514,
+        -0.346
+      ],
+      "rz_rng": [
+        1.0,
+        1.122
+      ],
+      "max_tilt": 9.39
+    },
+    {
+      "lane": 563,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 10.8,
+      "hits": 12,
+      "cause": "recontact",
+      "bpos": [
+        0.06,
+        -0.421,
+        1.065
+      ],
+      "rpos": [
+        -0.001,
+        -0.422,
+        1.048
+      ],
+      "roll": 0.56,
+      "pitch": -5.26,
+      "est_w": [
+        -3.2,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.134,
+        0.094
+      ],
+      "ry_rng": [
+        -0.512,
+        -0.348
+      ],
+      "rz_rng": [
+        1.0,
+        1.121
+      ],
+      "max_tilt": 13.31
+    },
+    {
+      "lane": 564,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.63,
+      "hits": 9,
+      "cause": "racket_z",
+      "bpos": [
+        -0.009,
+        -0.368,
+        1.107
+      ],
+      "rpos": [
+        0.013,
+        -0.356,
+        1.0
+      ],
+      "roll": 1.03,
+      "pitch": -3.45,
+      "est_w": [
+        -3.2,
+        -0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.134,
+        0.077
+      ],
+      "ry_rng": [
+        -0.526,
+        -0.354
+      ],
+      "rz_rng": [
+        1.0,
+        1.121
+      ],
+      "max_tilt": 9.52
+    },
+    {
+      "lane": 565,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 7.63,
+      "hits": 10,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        -0.02,
+        -0.333,
+        0.991
+      ],
+      "rpos": [
+        -0.037,
+        -0.419,
+        1.062
+      ],
+      "roll": -0.14,
+      "pitch": -1.68,
+      "est_w": [
+        -1.36,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.118,
+        0.088
+      ],
+      "ry_rng": [
+        -0.502,
+        -0.357
+      ],
+      "rz_rng": [
+        1.002,
+        1.121
+      ],
+      "max_tilt": 13.18
+    },
+    {
+      "lane": 566,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.61,
+      "hits": 8,
+      "cause": "racket_z",
+      "bpos": [
+        0.073,
+        -0.334,
+        1.038
+      ],
+      "rpos": [
+        0.063,
+        -0.332,
+        0.999
+      ],
+      "roll": -2.1,
+      "pitch": -0.91,
+      "est_w": [
+        -3.2,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.125,
+        0.118
+      ],
+      "ry_rng": [
+        -0.521,
+        -0.332
+      ],
+      "rz_rng": [
+        0.999,
+        1.125
+      ],
+      "max_tilt": 9.52
+    },
+    {
+      "lane": 568,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 5.41,
+      "hits": 9,
+      "cause": "other(xy_oob)",
+      "bpos": [
+        -0.011,
+        -0.704,
+        1.316
+      ],
+      "rpos": [
+        -0.042,
+        -0.515,
+        1.083
+      ],
+      "roll": 0.38,
+      "pitch": -5.57,
+      "est_w": [
+        -3.19,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.124,
+        0.008
+      ],
+      "ry_rng": [
+        -0.522,
+        -0.462
+      ],
+      "rz_rng": [
+        1.001,
+        1.122
+      ],
+      "max_tilt": 9.47
+    },
+    {
+      "lane": 573,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.47,
+      "hits": 9,
+      "cause": "recontact",
+      "bpos": [
+        0.16,
+        -0.331,
+        1.08
+      ],
+      "rpos": [
+        0.098,
+        -0.352,
+        1.055
+      ],
+      "roll": -2.04,
+      "pitch": 1.75,
+      "est_w": [
+        -3.2,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.122,
+        0.138
+      ],
+      "ry_rng": [
+        -0.515,
+        -0.352
+      ],
+      "rz_rng": [
+        1.002,
+        1.128
+      ],
+      "max_tilt": 9.4
+    },
+    {
+      "lane": 574,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.67,
+      "hits": 11,
+      "cause": "racket_z",
+      "bpos": [
+        0.056,
+        -0.355,
+        1.177
+      ],
+      "rpos": [
+        0.056,
+        -0.341,
+        1.0
+      ],
+      "roll": -0.37,
+      "pitch": -0.12,
+      "est_w": [
+        -3.2,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.118,
+        0.117
+      ],
+      "ry_rng": [
+        -0.505,
+        -0.339
+      ],
+      "rz_rng": [
+        1.0,
+        1.122
+      ],
+      "max_tilt": 9.36
+    },
+    {
+      "lane": 575,
+      "scen": "CleanPW_NegX_3p2",
+      "sec": 6.63,
+      "hits": 9,
+      "cause": "racket_z",
+      "bpos": [
+        0.059,
+        -0.334,
+        1.04
+      ],
+      "rpos": [
+        0.055,
+        -0.332,
+        1.0
+      ],
+      "roll": -1.86,
+      "pitch": -1.19,
+      "est_w": [
+        -3.08,
+        0.0
+      ],
+      "true_w": [
+        -3.2,
+        -0.0
+      ],
+      "rx_rng": [
+        -0.126,
+        0.11
+      ],
+      "ry_rng": [
+        -0.516,
+        -0.332
+      ],
+      "rz_rng": [
+        1.0,
+        1.128
+      ],
+      "max_tilt": 9.52
+    }
+  ]
+}

@@ -108,7 +108,8 @@ from pingpong_controller.done_condition_monitor import (
     _wrap_angle_rad,
 )
 from pingpong_controller.fplc_deployment import (
-    FPLC_CONTRACTS, FPLC_PROFILES, fplc_assets, fplc_workspace_intersection,
+    DEFAULT_OBS_WIND_MAX_M_S, FPLC_CONTRACTS, FPLC_PROFILES, fplc_assets,
+    fplc_obs_wind_max_m_s, fplc_workspace_intersection,
     fplc_workspace_for_profile,
     FPLC_JOINT_FEEDBACK_MAX_AGE_S, FPLC_JOINT_FEEDBACK_WAIT_S,
     FPLC_JOINT_FEEDBACK_MAX_GAP_S,
@@ -3367,8 +3368,9 @@ def _analyze_sim_real_gap(
             "complete lockstep run")
 
     comparisons: list[dict[str, Any]] = []
-    obs_names = _obs_names(max(
-        (len(r.get("policyObs", [])) for r in sim_rows), default=0))
+    obs_names = _obs_names(
+        max((len(r.get("policyObs", [])) for r in sim_rows), default=0),
+        wind_max_m_s=fplc_obs_wind_max_m_s(selected_key[0]))
     real_ddq = _aligned_joint_acceleration(
         sim_rows, "policyObs", time_key="ros.jointSampleStampS")
     sim_ddq = _aligned_joint_acceleration(sim_rows, "sim.policyObs")
@@ -4274,7 +4276,7 @@ window.addEventListener('resize', draw); draw();
     return out
 
 
-def _obs_names(width: int) -> list[str]:
+def _obs_names(width: int, *, wind_max_m_s: float | None = DEFAULT_OBS_WIND_MAX_M_S) -> list[str]:
     if width in (72, 114, 117, 120, 156):
         prefix = [*(f"arm_q[{i}]" for i in range(7)),
                   *(f"arm_dq[{i}]" for i in range(7)),
@@ -4296,9 +4298,10 @@ def _obs_names(width: int) -> list[str]:
                 names += [f"wind_history_{lag}ms.delta_{axis}" for lag in lags_ms for axis in "xyz"]
                 names += [f"wind_history_{lag}ms.age/0.6" for lag in lags_ms]
                 names += [f"wind_history_{lag}ms.valid" for lag in lags_ms]
+                denominator = f"{wind_max_m_s:g}" if wind_max_m_s is not None else "profile_wind_max"
                 names += (["roll_authority/20deg", "pitch_authority/20deg"] if width == 114 else [
                     "acquisition_progress_3s", "acquisition_fast_phase",
-                    "estimated_wind_x/1.6", "estimated_wind_y/1.6",
+                    f"estimated_wind_x/{denominator}", f"estimated_wind_y/{denominator}",
                     "wind_estimate_age/0.6", "wind_estimate_valid",
                     "high_wind_feature_x", "high_wind_feature_y"])
             return names
@@ -4490,6 +4493,7 @@ def _make_analysis_data(
             "ballSource": row.get("ballSource"),
             "policyProfile": runtime.get(
                 "activePolicyProfile", runtime.get("policyProfile")),
+            "simPolicyProfile": sim_sync.get("policyProfile", sim.get("policyProfile")),
             "policyGeneration": runtime.get("policyGeneration"),
             "simEpisode": sim_sync.get("episode"),
             "valid": bool(row.get("valid", False)),
@@ -4574,6 +4578,17 @@ def _make_analysis_data(
             and int(row.get("simEpisode", 0) or 0)
             == int(selected_cohort.get("simEpisode", 0) or 0)
         )
+
+    def recorded_obs_names(width, obs_key, profile_key):
+        if width != 120:
+            return _obs_names(width)
+        policy_cfg = config.get("policy", {}) if isinstance(config, dict) else {}
+        fallback = policy_cfg.get("activeProfile", "") if isinstance(policy_cfg, dict) else ""
+        scales = {fplc_obs_wind_max_m_s(row[profile_key] or fallback)
+                  for row in curve_rows if len(row[obs_key]) == 120}
+        scale = None if len(scales) > 1 else next(iter(scales), fplc_obs_wind_max_m_s(fallback))
+        return _obs_names(width, wind_max_m_s=scale)
+
     return {
         "metadata": {
             "analysisSchemaVersion": ANALYSIS_SCHEMA_VERSION,
@@ -4590,9 +4605,9 @@ def _make_analysis_data(
         "simFrames": sim_frames,
         "points": points,
         "samples": curve_rows,
-        "obsNames": _obs_names(obs_width),
+        "obsNames": recorded_obs_names(obs_width, "policyObs", "policyProfile"),
         "actionNames": [f"action[{i}]" for i in range(action_width)],
-        "simObsNames": _obs_names(sim_obs_width),
+        "simObsNames": recorded_obs_names(sim_obs_width, "simPolicyObs", "simPolicyProfile"),
         "simActionNames": [f"action[{i}]" for i in range(sim_action_width)],
         "noiseReport": noise_report,
         "simRealComparison": sim_comparison,
@@ -7105,6 +7120,7 @@ def _policy_observation_feature(obs, feature):
 def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
     """Expose the actor I/O and command semantics validated at load time."""
     expected_obs_dim = int(getattr(controller, "_expected_obs_dim", 0))
+    wind_max_m_s = fplc_obs_wind_max_m_s(getattr(controller, "observation_profile", ""))
     action_dim = int(getattr(controller, "n_arm", 0))
     model = getattr(controller, "model", None)
     model_obs_shape = tuple(getattr(
@@ -7185,7 +7201,7 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
                     ('observed_ball_history_valid', 104, 112, 'bool'),
                     *([('roll_pitch_authority', 112, 114, 'deg/20')] if expected_obs_dim == 114 else [
                         ('acquisition_phase', 112, 114, 'sin_squared_3s,clipped_72x'),
-                        ('causal_estimated_wind_xy', 114, 116, 'm/s/1.6'),
+                        ('causal_estimated_wind_xy', 114, 116, f'm/s/{wind_max_m_s:g}'),
                         ('wind_estimate_age', 116, 117, 'age/0.6'),
                         ('wind_estimate_valid', 117, 118, 'bool'),
                         ('high_wind_features', 118, 120, 'normalized')]))]
@@ -7245,6 +7261,7 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
             "actorNetworkCount": 2 if expected_obs_dim == 114 else 1,
             "fixedPose": expected_obs_dim == 120,
             "checkpointMetadataSha256": controller.contract.get('checkpoint_metadata_sha256'),
+            "physicalMetadataSha256": controller.contract.get('physical_metadata_sha256'),
             "deploymentRevision": controller.contract.get('deployment_revision'),
             "actorBallAgeMode": controller.contract.get('actor_ball_age_mode', 'measurement_age'),
             "ballObservationAges": dict(getattr(controller, 'last_ball_observation_ages', {})),
@@ -7260,6 +7277,12 @@ def _policy_runtime_contract(controller: Any) -> dict[str, Any]:
                 "source": "racket_launch_XY_surface_Z_follow_IK",
             },
         }
+        if expected_obs_dim == 120:
+            contract["fplc"].update({
+                "obsWindMaxMS": wind_max_m_s,
+                "windFeatureDeadbandMS": controller.wind_feature_deadband_m_s,
+                "windFeatureActivationWidthMS": controller.wind_feature_activation_width_m_s,
+            })
     return contract
 
 
@@ -23631,7 +23654,8 @@ class PolicySafetyProbe:
         policy_profile_contracts = {
             str(profile): {
                 **_policy_runtime_contract(controller),
-                "observationNames": _obs_names(controller._expected_obs_dim),
+                "observationNames": _obs_names(
+                    controller._expected_obs_dim, wind_max_m_s=fplc_obs_wind_max_m_s(profile)),
             }
             for profile, controller in self.policy_controllers.items()
         }
@@ -23746,7 +23770,9 @@ class PolicySafetyProbe:
                 "modelPath": str(active_model_path),
                 "policyXmlPath": str(active_policy_xml_path),
                 "observationDim": self._policy_observation_dim_for_profile(self.active_policy_profile),
-                "observationNames": _obs_names(self._policy_observation_dim_for_profile(self.active_policy_profile)),
+                "observationNames": _obs_names(
+                    self._policy_observation_dim_for_profile(self.active_policy_profile),
+                    wind_max_m_s=fplc_obs_wind_max_m_s(self.active_policy_profile)),
                 "profileContracts": policy_profile_contracts,
                 "observationScale": {
                     "scales": list(_default_policy_observation_scales(
@@ -24797,6 +24823,9 @@ HTML_TEMPLATE = r"""<!doctype html>
           <option value="fplc_gpu1_v324">simcode10 V324 S2 u2947 / V322 相机AR1 (72D)</option>
           <option value="fplc_gpu0_v325">V325 S15 u14400 恒风扰动 1.6 m/s (114D)</option>
           <option value="fplc_gpu0_v325_u416">V325 u416 固定±5° 单MLP (120D，临时版本)</option>
+          <option value="fplc_gpu0_v325_wind_early_r5fast_u6247">V325 wind-early r5_fast u6247 (120D，固定±5°)</option>
+          <option value="fplc_gpu0_v325_wind_early_s2r_u7447">V325 wind-early Sim2Real S09 u7447 (120D，固定±5°)</option>
+          <option value="fplc_gpu0_v325_wind_early_s2r_r6_u7832">V325 wind-early Sim2Real r6 W2.8 u7832 (120D，固定±15°)</option>
         </select>
       </div>
       <div class="row" id="policyModelRow">
@@ -24805,6 +24834,9 @@ HTML_TEMPLATE = r"""<!doctype html>
       </div>
       <div id="fplcWindNote" class="section-note" hidden>V325：1.6 m/s 恒风训练，114D 观测含 500 ms 实测球历史。起球策略 roll/pitch 权限为 ±2°，确认 5 次合格起球后用 1 秒放开到 ±20°；实机外层边界为 ±20°（相对训练参考姿态），yaw 不限。</div>
       <div id="fplcSingle5Note" class="section-note" hidden>V325 u416：单个 MLP，120D 观测；策略目标 roll/pitch 从复位起固定 ±5°，实物外层姿态保护 ±7°，yaw 不限。确认第 5 次合格起球后只更新时间特征，策略目标边界不变。策略年龄按训练缓存刷新时钟计算，原始测量年龄用于有效性检查和记录。风估计来自实测球历史。临时训练版本，完整 1200 秒验收尚未通过。</div>
+      <div id="fplcWindEarlyNote" class="section-note" hidden>u6247 使用单个 MLP，策略目标 roll/pitch 固定 ±5°，实物外层保护 ±7°。球观测默认 90 Hz，风估计来自球位置历史。随模型发布的 60 秒仿真评估通过 1280/1280，实物表现待验证。</div>
+      <div id="fplcWindEarlyS2rNote" class="section-note" hidden>u7447 使用单个 MLP，策略目标 roll/pitch 固定 ±5°，实物外层保护 ±7°。球观测默认 90 Hz。CPU 镜像采用稳态 RMP 协方差初始化。随模型发布的 60 秒实物孪生仿真通过 640/640，实物表现待验证。</div>
+      <div id="fplcWindR6Note" class="section-note" hidden>u7832 的风速观测按 4.5 m/s 限幅和归一化。策略目标 roll/pitch 固定 ±15°，实物外层保护 ±17°。W2.8 为训练里程碑，实物表现待验证。</div>
       <div class="section-title">Policy Observation Scale</div>
       <div class="section-note">每个维度独立保存：实际 actor 输入 = 原始观测 × 对应 scale。切换维度不会清除已设置的其他 scale。</div>
       <div class="row">
@@ -25414,6 +25446,12 @@ function syncPolicyModelControl() {
   if (windNote) windNote.hidden = policyProfileEl.value !== 'fplc_gpu0_v325';
   const single5Note = document.getElementById('fplcSingle5Note');
   if (single5Note) single5Note.hidden = policyProfileEl.value !== 'fplc_gpu0_v325_u416';
+  const windEarlyNote = document.getElementById('fplcWindEarlyNote');
+  if (windEarlyNote) windEarlyNote.hidden = policyProfileEl.value !== 'fplc_gpu0_v325_wind_early_r5fast_u6247';
+  const windEarlyS2rNote = document.getElementById('fplcWindEarlyS2rNote');
+  if (windEarlyS2rNote) windEarlyS2rNote.hidden = policyProfileEl.value !== 'fplc_gpu0_v325_wind_early_s2r_u7447';
+  const windR6Note = document.getElementById('fplcWindR6Note');
+  if (windR6Note) windR6Note.hidden = policyProfileEl.value !== 'fplc_gpu0_v325_wind_early_s2r_r6_u7832';
   if (fplc) inputs.obsHz.value = String((CONFIG.policy?.defaultProfile || '').startsWith('fplc_') ? (CONFIG.defaultBallObservationRateHz || 90) : 90);
   setControlDisabled(inputs.obsHz, fplc);
   if (fplc) inputs.workspaceSafetyMode.value = 'position';

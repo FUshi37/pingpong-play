@@ -1,0 +1,151 @@
+{
+  "task": "V325 Wind-Early Sim2Real Auto-Curriculum (`s2r_v2`): 11-stage zero-recompile ramp from u6247 through exact P_warm (Stages 0..7) and full real-robot physical+sensing DR (Stages 8..10), 100% drop-in 120-D / 1.6m/s / +/-5deg compatible",
+  "revision": "v325_wind_early_sim2real_20261128_s2r_v2",
+  "parent_checkpoint": "pingpong_controller/outputs/rl_sim/v325_wind_early_r5fast_u6247_20261127/model.pkl",
+  "seed": 2026112802,
+  "n_envs": 4096,
+  "n_steps": 128,
+  "allowed_gpu_uuids": [
+    "GPU-3b3e4ba6-dd29-09fe-ba9b-d8da127b3415",
+    "GPU-c1f60ed6-d54e-3759-983a-6be6c87fc0b4"
+  ],
+  "wandb": {
+    "entity": "fushi37",
+    "project": "pingpong-mjx"
+  },
+  "observation": {
+    "actor": 120,
+    "critic": 453,
+    "unchanged_prefix": 118,
+    "runtime": "single5_windfeature120_high_v2"
+  },
+  "wind_domain": {
+    "max_speed_m_s": 1.6,
+    "wind_y_nonpositive": true,
+    "x_axis_half_angle_deg": 45.0,
+    "mix": "30% Clean (10% RealRobotTwin + 20% CleanDR), 50% Constant X-cone (20% peak 1.6m/s + 30% 4 bands), 20% Dynamic (10% Slow OU + 10% Gust)"
+  },
+  "sim2real": {
+    "nominal_clean_fraction": 0.15,
+    "max_horizontal_gravity_m_s2": 0.22,
+    "ball_spawn_xy_jitter_m": 0.006,
+    "mocap_noise_std_m": [0.0006, 0.0006, 0.0008],
+    "rmp_kp_half_range": 0.10,
+    "rmp_kd_half_range": 0.10,
+    "dr_rmp_target_update_hold_probability": 0.01,
+    "calm_tilt_deadband_deg": 1.5,
+    "calm_tilt_scale_deg": 1.0,
+    "calm_tilt_rate_per_s": 6.0,
+    "action_smooth_deadband": 0.06,
+    "action_smooth_scale": 0.08,
+    "action_smooth_rate_per_s": 1.0
+  },
+  "curriculum_stages": [
+    {"id": 0,  "name": "W0_pw25",  "warm_w": 0.250, "dr_scale": 0.00, "min_u": 18, "min_n": 1536, "req_surv": 0.88, "req_clean": 0.92, "req_twin": 0.85, "save_clear": false},
+    {"id": 1,  "name": "W1_pw55",  "warm_w": 0.550, "dr_scale": 0.00, "min_u": 18, "min_n": 1536, "req_surv": 0.88, "req_clean": 0.92, "req_twin": 0.85, "save_clear": false},
+    {"id": 2,  "name": "W2_pw78",  "warm_w": 0.780, "dr_scale": 0.00, "min_u": 18, "min_n": 1536, "req_surv": 0.88, "req_clean": 0.92, "req_twin": 0.85, "save_clear": false},
+    {"id": 3,  "name": "W3_pw90",  "warm_w": 0.900, "dr_scale": 0.00, "min_u": 18, "min_n": 1536, "req_surv": 0.88, "req_clean": 0.92, "req_twin": 0.85, "save_clear": false},
+    {"id": 4,  "name": "W4_pw96",  "warm_w": 0.960, "dr_scale": 0.00, "min_u": 18, "min_n": 1536, "req_surv": 0.88, "req_clean": 0.92, "req_twin": 0.85, "save_clear": false},
+    {"id": 5,  "name": "W5_pw985", "warm_w": 0.985, "dr_scale": 0.00, "min_u": 18, "min_n": 1536, "req_surv": 0.88, "req_clean": 0.92, "req_twin": 0.85, "save_clear": false},
+    {"id": 6,  "name": "W6_pw995", "warm_w": 0.995, "dr_scale": 0.00, "min_u": 18, "min_n": 1536, "req_surv": 0.88, "req_clean": 0.92, "req_twin": 0.85, "save_clear": false},
+    {"id": 7,  "name": "W7_PW100", "warm_w": 1.000, "dr_scale": 0.00, "min_u": 24, "min_n": 2048, "req_surv": 0.88, "req_clean": 0.92, "req_twin": 0.88, "save_clear": true},
+    {"id": 8,  "name": "D1_dr35",  "warm_w": 1.000, "dr_scale": 0.35, "min_u": 24, "min_n": 2048, "req_surv": 0.85, "req_clean": 0.88, "req_twin": 0.85, "save_clear": true},
+    {"id": 9,  "name": "D2_dr65",  "warm_w": 1.000, "dr_scale": 0.65, "min_u": 24, "min_n": 2048, "req_surv": 0.85, "req_clean": 0.88, "req_twin": 0.85, "save_clear": true},
+    {"id": 10, "name": "D3_FULL",  "warm_w": 1.000, "dr_scale": 1.00, "min_u": 999999, "min_n": 999999, "req_surv": 2.0, "req_clean": 2.0, "req_twin": 2.0, "save_clear": false}
+  ],
+  "ppo": {
+    "learning_rate": 2.5e-05,
+    "actor_anchor_kl_coef": 0.0,
+    "clip_range": 0.15,
+    "target_kl": 0.01,
+    "gamma": 0.9995,
+    "gae_lambda": 0.99,
+    "vf_coef": 0.10,
+    "ent_coef": 0.0005,
+    "max_grad_norm": 0.5,
+    "min_log_std": -3.912023005428146,
+    "max_log_std": -3.912023005428146,
+    "update_epochs": 4,
+    "minibatch_size": 65536,
+    "time_limit_bootstrap": true
+  },
+  "feature_optimizer": {
+    "warmup_accepted_minibatches": 0,
+    "feature_rows": [118, 119],
+    "feature_row_learning_rate_multiplier": 1.0,
+    "feature_only_warmup": false,
+    "actor_moments_restart_at_unfreeze": false,
+    "critic_moments_retained": false,
+    "global_adam_step_preserved": true,
+    "independent_actor_critic_clipping": true,
+    "permanent_wind_rows_only": false,
+    "reset_all_moments_on_start": true
+  },
+  "learning_stability": {
+    "critic_warmup_start_t": "auto",
+    "critic_only_minibatches": 384,
+    "maximum_sampled_cohort_step_kl": 0.005,
+    "kl_sigma": 0.020,
+    "step_observations": 4096,
+    "groups": "calm,preonset_or_weak,negativeX,positiveX",
+    "no_teacher_or_BC": true
+  },
+  "reward_revision": {
+    "revision": "original_R10_native_reward_plus_calm_precision_and_failure_reserve",
+    "goal_reward_enabled": false,
+    "targeted_reward_enabled": true,
+    "targeted_variant": "calm_precision",
+    "failure_reserve": 5.0,
+    "weak_calm_release_floor": {
+      "enabled": true,
+      "weight": 12.0
+    }
+  },
+  "stratified_rehearsal": {
+    "enabled": true,
+    "fraction": 0.65,
+    "seconds": 25.0,
+    "stagger_min_steps": 512,
+    "stagger_seed": 2026112806,
+    "metric_capacity": 4096
+  },
+  "onset": {
+    "mode": "stratified_wide",
+    "confirmed_hits": 5,
+    "control_dt_s": 0.005,
+    "ramp_s": 1.0,
+    "early_prob": 0.2,
+    "long_mid_prob": 0.5,
+    "delay_steps_min": 5,
+    "delay_steps_max": 100,
+    "mid_delay_steps_min": 500,
+    "mid_delay_steps_max": 2000,
+    "late_delay_steps_min": 2000,
+    "late_delay_steps_max": 15000,
+    "salt": 2026112805
+  },
+  "checkpoint_retention": {
+    "periodic_every_updates": 8,
+    "cleanup_every_saves": 5
+  },
+  "early_stability_reward": {
+    "enabled": true,
+    "full_weight_until_hit": 15,
+    "taper_zero_at_hit": 25,
+    "dense_zero_at_hit": 20,
+    "center_deadzone_m": 0.004,
+    "center_scale_m": 0.004,
+    "center_weight": 8.0,
+    "hit_vxy_deadzone_m_s": 0.04,
+    "hit_vxy_wind_allowance_m_s": 0.025,
+    "hit_vxy_scale_m_s": 0.025,
+    "hit_vxy_weight": 6.0,
+    "step_vxy_deadzone_m_s": 0.06,
+    "step_vxy_wind_allowance_m_s": 0.05,
+    "step_vxy_scale_m_s": 0.04,
+    "step_vxy_rate_per_s": 12.0,
+    "apex_deadzone_m": 0.008,
+    "apex_scale_m": 0.01,
+    "apex_weight": 6.0
+  }
+}

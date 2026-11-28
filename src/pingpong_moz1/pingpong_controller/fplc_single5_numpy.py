@@ -1,11 +1,11 @@
-"""V325 u416 NumPy runtime, paired with the authenticated 20261124_r1 source.
+"""NumPy runtime for V325 single-actor checkpoints.
 
-observed_force functions below are unchanged from observed_force.py.
-No training code, JAX, teacher or learned wind estimator executes here.
+The causal encoder uses the registered checkpoint's wind normalization.
 """
 import math
 from types import SimpleNamespace
 import numpy as np
+from pingpong_controller.fplc_deployment import DEFAULT_OBS_WIND_MAX_M_S
 from pingpong_controller.fplc_wind_numpy import WindStartupAuthority
 
 
@@ -40,8 +40,8 @@ def select_consistent_wind(winds, valid, ages_s, *, xp):
     return chosen, xp.where(enough, age, .6), enough
 
 
-def observed_force_features(observations, *, xp):
-    """Return (...,4): bounded wind XY/1.6, estimate age/0.6 s, validity."""
+def observed_force_features(observations, *, xp, max_wind_m_s=DEFAULT_OBS_WIND_MAX_M_S):
+    """Return normalized wind XY, estimate age/0.6 s and validity."""
     if observations.shape[-1] < 112:
         raise ValueError('Observed-force features require the registered history prefix')
     positions = observations[..., 72:96].reshape(observations.shape[:-1] + (8, 3))
@@ -73,7 +73,7 @@ def observed_force_features(observations, *, xp):
         wind = velocity[..., :2] + b / relative_speed[..., None]
         wind = xp.stack([wind[..., 0], xp.minimum(wind[..., 1], 0.)], axis=-1)
         norm = xp.sqrt(xp.sum(wind**2, axis=-1))
-        wind = wind * xp.minimum(1., 1.6/xp.maximum(norm, 1.e-6))[..., None]
+        wind = wind * xp.minimum(1., max_wind_m_s/xp.maximum(norm, 1.e-6))[..., None]
         candidates.append(wind)
         candidate_ages.append(xp.clip(.5*(ages[..., index]+ages[..., index+2]), 0., .6))
         candidate_valid.append(usable)
@@ -83,7 +83,7 @@ def observed_force_features(observations, *, xp):
         winds, usable, xp.stack(candidate_ages, axis=-1), xp=xp)
     mature = xp.any(valid & (ages >= .25), axis=-1)
     chosen = chosen & mature
-    estimate = xp.where(chosen[..., None], estimate/1.6, 0.)
+    estimate = xp.where(chosen[..., None], estimate/max_wind_m_s, 0.)
     estimate_age = xp.where(chosen, estimate_age/.6, 1.)
     return xp.concatenate([estimate, estimate_age[..., None],
                            chosen.astype(observations.dtype)[..., None]], axis=-1)
@@ -98,24 +98,28 @@ def acquisition_features(state, *, xp):
     return xp.stack([progress, xp.clip(72. * progress, 0., 1.)], axis=-1)
 
 
-def encode_high_wind(obs, *, xp):
+def encode_high_wind(obs, *, xp, max_wind_m_s=DEFAULT_OBS_WIND_MAX_M_S,
+                     deadband_m_s=1.25, activation_width_m_s=.35):
     """wind_features.encode, preserving the first 118 values exactly."""
     if obs.shape[-1] != 118:
         raise ValueError('Expected the registered 118-D raw actor observation')
     estimated = obs[..., 114:116]
-    speed_m_s = 1.6 * xp.sqrt(xp.sum(estimated * estimated, axis=-1))
-    gain = xp.clip((speed_m_s - 1.25) / .35, 0., 1.)
+    speed_m_s = max_wind_m_s * xp.sqrt(xp.sum(estimated * estimated, axis=-1))
+    gain = xp.clip((speed_m_s - deadband_m_s) / activation_width_m_s, 0., 1.)
     gain = xp.where(obs[..., 112] > 0., gain, 0.)
     return xp.concatenate([obs, estimated * gain[..., None]], axis=-1)
 
 
-def encode_single5(prefix112, phase):
+def encode_single5(prefix112, phase, *, max_wind_m_s=DEFAULT_OBS_WIND_MAX_M_S,
+                   deadband_m_s=1.25, activation_width_m_s=.35):
     prefix112 = np.asarray(prefix112, dtype=np.float32)
     # Invalid candidate medians can contain inf internally; source masks them.
     with np.errstate(invalid='ignore', over='ignore'):
-        estimate = observed_force_features(prefix112, xp=np)
+        estimate = observed_force_features(prefix112, xp=np, max_wind_m_s=max_wind_m_s)
     raw = np.concatenate([prefix112, np.asarray(phase, dtype=np.float32), estimate], axis=-1)
-    return encode_high_wind(raw, xp=np).astype(np.float32)
+    return encode_high_wind(raw, xp=np, max_wind_m_s=max_wind_m_s,
+                            deadband_m_s=deadband_m_s,
+                            activation_width_m_s=activation_width_m_s).astype(np.float32)
 
 
 def single5_policy_mean(weights, obs):
@@ -131,21 +135,24 @@ def single5_policy_mean(weights, obs):
 
 
 class FixedWindAcquisition(WindStartupAuthority):
-    """Share measured launch confirmation; attitude is always five degrees.
+    """Track measured launch confirmation under a fixed attitude limit.
 
     The actor clock starts at the estimated fifth qualified launch. Hardware
     lacks the simulator's contact flag, so this remains a recorded estimate.
     No random training wind-onset delay is sampled or fed to the robot actor.
     """
     def _validate_cfg(self, cfg):
+        pose = cfg['cartesian_pose_roll_limit_deg']
         if (cfg['wind_config']['startup_no_wind_hits'] != 5
-                or cfg['wind_pose']['start_deg'] != 5.
-                or cfg['wind_pose']['target_deg'] != 5.
+                or not np.isfinite(pose) or pose <= 0.
+                or cfg['cartesian_pose_pitch_limit_deg'] != pose
+                or cfg['wind_pose']['start_deg'] != pose
+                or cfg['wind_pose']['target_deg'] != pose
                 or cfg['wind_pose']['ramp_updates'] != 0):
-            raise RuntimeError('u416 requires fixed five-degree pose and five-hit acquisition')
+            raise RuntimeError('Single5 requires a fixed pose and five-hit acquisition')
 
     def limits_deg(self, tick):
-        return np.full(2, 5., dtype=np.float32)
+        return np.full(2, self.cfg['wind_pose']['target_deg'], dtype=np.float32)
 
     def features(self, tick):
         state = SimpleNamespace(step_count=np.asarray([tick], dtype=np.float32),
@@ -156,7 +163,7 @@ class FixedWindAcquisition(WindStartupAuthority):
     def diagnostics(self, tick):
         return {'confirmedHits': self.confirmed_hits, 'fifthHitTick': self.started_tick,
                 'pendingLaunch': self.pending_tick is not None,
-                'relativeRollPitchLimitDeg': [5., 5.],
+                'relativeRollPitchLimitDeg': self.limits_deg(tick).tolist(),
                 'acquisitionFeatures': self.features(tick).tolist(),
                 'phaseDurationS': 3., 'fixedPose': True,
                 'confirmationMethod': 'direct_sensor_near_racket_clearance_apex_estimate'}

@@ -1,0 +1,156 @@
+{
+  "task": "V325 Sim2Real + High-Wind Accelerated (`s2r_r6_fast`) resuming from best_pareto_w22_u7600: splits S2R DR (100% P_warm everywhere; full dr=0.65 on RealTwin+CleanDR+35% wind lanes, clean P_warm physics on 65% wind lanes for 2-3x faster aerodynamics learning), increases LR/KL/sigma, increases early-onset wind exposure (45%), and uses phys+hits promotion across 2.4 -> 2.8 -> 3.2 -> 3.6 -> 4.0 m/s",
+  "revision": "v325_s2r_high_wind_r6_fast_4p0ms_pose15_20261128",
+  "parent_checkpoint": "pingpong_controller/outputs/rl_sim/fplc_wind_early_20261128_s2r_r6/best_pareto_w22_u00007600.pkl",
+  "seed": 2026112870,
+  "n_envs": 4096,
+  "n_steps": 128,
+  "allowed_gpu_uuids": [
+    "GPU-3b3e4ba6-dd29-09fe-ba9b-d8da127b3415",
+    "GPU-c1f60ed6-d54e-3759-983a-6be6c87fc0b4"
+  ],
+  "wandb": {
+    "entity": "fushi37",
+    "project": "pingpong-mjx"
+  },
+  "pose": {
+    "limit_deg": 15.0
+  },
+  "observation": {
+    "actor": 120,
+    "critic": 453,
+    "obs_wind_max_m_s": 4.5,
+    "parent_obs_wind_max_m_s": 4.5,
+    "deadband_m_s": 1.25,
+    "activation_width_m_s": 0.35,
+    "runtime": "single5_highwind120_4p5ms_v1"
+  },
+  "wind_domain": {
+    "max_speed_m_s": 4.0,
+    "force_limit_n": 0.025,
+    "ball_mass_kg": 0.004,
+    "wind_y_nonpositive": true,
+    "x_axis_half_angle_deg": 45.0,
+    "mix": "20% Clean (10% RealRobotTwin + 10% CleanDR), 60% Constant X-cone (25% active peak + 35% 4 bands), 20% Dynamic (10% Slow OU + 10% Gust)"
+  },
+  "sim2real": {
+    "dr_scale": 0.65,
+    "nominal_clean_fraction": 0.15,
+    "wind_dr_fraction": 0.35,
+    "max_horizontal_gravity_m_s2": 0.22,
+    "ball_spawn_xy_jitter_m": 0.006,
+    "mocap_noise_std_m": [0.0006, 0.0006, 0.0008],
+    "rmp_kp_half_range": 0.10,
+    "rmp_kd_half_range": 0.10,
+    "dr_rmp_target_update_hold_probability": 0.01,
+    "action_smooth_deadband": 0.06,
+    "action_smooth_scale": 0.08,
+    "action_smooth_rate_per_s": 0.5
+  },
+  "wind_curriculum": {
+    "speeds_m_s": [2.4, 2.8, 3.2, 3.6, 4.0],
+    "min_stage_updates": 20,
+    "min_rehearsal_n": 1024,
+    "promote_twin_min": 0.90,
+    "promote_clean_min": 0.95,
+    "promote_peak_min": 0.88,
+    "promote_dyn_min": 0.88,
+    "promote_streak": 2
+  },
+  "ppo": {
+    "learning_rate": 3.5e-05,
+    "actor_anchor_kl_coef": 0.0,
+    "clip_range": 0.15,
+    "target_kl": 0.015,
+    "gamma": 0.9995,
+    "gae_lambda": 0.99,
+    "vf_coef": 0.10,
+    "ent_coef": 0.0005,
+    "max_grad_norm": 0.5,
+    "min_log_std": -3.81671282562382,
+    "max_log_std": -3.81671282562382,
+    "update_epochs": 4,
+    "minibatch_size": 65536,
+    "time_limit_bootstrap": true
+  },
+  "feature_optimizer": {
+    "warmup_accepted_minibatches": 0,
+    "feature_rows": [118, 119],
+    "feature_row_learning_rate_multiplier": 1.0,
+    "feature_only_warmup": false,
+    "actor_moments_restart_at_unfreeze": false,
+    "critic_moments_retained": false,
+    "global_adam_step_preserved": true,
+    "independent_actor_critic_clipping": true,
+    "permanent_wind_rows_only": false,
+    "reset_all_moments_on_start": true
+  },
+  "learning_stability": {
+    "critic_warmup_start_t": "auto",
+    "critic_only_minibatches": 192,
+    "maximum_sampled_cohort_step_kl": 0.008,
+    "kl_sigma": 0.022,
+    "step_observations": 4096,
+    "groups": "calm,preonset_or_weak,negativeX,positiveX",
+    "no_teacher_or_BC": true
+  },
+  "reward_revision": {
+    "revision": "original_R10_native_reward_plus_calm_precision_and_failure_reserve",
+    "goal_reward_enabled": false,
+    "targeted_reward_enabled": true,
+    "targeted_variant": "calm_precision",
+    "failure_reserve": 5.0,
+    "weak_calm_release_floor": {
+      "enabled": true,
+      "weight": 12.0
+    }
+  },
+  "stratified_rehearsal": {
+    "enabled": true,
+    "fraction": 0.65,
+    "seconds": 25.0,
+    "stagger_min_steps": 512,
+    "stagger_seed": 2026112876,
+    "metric_capacity": 2048
+  },
+  "onset": {
+    "mode": "stratified_wide",
+    "confirmed_hits": 5,
+    "control_dt_s": 0.005,
+    "ramp_s": 1.0,
+    "early_prob": 0.45,
+    "long_mid_prob": 0.35,
+    "delay_steps_min": 5,
+    "delay_steps_max": 100,
+    "mid_delay_steps_min": 500,
+    "mid_delay_steps_max": 2000,
+    "late_delay_steps_min": 2000,
+    "late_delay_steps_max": 15000,
+    "salt": 2026112870
+  },
+  "checkpoint_retention": {
+    "periodic_every_updates": 8,
+    "cleanup_every_saves": 5
+  },
+  "early_stability_reward": {
+    "enabled": true,
+    "full_weight_until_hit": 15,
+    "taper_zero_at_hit": 25,
+    "dense_zero_at_hit": 20,
+    "center_deadzone_m": 0.004,
+    "center_scale_m": 0.004,
+    "center_weight": 8.0,
+    "hit_vxy_deadzone_m_s": 0.04,
+    "hit_vxy_wind_allowance_m_s": 0.025,
+    "hit_vxy_scale_m_s": 0.025,
+    "hit_vxy_weight": 6.0,
+    "step_vxy_deadzone_m_s": 0.06,
+    "step_vxy_wind_allowance_m_s": 0.05,
+    "step_vxy_scale_m_s": 0.04,
+    "step_vxy_rate_per_s": 12.0,
+    "vxy_wind_suppression_m_s": 1.6,
+    "apex_deadzone_m": 0.008,
+    "apex_scale_m": 0.01,
+    "apex_weight": 6.0
+  }
+}

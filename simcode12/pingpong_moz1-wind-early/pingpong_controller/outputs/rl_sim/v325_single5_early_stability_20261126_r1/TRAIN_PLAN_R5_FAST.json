@@ -1,0 +1,138 @@
+{
+  "task": "V325 Stage 5 Fast (r5_fast) from r5 best_pareto_u00005608.pkl at 4096 envs: aggressive speedup on stratified wide wind-onset (lr=1.5e-5, cohort_step_kl=0.0020, clip=0.12)",
+  "revision": "v325_single5_early_stability_20261127_r5_fast",
+  "source_u416_dir": "pingpong_controller/outputs/rl_sim/v325_single5_provisional416_20261124_r1",
+  "parent_checkpoint": "pingpong_controller/outputs/rl_sim/fplc_wind_early_20261127_r5/best_pareto_u00005608.pkl",
+  "seed": 2026112715,
+  "n_envs": 4096,
+  "n_steps": 128,
+  "allowed_gpu_uuids": [
+    "GPU-3b3e4ba6-dd29-09fe-ba9b-d8da127b3415",
+    "GPU-c1f60ed6-d54e-3759-983a-6be6c87fc0b4"
+  ],
+  "wandb": {
+    "entity": "fushi37",
+    "project": "pingpong-mjx"
+  },
+  "observation": {
+    "actor": 120,
+    "critic": 453,
+    "unchanged_prefix": 118,
+    "new_suffix": "Two causal estimated windXY transforms active above 1.25m/s, width 0.35m/s after hit 5; no privileged wind",
+    "runtime": "single5_windfeature120_high_v2"
+  },
+  "direct_trainable_actor_parameters": 195715,
+  "ppo": {
+    "learning_rate": 1.5e-05,
+    "actor_anchor_kl_coef": 0.0,
+    "clip_range": 0.12,
+    "target_kl": 0.006,
+    "gamma": 0.9995,
+    "gae_lambda": 0.99,
+    "vf_coef": 0.05,
+    "ent_coef": 0.001,
+    "max_grad_norm": 0.5,
+    "min_log_std": -5.298317366548036,
+    "max_log_std": -5.298317366548036,
+    "update_epochs": 4,
+    "minibatch_size": 65536,
+    "time_limit_bootstrap": true
+  },
+  "feature_optimizer": {
+    "warmup_accepted_minibatches": 512,
+    "feature_rows": [
+      118,
+      119
+    ],
+    "feature_row_learning_rate_multiplier": 1.0,
+    "feature_only_warmup": true,
+    "actor_moments_restart_at_unfreeze": true,
+    "critic_moments_retained": true,
+    "global_adam_step_preserved": true,
+    "independent_actor_critic_clipping": true,
+    "permanent_wind_rows_only": false,
+    "frozen_actor_values_and_moments_preserved": false,
+    "verify_parent_frozen_base": false,
+    "reset_actor_moments_on_start": false
+  },
+  "learning_stability": {
+    "critic_warmup_start_t": "auto",
+    "critic_only_minibatches": 0,
+    "maximum_sampled_cohort_step_kl": 0.002,
+    "step_observations": 4096,
+    "groups": "calm,preonset_or_weak,negativeX,positiveX",
+    "no_teacher_or_BC": true
+  },
+  "reward_revision": {
+    "revision": "original_R10_native_reward_plus_calm_precision_and_failure_reserve",
+    "goal_reward_enabled": false,
+    "targeted_reward_enabled": true,
+    "targeted_variant": "calm_precision",
+    "failure_reserve": 5.0,
+    "weak_calm_release_floor": {
+      "enabled": true,
+      "weight": 12.0
+    }
+  },
+  "stratified_rehearsal": {
+    "enabled": true,
+    "fraction": 0.65,
+    "seconds": 25.0,
+    "stagger_min_steps": 512,
+    "stagger_seed": 2026112765,
+    "metric_capacity": 4096,
+    "counts_as_full1200_success": false
+  },
+  "onset": {
+    "mode": "stratified_wide",
+    "confirmed_hits": 5,
+    "control_dt_s": 0.005,
+    "ramp_s": 1.0,
+    "early_prob": 0.2,
+    "long_mid_prob": 0.5,
+    "delay_steps_min": 5,
+    "delay_steps_max": 100,
+    "mid_delay_steps_min": 500,
+    "mid_delay_steps_max": 2000,
+    "late_delay_steps_min": 2000,
+    "late_delay_steps_max": 15000,
+    "salt": 2026112705
+  },
+  "wind_domain": {
+    "max_speed_m_s": 1.6,
+    "wind_y_nonpositive": true,
+    "x_axis_half_angle_deg": 45.0
+  },
+  "phase_milestones": [],
+  "checkpoint_retention": {
+    "periodic_every_updates": 8,
+    "cleanup_every_saves": 5,
+    "cleanup_every_updates": 40,
+    "keep_periodic": [
+      "best",
+      "latest"
+    ],
+    "keep_best_pareto": 1,
+    "keep_trainer_state": 1
+  },
+  "early_stability_reward": {
+    "enabled": true,
+    "full_weight_until_hit": 15,
+    "taper_zero_at_hit": 25,
+    "dense_zero_at_hit": 20,
+    "center_deadzone_m": 0.004,
+    "center_scale_m": 0.004,
+    "center_weight": 8.0,
+    "hit_vxy_deadzone_m_s": 0.04,
+    "hit_vxy_wind_allowance_m_s": 0.025,
+    "hit_vxy_scale_m_s": 0.025,
+    "hit_vxy_weight": 6.0,
+    "step_vxy_deadzone_m_s": 0.06,
+    "step_vxy_wind_allowance_m_s": 0.05,
+    "step_vxy_scale_m_s": 0.04,
+    "step_vxy_rate_per_s": 12.0,
+    "apex_deadzone_m": 0.008,
+    "apex_scale_m": 0.01,
+    "apex_weight": 6.0
+  }
+}

@@ -833,6 +833,8 @@ class RealBallSimMirror:
             from recovered_rmp import JointLimits, JointRMPPlanner, RMPParams
 
         env_cfg = self.checkpoint_env_cfg
+        self.rmp_initial_target_covariance = FPLC_CONTRACTS.get(
+            self.policy_profile, {}).get("mirror_rmp_initial_target_covariance")
         if not bool(env_cfg.get("recovered_rmp_motion_mode", False)):
             raise RuntimeError(
                 "GPU0 CPU mirror checkpoint does not enable recovered RMP")
@@ -948,7 +950,8 @@ class RealBallSimMirror:
         q = np.asarray(q0, dtype=np.float64).reshape(len(RIGHT_ARM_JOINTS))
         zeros = np.zeros_like(q)
         self.rmp_planner.reset(
-            q, velocity=zeros, acceleration=zeros, target_position=q)
+            q, velocity=zeros, acceleration=zeros, target_position=q,
+            target_covariance=self.rmp_initial_target_covariance)
         buffer_length = max(
             1, int(np.ceil(np.max(self.rmp_output_delay_steps))))
         self.rmp_output_q_buffer = np.repeat(q[None, :], buffer_length, axis=0)
@@ -1664,6 +1667,8 @@ class RealBallSimMirror:
                     [] if self.rmp_controller_kv is None
                     else self.rmp_controller_kv.tolist()),
             })
+            if self.rmp_initial_target_covariance is not None:
+                plant_contract["rmpInitialTargetCovariance"] = self.rmp_initial_target_covariance
         return {
             "enabled": True,
             "available": True,

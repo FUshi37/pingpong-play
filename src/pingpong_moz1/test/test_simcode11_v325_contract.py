@@ -24,6 +24,9 @@ from pingpong_controller.tools import interactive_policy_safety_probe as probe
 from test_simcode9_fplc_contract import probe as runtime_probe, _policy_options
 
 PROFILE = 'fplc_gpu0_v325'
+WIND_EARLY_PROFILE = 'fplc_gpu0_v325_wind_early_r5fast_u6247'
+SIM2REAL_PROFILE = 'fplc_gpu0_v325_wind_early_s2r_u7447'
+R6_PROFILE = 'fplc_gpu0_v325_wind_early_s2r_r6_u7832'
 SOURCE = REPO_ROOT / 'simcode11/pingpong_moz1-main/pingpong_controller/tools/rl_sim'
 WIND_SOURCE = next((SOURCE.parents[1] / 'outputs/rl_sim').glob(
     'v325_goal_serial*/retired_ram_snapshots/*/source'))
@@ -268,9 +271,10 @@ def test_v325_does_not_replace_or_relocate_old_releases():
 
 
 def test_real_attitude_limits_are_selected_per_model():
+    limits = {PROFILE: (20., 20.), 'fplc_gpu0_v325_u416': (7., 7.),
+              WIND_EARLY_PROFILE: (7., 7.), SIM2REAL_PROFILE: (7., 7.), R6_PROFILE: (17., 17.)}
     for profile in FPLC_CONTRACTS:
-        expected = (20., 20.) if profile == PROFILE else ((7., 7.) if profile == 'fplc_gpu0_v325_u416' else (4., 4.))
-        assert fplc_real_roll_pitch_limit_deg(profile) == expected
+        assert fplc_real_roll_pitch_limit_deg(profile) == limits.get(profile, (4., 4.))
 
 
 @pytest.mark.parametrize('axis', [0, 1])
@@ -331,17 +335,25 @@ def test_v325_cannot_load_72d_parent_weights():
         FPLCPolicyController(fplc_assets('fplc_gpu1_v172')[0], observation_profile=PROFILE)
 
 
-def test_browser_switches_72_114_117_and_wind_note(tmp_path):
+def test_browser_switches_72_114_117_120_and_wind_notes(tmp_path):
     functions = '\n'.join(re.search(r'function ' + name + r'\(\) \{.*?\n\}',
                                     probe.HTML_TEMPLATE, re.S).group()
                           for name in ('syncPolicyObservationControls', 'syncPolicyModelControl'))
-    profiles = {'fplc_gpu1_v172': 72, PROFILE: 114, 'fplc_gpu0_v325_u416': 120, 'fplc_gpu0_v224': 117}
+    profiles = {'fplc_gpu1_v172': 72, PROFILE: 114, 'fplc_gpu0_v325_u416': 120,
+                WIND_EARLY_PROFILE: 120, SIM2REAL_PROFILE: 120, R6_PROFILE: 120, 'fplc_gpu0_v224': 117}
     config = {'policy': {'profileContracts': {
-        p: {'observationNames': probe._obs_names(dim)} for p, dim in profiles.items()}}}
+        p: {'observationNames': probe._obs_names(dim, wind_max_m_s=4.5 if p == R6_PROFILE else 1.6)}
+        for p, dim in profiles.items()}}}
     script = tmp_path / 'v325_switch.js'
     script.write_text('const CONFIG = ' + json.dumps(config) + ';\n' + '''
-const note = {hidden: true}, single5Note = {hidden: true};
-const document = {createElement() {return {};}, getElementById(id) {return id === 'fplcSingle5Note' ? single5Note : note;}};
+const notes = {
+  fplcWindNote: {hidden: true},
+  fplcSingle5Note: {hidden: true},
+  fplcWindEarlyNote: {hidden: true},
+  fplcWindEarlyS2rNote: {hidden: true},
+  fplcWindR6Note: {hidden: true},
+};
+const document = {createElement() {return {};}, getElementById(id) {return notes[id] || null;}};
 const policyProfileEl = {value: 'fplc_gpu1_v172'};
 const policyObservationScaleTargetEl = {value: '0', options: [],
   replaceChildren() {this.options = [];}, appendChild(o) {this.options.push(o);}};
@@ -353,14 +365,23 @@ let policyObservationScales = [];
 function setControlDisabled(el, value) {el.disabled = value;}
 ''' + functions + '''
 for (const [profile, width] of [['fplc_gpu1_v172',72], ['fplc_gpu0_v325',114],
-                               ['fplc_gpu0_v325_u416',120], ['fplc_gpu0_v224',117], ['fplc_gpu1_v172',72]]) {
+                               ['fplc_gpu0_v325_u416',120], ['fplc_gpu0_v325_wind_early_s2r_u7447',120],
+                               ['fplc_gpu0_v325_wind_early_s2r_r6_u7832',120], ['fplc_gpu0_v325_wind_early_s2r_u7447',120],
+                               ['fplc_gpu0_v325_wind_early_r5fast_u6247',120],
+                               ['fplc_gpu0_v224',117], ['fplc_gpu1_v172',72]]) {
   policyProfileEl.value = profile;
   syncPolicyModelControl(); syncPolicyObservationControls();
+  const r6 = profile === 'fplc_gpu0_v325_wind_early_s2r_r6_u7832';
+  if (width === 120 &&
+      !policyObservationScaleTargetEl.options[114].textContent.endsWith(r6 ? '/4.5' : '/1.6')) process.exit(1);
   if (policyObservationScaleTargetEl.options.length !== width ||
       policyObservationScales.length !== width ||
       policyObservationScales.some(v => v !== 1) ||
-      note.hidden !== (profile !== 'fplc_gpu0_v325') ||
-      single5Note.hidden !== (profile !== 'fplc_gpu0_v325_u416')) process.exit(1);
+      notes.fplcWindNote.hidden !== (profile !== 'fplc_gpu0_v325') ||
+      notes.fplcSingle5Note.hidden !== (profile !== 'fplc_gpu0_v325_u416') ||
+      notes.fplcWindEarlyNote.hidden !== (profile !== 'fplc_gpu0_v325_wind_early_r5fast_u6247') ||
+      notes.fplcWindEarlyS2rNote.hidden !== (profile !== 'fplc_gpu0_v325_wind_early_s2r_u7447') ||
+      notes.fplcWindR6Note.hidden === r6) process.exit(1);
 }
 ''')
     subprocess.run(['node', str(script)], check=True, capture_output=True)

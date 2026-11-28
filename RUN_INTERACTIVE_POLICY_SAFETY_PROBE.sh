@@ -83,11 +83,14 @@ POLICY_RELEASE_ID="${POLICY_RELEASE_ID:-fplc_gpu1_v172}"
 # V322 S4/u31361: POLICY_RELEASE_ID=fplc_gpu1_v322 (72D, inherited 1200s).
 # V323 S2/u3075: POLICY_RELEASE_ID=fplc_gpu0_v323 (72D, camera AR1).
 # V324 S2/u2947: POLICY_RELEASE_ID=fplc_gpu1_v324 (72D, camera AR1).
+# V325 Sim2Real r6 W2.8 u7832: POLICY_RELEASE_ID=fplc_gpu0_v325_wind_early_s2r_r6_u7832 (simcode12).
+# V325 Sim2Real S09 u7447: POLICY_RELEASE_ID=fplc_gpu0_v325_wind_early_s2r_u7447 (simcode12).
+# V325 wind-early r5_fast u6247: POLICY_RELEASE_ID=fplc_gpu0_v325_wind_early_r5fast_u6247 (simcode12).
 # V325 u416: POLICY_RELEASE_ID=fplc_gpu0_v325_u416 (120D, fixed ±5°, single MLP).
 # V325 S15/u14400: POLICY_RELEASE_ID=fplc_gpu0_v325 (114D, 1.6 m/s wind).
 # Select with POLICY_RELEASE_ID; model/XML/schema are resolved together from
-# the authenticated contracts. V325 assets are loaded from simcode11;
-# simcode11/COLCON_IGNORE excludes its training snapshot from colcon.
+# the authenticated contracts. Training snapshots under simcode11 and
+# simcode12 are excluded from colcon.
 SETUP_FILE="${SETUP_FILE:-$WORKSPACE_DIR/install/setup.bash}"
 CONFIG_DONE_MONITORING_YAML="${CONFIG_DONE_MONITORING_YAML:-$WORKSPACE_DIR/config_done_monitoring.yaml}"
 LOAD_CONFIG_DONE_MONITORING="${LOAD_CONFIG_DONE_MONITORING:-true}"
@@ -1078,6 +1081,12 @@ if [[ "$POLICY_PROFILE" == fplc_* ]]; then
         echo "[ProbeConfig] V325 startup_roll_pitch=2deg qualified_launches=5 authority_ramp=1s full_roll_pitch=20deg observation_gate_projection=synchronized"
     elif [ "$POLICY_PROFILE" = fplc_gpu0_v325_u416 ]; then
         echo "[ProbeConfig] V325_u416 actor=120/282/282/282/7 networks=1 fixed_target_roll_pitch=5deg real_stop_roll_pitch=${FPLC_REAL_ROLL_PITCH_LIMITS_DEG}deg acquisition_features_after_launches=5 phase=3s causal_wind_estimator=history_only high_wind_deadband=1.25m/s high_wind_width=0.35m/s provisional=true final1200s99accepted=false"
+    elif [ "$POLICY_PROFILE" = fplc_gpu0_v325_wind_early_r5fast_u6247 ]; then
+        echo "[ProbeConfig] V325_wind_early_r5fast_u6247 actor=120/282/282/282/7 networks=1 fixed_target_roll_pitch=5deg acquisition_features_after_launches=5 phase=3s causal_wind_estimator=history_only wind_domain_max=1.6m/s frozen_benchmark_60s=1280/1280 final1200s99accepted=false"
+    elif [ "$POLICY_PROFILE" = fplc_gpu0_v325_wind_early_s2r_u7447 ]; then
+        echo "[ProbeConfig] V325_wind_early_s2r_u7447 actor=120/282/282/282/7 networks=1 s2r_stage=S09_D2_dr65 cpu_mirror_reset=P_warm wind_domain_max=1.6m/s frozen_warm_60s=1280/1280 frozen_real_twin_60s=640/640 final1200s99accepted=false"
+    elif [ "$POLICY_PROFILE" = fplc_gpu0_v325_wind_early_s2r_r6_u7832 ]; then
+        echo "[ProbeConfig] V325_wind_early_s2r_r6_u7832 actor=120/282/282/282/7 networks=1 cpu_mirror_reset=P_warm training_stage=W2.8 obs_wind_max=4.5m/s high_wind_deadband=1.25m/s high_wind_width=0.35m/s frozen_strict_60s=460/576 final1200s99accepted=false"
     fi
 fi
 echo "[ProbeConfig] command safety limiter=hard-disabled all_paths=true independent_slow_reset=true"

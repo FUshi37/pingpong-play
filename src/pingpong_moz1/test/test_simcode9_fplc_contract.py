@@ -20,7 +20,8 @@ import mujoco
 import pytest
 
 from pingpong_controller.fplc_deployment import (
-    FPLC_CONTRACTS, FPLC_PROFILES, SIMCODE10_PROFILES, SIMCODE11_PROFILES, REPO_ROOT, fplc_assets,
+    FPLC_CONTRACTS, FPLC_PROFILES, SIMCODE10_PROFILES, SIMCODE11_PROFILES, SIMCODE12_PROFILES,
+    REPO_ROOT, fplc_assets,
     fplc_workspace_intersection,
 )
 from pingpong_controller.fplc_policy import FPLCPolicyController
@@ -602,7 +603,7 @@ def test_web_switch_and_forbidden_controls(probe):
         assert probe_module._policy_runtime_contract(probe.controller)['observationDim'] == probe.controller.last_obs.size
         assert probe.browser_config()['policy']['observationDim'] == probe.controller.last_obs.size
         expected_box = (((-.398, .398), (-.75, -.23), (.95, 1.2))
-                        if profile in ('fplc_gpu0_v325', 'fplc_gpu0_v325_u416') else
+                        if profile in ('fplc_gpu0_v325', 'fplc_gpu0_v325_u416', *SIMCODE12_PROFILES) else
                         ((-.15, .15), (-.6, -.35), (.95, 1.2)))
         assert probe.browser_config()['eeBox'] == probe_module.box_payload(*expected_box)
         assert probe.reset_initial_pose_id == 'simcode9_native'
@@ -1015,7 +1016,7 @@ def test_launcher_config_only(profile):
     assert f"[ProbeConfig] FPLC CPU threads openblas={os.environ.get('OPENBLAS_NUM_THREADS') or '1'}" in result.stdout
     expected_workspace = (
         'ee_x=-0.398,0.398 ee_y=-0.75,-0.23 ee_z=0.95,1.2'
-        if profile in ('fplc_gpu0_v325', 'fplc_gpu0_v325_u416') else
+        if profile in ('fplc_gpu0_v325', 'fplc_gpu0_v325_u416', *SIMCODE12_PROFILES) else
         'ee_x=-0.15,0.15 ee_y=-0.6,-0.35 ee_z=0.95,1.2')
     assert expected_workspace in result.stdout
     assert 'reset_initial_pose=simcode9_native' in result.stdout
@@ -1115,9 +1116,13 @@ if (!poseMessage.includes('实测位姿越界') || !poseMessage.includes('4.006'
     assert (REPO_ROOT / 'simcode9/COLCON_IGNORE').is_file()
     assert (REPO_ROOT / 'simcode10/COLCON_IGNORE').is_file()
     assert (REPO_ROOT / 'simcode11/COLCON_IGNORE').is_file()
+    assert (REPO_ROOT / 'simcode12/COLCON_IGNORE').is_file()
 
 
-@pytest.mark.parametrize('profile', ['fplc_gpu1_v172', 'fplc_v220_s17_u839_20261013_r1', *SIMCODE10_PROFILES, *SIMCODE11_PROFILES])
+@pytest.mark.parametrize('profile', [
+    'fplc_gpu1_v172', 'fplc_v220_s17_u839_20261013_r1', *SIMCODE10_PROFILES, *SIMCODE11_PROFILES,
+    *SIMCODE12_PROFILES,
+])
 def test_cpu_mirror_carries_direct_observation_separately(profile):
     config = sim_mirror_config_for_policy_profile(SimMirrorConfig(
         model_path=fplc_assets(profile)[0],

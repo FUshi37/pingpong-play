@@ -97,6 +97,7 @@ class JointRMPPlanner:
         velocity: ArrayLike | None = None,
         acceleration: ArrayLike | None = None,
         target_position: ArrayLike | None = None,
+        target_covariance: ArrayLike | None = None,
     ) -> None:
         """Anchor the planned trajectory to a measured joint state."""
 
@@ -119,7 +120,7 @@ class JointRMPPlanner:
         self.qdd = qdd.copy()
         self.accepted_target = np.clip(target, self.limits.q_min, self.limits.q_max)
         self.ticks_since_target_update = 0
-        self._estimator.reset(self.accepted_target)
+        self._estimator.reset(self.accepted_target, covariance=target_covariance)
         self._target_q_buffer.clear()
         self._target_qd_buffer.clear()
         self._target_qdd_buffer.clear()

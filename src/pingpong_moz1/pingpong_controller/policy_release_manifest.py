@@ -306,14 +306,18 @@ def validate_policy_release(
             model_contract = json.loads(contract_path.read_text(encoding="utf-8"))[release_id]
         except (OSError, ValueError, KeyError) as exc:
             raise ReleaseContractError("FPLC model configuration missing or invalid") from exc
-        if model_contract.get('checkpoint_metadata_path'):
+        for metadata in ('checkpoint_metadata', 'physical_metadata'):
+            path_key = f'{metadata}_path'
+            hash_key = f'{metadata}_sha256'
+            if not model_contract.get(path_key):
+                continue
             metadata_path = _resolved_asset(
-                repo, model_contract['checkpoint_metadata_path'], 'checkpoint_metadata_path')
-            if (release.get('checkpoint_metadata_path') != model_contract['checkpoint_metadata_path']
-                    or release.get('checkpoint_metadata_sha256') != model_contract['checkpoint_metadata_sha256']
+                repo, model_contract[path_key], path_key)
+            if (release.get(path_key) != model_contract[path_key]
+                    or release.get(hash_key) != model_contract[hash_key]
                     or not metadata_path.is_file()
-                    or sha256_file(metadata_path) != model_contract['checkpoint_metadata_sha256']):
-                raise ReleaseContractError('FPLC checkpoint metadata SHA256 mismatch')
+                    or sha256_file(metadata_path) != model_contract[hash_key]):
+                raise ReleaseContractError(f'FPLC {metadata.replace("_", " ")} SHA256 mismatch')
         if (release["policy_profile"] != release_id
                 or release["observation_dim"] != model_contract["actor_dim"]
                 or release.get("actor_schema") != model_contract.get(

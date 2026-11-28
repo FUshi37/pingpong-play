@@ -1,0 +1,115 @@
+{
+  "name": "V325 wind-early Sim2Real High-Wind r6_fast W2.8 u7832 candidate",
+  "public_version": "V325-wind-early-s2r-r6-u7832",
+  "saved_at": "2026-11-28T18:20:00+08:00",
+  "status": "Stage-2 high-wind milestone (4.5 m/s unclipped wind obs + +/-15.0 deg pose authority): 100.0% strict 60s across RealExact_0w, P_cold_0w, RealExact_PosX_1p6/2p4/2p8 (exact match to real fan experiments), CleanPW_PosX_2p4/2p8/3p2, and CleanPW_NegX_2p4/2p8/ConeNegX_2p8; requires r6 deployment contract (obs_wind_max_m_s=4.5, RP_limit_deg=15.0); register as separate profile leaving u7447 untouched.",
+  "actual_update": 7832,
+  "stage": 16,
+  "high_wind_curriculum_stage": {
+    "id": 1,
+    "active_max_speed_m_s": 2.8,
+    "dr_scale": 0.65,
+    "wind_dr_fraction": 0.35
+  },
+  "true_step": 6996099072,
+  "optimizer_steps": {
+    "opt_t": 557080,
+    "actor_t": 7232
+  },
+  "lineage": [
+    "V325 S15 u14400 (fd9def8f5fdb511e1543cbcca264e0021738ff07c6425e8d393cb1c240918e97)",
+    "V325 single5 u416 provisional baseline (97c89251fe8a54b193f7a9348799cf3fab58b487322a5cdfc27cc51fe2a49dce)",
+    "V325 wind-early r5_fast u6247 (e9591ce1eabb2100be31a4a73e58c8a1b2c4bc97c3100edfa5fdf49698ab9666)",
+    "V325 wind-early s2r_v2 S09 u7447 (a40da56cefb1cc6a8928a8199667cf1379a0bbdac9326949befd15a3bc089bcd)",
+    "V325 wind-early s2r_r6 W2.2 u7600 (ad8e552c581ca3d2cc5235cd677bb38bada16740d85d8efd6f0f2b86eedbb8f9)",
+    "V325 wind-early s2r_r6_fast W2.8 best_pareto u7832 (cdb2967ec4b3706502d7417d27b11925709d216e49c746fd7c3922f72efdf99a)"
+  ],
+  "files": {
+    "model.pkl": {
+      "source": "pingpong_controller/outputs/rl_sim/fplc_wind_early_20261128_s2r_r6_fast/best_pareto_w28_u00007832.pkl",
+      "bytes": 4542421,
+      "sha256": "cdb2967ec4b3706502d7417d27b11925709d216e49c746fd7c3922f72efdf99a"
+    },
+    "evaluation_576x60s.json": {
+      "sha256": "3e6afd5278dd4b98e39d448c737176b6a3acef6c41e102104c39e797ede75e29"
+    },
+    "r6_numpy_inference.py": {
+      "description": "Standalone zero-JAX NumPy encoder + actor verified < 1e-6 vs JAX high_wind_r6"
+    },
+    "deployment_contract.json": {
+      "description": "Ready-to-register fplc_simcode12_model_contracts.json profile entry for fplc_gpu0_v325_wind_early_s2r_r6_u7832"
+    },
+    "DEPLOYMENT_R6_GUIDE.md": {
+      "description": "Real-robot integration checklist (4.5 m/s wind obs + +/-15 deg RP limit, preserving u7447)"
+    }
+  },
+  "architecture": {
+    "actor_critic_action": [120, 453, 7],
+    "actor_layers": {
+      "l1": [120, 282],
+      "l2": [282, 282],
+      "l3": [282, 282],
+      "out": [282, 7]
+    },
+    "activation": "tanh (l1, l2, l3), linear (out)",
+    "requires_actor_runtime": "single5_highwind120_4p5ms_v1",
+    "obs_wind_max_m_s": 4.5,
+    "wind_feature_deadband_m_s": 1.25,
+    "wind_feature_activation_width_m_s": 0.35,
+    "residual_network": false,
+    "BC": 0,
+    "privileged_wind_in_actor": false,
+    "drop_in_compatible_with_u7447": false,
+    "deployment_contract_changes_vs_u7447": [
+      "obs_wind_max_m_s: 1.6 -> 4.5 (observed_force_features clamp/div and wind_features speed decode)",
+      "relativeRollPitchLimitDeg: [5.0, 5.0] -> [15.0, 15.0], realRelativeRollPitchLimitDeg: [7.0, 7.0] -> [17.0, 17.0]"
+    ]
+  },
+  "control_and_physics": {
+    "control_dt_s": 0.005,
+    "simulation_dt_s": 0.001,
+    "ball_obs_hz": 90,
+    "ball_mass_kg": 0.004,
+    "RP_limit_deg": 15.0,
+    "workspace_xyz_m": {
+      "x": [-0.348, 0.348],
+      "y": [-0.7, -0.28],
+      "z": [1.0, 1.15]
+    },
+    "arm_vel_limit_deg_s": [210, 210, 240, 240, 300, 300, 300],
+    "trained_wind_domain": {
+      "active_max_speed_m_s": 2.8,
+      "obs_wind_max_m_s": 4.5,
+      "force_limit_n": 0.025,
+      "wind_y_nonpositive": true,
+      "x_axis_half_angle_deg": 45.0,
+      "onset_mode": "stratified_wide (post-hit-5 delays: 45% early 5..100, mid 500..2000, late 2000..15000 steps; 1.0s ramp)"
+    }
+  },
+  "reference_source_sha256": {
+    "pingpong_controller/tools/rl_sim/moz1_pd_1ms_v98.xml": "ace35229f4d643410a95481719c962e3b8ad172c2eba5901ee3d3e76e966ad8a",
+    "pingpong_controller/tools/rl_sim/fixed_plane_wind_history.py": "7db5cd69cd6238edc656a2e3be1d55eac646c0961a7020382d39affa3a2d3558",
+    "pingpong_controller/outputs/rl_sim/v325_single5_early_stability_20261126_r1/high_wind_r6.py": "2511a34d924e9d5d8abd5839e9e275f12a56669ae2b49ce7e83a4a98e6c39192",
+    "pingpong_controller/outputs/rl_sim/v325_single5_early_stability_20261126_r1/sim2real_r6.py": "79b67e90dcd36fdb4e4465bd3f7969fac4d7ceb27ecbd76728893a3f35edf00a",
+    "pingpong_controller/outputs/rl_sim/v325_single5_early_stability_20261126_r1/train_sim2real_r6.py": "90b585ca743e55ca20fe2f908c0117d141c416041483008b9e95c9cf4396259f",
+    "pingpong_controller/outputs/rl_sim/v325_single5_early_stability_20261126_r1/TRAIN_PLAN_S2R_R6_FAST.json": "cb86bae648ef859fe9ea39ebff21a189e56711d4317e20f16cc908f40824cabe"
+  },
+  "evaluation_576x60s_summary": {
+    "RealExact_0w": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 9.3, "in_band_pct": 94.7},
+    "P_cold_0w": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 4.3, "in_band_pct": 97.9},
+    "RealSoft_0w": {"phys_60s_pct": 100.0, "strict_60s_pct": 59.4, "center_rms_mm": 7.5},
+    "RealHard_0w": {"phys_60s_pct": 93.8, "strict_60s_pct": 93.8, "center_rms_mm": 9.6},
+    "RealExact_PosX_1p6": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 8.4, "tilt_p95_deg": 5.2},
+    "RealExact_PosX_2p4": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 7.8, "tilt_p95_deg": 6.4},
+    "RealExact_PosX_2p8": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 8.3, "tilt_p95_deg": 7.1},
+    "RealExact_NegX_2p8": {"phys_60s_pct": 68.8, "strict_60s_pct": 68.8, "center_rms_mm": 12.4},
+    "CleanPW_PosX_2p4": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 2.9},
+    "CleanPW_NegX_2p4": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 4.6},
+    "CleanPW_PosX_2p8": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 4.6},
+    "CleanPW_NegX_2p8": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 4.7},
+    "CleanPW_ConePosX_2p8": {"phys_60s_pct": 75.0, "strict_60s_pct": 75.0, "center_rms_mm": 5.3},
+    "CleanPW_ConeNegX_2p8": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 5.5},
+    "CleanPW_PosX_3p2": {"phys_60s_pct": 100.0, "strict_60s_pct": 100.0, "center_rms_mm": 7.8, "tilt_p95_deg": 7.8},
+    "CleanPW_NegX_3p2": {"phys_60s_pct": 40.6, "strict_60s_pct": 40.6, "center_rms_mm": 15.8}
+  }
+}

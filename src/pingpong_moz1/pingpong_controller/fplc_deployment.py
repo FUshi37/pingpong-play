@@ -1,4 +1,4 @@
-"""Versioned simcode9/10/11 asset and real-workspace contracts."""
+"""Versioned FPLC asset and real-workspace contracts."""
 from __future__ import annotations
 
 import json
@@ -28,7 +28,18 @@ if FPLC_CONTRACTS.keys() & SIMCODE11_CONTRACTS.keys():
     raise ValueError("simcode11 must not replace an existing FPLC model identity")
 FPLC_CONTRACTS.update(SIMCODE11_CONTRACTS)
 SIMCODE11_PROFILES = tuple(SIMCODE11_CONTRACTS)
+SIMCODE12_CONTRACTS = {}
+for filename in ("fplc_simcode12_model_contracts.json",
+                 "fplc_simcode12_u7447_model_contracts.json",
+                 "fplc_simcode12_u7832_model_contracts.json"):
+    contracts = json.loads((REPO_ROOT / "config" / filename).read_text(encoding="utf-8"))
+    if FPLC_CONTRACTS.keys() & contracts.keys():
+        raise ValueError(f"{filename} must not replace an existing FPLC model identity")
+    FPLC_CONTRACTS.update(contracts)
+    SIMCODE12_CONTRACTS.update(contracts)
+SIMCODE12_PROFILES = tuple(SIMCODE12_CONTRACTS)
 FPLC_PROFILES = tuple(FPLC_CONTRACTS)
+DEFAULT_OBS_WIND_MAX_M_S = 1.6
 # Authenticated training bounds; the actor's projection keeps these unchanged.
 FPLC_LOWER_M = (-0.348, -0.700, 1.000)
 FPLC_UPPER_M = (0.348, -0.280, 1.150)
@@ -64,8 +75,13 @@ def fplc_assets(profile: str, repo_root: Path = REPO_ROOT) -> tuple[Path, Path]:
             repo_root / contract["policy_xml_path"])
 
 
+def fplc_obs_wind_max_m_s(profile: str) -> float:
+    return float(FPLC_CONTRACTS.get(profile, {}).get(
+        'obs_wind_max_m_s', DEFAULT_OBS_WIND_MAX_M_S))
+
+
 def prepare_fplc_checkpoint_payload(payload: dict, model_path: str) -> dict:
-    """Restore u416's omitted metadata from its authenticated frozen manifest.
+    """Restore single5 checkpoint metadata from authenticated frozen manifests.
 
     Shared by the actor and CPU mirror, so neither silently uses plant defaults.
     The training optimizer is never imported or executed.
@@ -74,9 +90,10 @@ def prepare_fplc_checkpoint_payload(payload: dict, model_path: str) -> dict:
     if runtime is None:
         return payload
     from pingpong_controller.policy_release_manifest import sha256_file
+    checkpoint_hash = sha256_file(Path(model_path))
     matches = [c for c in FPLC_CONTRACTS.values()
                if c.get('required_actor_runtime') == runtime
-               and c['sha256'] == sha256_file(Path(model_path))]
+               and c['sha256'] == checkpoint_hash]
     if len(matches) != 1:
         raise RuntimeError('Unregistered FPLC actor runtime/checkpoint identity')
     contract = matches[0]
@@ -84,16 +101,55 @@ def prepare_fplc_checkpoint_payload(payload: dict, model_path: str) -> dict:
     if sha256_file(path) != contract['checkpoint_metadata_sha256']:
         raise RuntimeError('FPLC checkpoint metadata SHA-256 mismatch')
     manifest = json.loads(path.read_text(encoding='utf-8'))
-    if (payload.get('schema') != 'v325_single5_training_v1'
+    dimensions = [contract['actor_dim'], contract['critic_dim'], contract['action_dim']]
+    architecture = manifest.get('architecture', manifest)
+    if (payload.get('schema') != contract.get('checkpoint_schema', 'v325_single5_training_v1')
             or payload.get('mode') != 'direct'
-            or payload.get('actual_updates') != 416
-            or payload.get('native_actor_obs_dim') != 120
-            or payload.get('single_actor_input_dim') != 120
-            or manifest['actor_critic_action'] != [120, 453, 7]
-            or manifest['residual_network'] is not False):
-        raise RuntimeError('FPLC u416 schema/runtime mismatch')
-    return {**payload, 'env_cfg': manifest['source_physical_cfg'],
-            'obs_dim': 120, 'critic_obs_dim': 453, 'act_dim': 7}
+            or payload.get('actual_updates') != contract['global_update']
+            or manifest['actual_update'] != contract['global_update']
+            or payload.get('native_actor_obs_dim') != dimensions[0]
+            or payload.get('single_actor_input_dim') != dimensions[0]
+            or architecture['actor_critic_action'] != dimensions
+            or architecture['residual_network'] is not False):
+        raise RuntimeError('FPLC single5 schema/runtime mismatch')
+    if 'physical_metadata_path' in contract:
+        # The wind-early stack checks the nominal config against this manifest
+        # before its training-only wind, physics and observation perturbations.
+        physical_path = REPO_ROOT / contract['physical_metadata_path']
+        if sha256_file(physical_path) != contract['physical_metadata_sha256']:
+            raise RuntimeError('FPLC physical metadata SHA-256 mismatch')
+        if (architecture['requires_actor_runtime'] != runtime
+                or manifest['files']['model.pkl']['sha256'] != checkpoint_hash
+                or payload.get('step') != manifest['true_step']
+                or payload.get('stage') != manifest['stage']
+                or payload.get('plan_sha256') != contract['checkpoint_plan_sha256']):
+            raise RuntimeError('FPLC wind-early checkpoint provenance mismatch')
+        s2r_stage = manifest.get('s2r_curriculum_stage')
+        if s2r_stage is not None and s2r_stage != {
+            'id': payload.get('s2r_stage_id'),
+            'name': payload.get('s2r_stage_name'),
+            'warm_w': payload.get('s2r_warm_w'),
+            'dr_scale': payload.get('s2r_dr_scale'),
+        }:
+            raise RuntimeError('FPLC Sim2Real curriculum stage mismatch')
+        high_wind_stage = manifest.get('high_wind_curriculum_stage')
+        if high_wind_stage is not None and (
+            payload.get('source_sha256') != contract['parent_sha256']
+            or payload.get('obs_wind_max_m_s') != architecture['obs_wind_max_m_s']
+            or payload.get('obs_wind_max_m_s') != contract['obs_wind_max_m_s']
+            or payload.get('pose_limit_deg') != manifest['control_and_physics']['RP_limit_deg']
+            or payload.get('pose_limit_deg') != contract['fixed_pose_override_deg']
+            or payload.get('active_max_speed_m_s') != high_wind_stage['active_max_speed_m_s']
+            or payload.get('s2r_dr_scale') != high_wind_stage['dr_scale']
+            or payload.get('last_summary', {}).get('stage_idx') != high_wind_stage['id']
+            or architecture['wind_feature_deadband_m_s'] != contract['wind_feature_deadband_m_s']
+            or architecture['wind_feature_activation_width_m_s'] != contract['wind_feature_activation_width_m_s']
+        ):
+            raise RuntimeError('FPLC high-wind checkpoint configuration mismatch')
+        manifest = json.loads(physical_path.read_text(encoding='utf-8'))
+    cfg = {**manifest['source_physical_cfg'], **contract.get('physical_config_overrides', {})}
+    return {**payload, 'env_cfg': cfg,
+            **dict(zip(('obs_dim', 'critic_obs_dim', 'act_dim'), dimensions))}
 
 
 def fplc_real_roll_pitch_limit_deg(profile: str) -> tuple[float, float]:

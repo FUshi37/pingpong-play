@@ -24,10 +24,14 @@ from pingpong_controller.fplc_single5_numpy import (
 )
 from pingpong_controller.mjx_rl_policy import _CheckpointUnpickler, inspect_mjx_checkpoint_metadata
 from pingpong_controller.policy_release_manifest import sha256_file
+from pingpong_controller.sim_mirror import RealBallSimMirror, SimMirrorConfig
 from pingpong_controller.tools import interactive_policy_safety_probe as runtime
 from test_simcode9_fplc_contract import probe, _predict, _policy_options
 
 PROFILE = 'fplc_gpu0_v325_u416'
+WIND_EARLY_PROFILE = 'fplc_gpu0_v325_wind_early_r5fast_u6247'
+SIM2REAL_PROFILE = 'fplc_gpu0_v325_wind_early_s2r_u7447'
+R6_PROFILE = 'fplc_gpu0_v325_wind_early_s2r_r6_u7832'
 CONTRACT = FPLC_CONTRACTS[PROFILE]
 BASE = REPO_ROOT / 'simcode11/pingpong_moz1-main/pingpong_controller/outputs/rl_sim'
 SOURCE = BASE / 'v325_single5_windfeature_high_train_20261124_r1'
@@ -38,8 +42,8 @@ def controller():
     return FPLCPolicyController(observation_profile=PROFILE)
 
 
-def original(filename, names, namespace=None):
-    tree = ast.parse((SOURCE / filename).read_text())
+def original(filename, names, namespace=None, *, source=SOURCE):
+    tree = ast.parse((source / filename).read_text())
     definitions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     assert {node.name for node in definitions} == set(names)
     ns = dict(math=math, np=np)
@@ -123,27 +127,141 @@ def test_phase_and_high_wind_features_match_source():
                 assert not encode_high_wind(raw, xp=np)[:, 118:].any()
 
 
-def test_single_actor_matches_original_forward_snapshot_and_zero_suffix(controller, snapshot):
+@pytest.mark.parametrize('profile', [PROFILE, WIND_EARLY_PROFILE, SIM2REAL_PROFILE, R6_PROFILE])
+def test_single_actor_matches_original_forward_snapshot_and_zero_suffix(controller, snapshot, profile):
     class Jnp:
         def __getattr__(self, name):
             return getattr(np, name)
         def matmul(self, a, b, **kwargs):
             return np.matmul(a, b)
+    model = fplc_assets(profile)[0]
+    selected = controller if profile == PROFILE else FPLCPolicyController(observation_profile=profile)
+    training_source = model.parents[1] / SOURCE.name
     source = original('wind_features.py', {'apply_actor'}, dict(
         OLD_DIM=118, NEW_DIM=120, jnp=Jnp(),
-        jax=SimpleNamespace(lax=SimpleNamespace(Precision=SimpleNamespace(HIGHEST=None)))))
-    with fplc_assets(PROFILE)[0].open('rb') as stream:
+        jax=SimpleNamespace(lax=SimpleNamespace(Precision=SimpleNamespace(HIGHEST=None)))),
+        source=training_source)
+    with model.open('rb') as stream:
         pi = _CheckpointUnpickler(stream).load()['params']['pi']
     rows = snapshot['.obs'].copy()
     for zero_suffix in (False, True):
         if zero_suffix:
             rows[:, 118:] = 0
         expected = source['apply_actor'](pi, rows)
-        actual = controller._policy_action(rows)
+        actual = selected._policy_action(rows)
         np.testing.assert_array_equal(actual, expected)
         # Exercise the actual single-observation control path, too.
         for index in (0, 45, 333, 1023):
-            np.testing.assert_allclose(controller._policy_action(rows[index]), expected[index], atol=4e-6, rtol=1e-6)
+            np.testing.assert_allclose(selected._policy_action(rows[index]), expected[index], atol=4e-6, rtol=1e-6)
+
+
+@pytest.mark.parametrize(('profile', 'update'), [
+    (WIND_EARLY_PROFILE, 6247), (SIM2REAL_PROFILE, 7447), (R6_PROFILE, 7832)])
+def test_wind_early_resolution_and_physical_config(controller, monkeypatch, profile, update):
+    contract = FPLC_CONTRACTS[profile]
+    for path, digest in contract['source_references'].items():
+        assert sha256_file(REPO_ROOT / path) == digest
+    model, xml = fplc_assets(profile)
+    assert (REPO_ROOT / 'simcode12') in model.parents and (REPO_ROOT / 'simcode12') in xml.parents
+    metadata = inspect_mjx_checkpoint_metadata(str(model))
+    assert (metadata['obs_dim'], metadata['act_dim']) == (120, 7)
+    assert metadata['env_cfg'] == {
+        **controller._checkpoint_env_cfg, **contract.get('physical_config_overrides', {})}
+    with model.open('rb') as stream:
+        payload = _CheckpointUnpickler(stream).load()
+    assert payload['actual_updates'] == update
+    assert payload['plan_sha256'] == contract['checkpoint_plan_sha256']
+    assert f'<option value="{profile}">' in runtime.HTML_TEMPLATE
+    if profile == SIM2REAL_PROFILE:
+        with pytest.raises(RuntimeError, match='Sim2Real curriculum stage mismatch'):
+            prepare_fplc_checkpoint_payload({**payload, 's2r_stage_id': 8}, str(model))
+    if profile == R6_PROFILE:
+        with pytest.raises(RuntimeError, match='high-wind checkpoint configuration mismatch'):
+            prepare_fplc_checkpoint_payload({**payload, 'obs_wind_max_m_s': 1.6}, str(model))
+    monkeypatch.setitem(contract, 'physical_metadata_sha256', '0' * 64)
+    with pytest.raises(RuntimeError, match='physical metadata SHA'):
+        prepare_fplc_checkpoint_payload(payload, str(model))
+
+
+@pytest.mark.parametrize('profile', [SIM2REAL_PROFILE, R6_PROFILE])
+def test_sim2real_mirror_restores_frozen_warm_target_covariance(profile):
+    model, xml = fplc_assets(profile)
+    source = next(REPO_ROOT / path for path in FPLC_CONTRACTS[profile]['source_references']
+                  if Path(path).name == 'sim2real_r5.py')
+    declaration = next(node for node in ast.parse(source.read_text()).body
+                       if isinstance(node, ast.Assign) and any(
+                           isinstance(target, ast.Name) and target.id == 'P_WARM_3X3'
+                           for target in node.targets))
+    expected = np.asarray(ast.literal_eval(declaration.value.args[0]), dtype=np.float32)
+    mirror = RealBallSimMirror(SimMirrorConfig(
+        model_path=model, policy_xml_path=xml, sim_xml_path=xml, policy_profile=profile,
+        policy_obs_dim=120, control_dt=.005, enable_video_frames=False))
+    try:
+        np.testing.assert_array_equal(mirror.rmp_planner._estimator.P, np.broadcast_to(expected, (7, 3, 3)))
+        mirror._step_recovered_rmp(mirror.policy.native_reset_arm_q)
+        assert not np.array_equal(mirror.rmp_planner._estimator.P[0], expected)
+        snapshot = mirror.reset()
+        np.testing.assert_array_equal(mirror.rmp_planner._estimator.P, np.broadcast_to(expected, (7, 3, 3)))
+        np.testing.assert_array_equal(snapshot['plantContract']['rmpInitialTargetCovariance'], expected)
+    finally:
+        mirror.close()
+
+
+def test_u7832_encoder_matches_frozen_implementation_above_1p6():
+    model, _ = fplc_assets(R6_PROFILE)
+    source = model.parents[1] / 'v325_single5_early_stability_20261126_r1'
+    select = original('observed_force.py', {'select_consistent_wind'}, source=model.parents[1] / SOURCE.name)
+    r6 = original('high_wind_r6.py', {'observed_force_features_r6', 'encode_r6'},
+                  {**select, 'DEFAULT_OBS_WIND_MAX_M_S': 4.5, 'DEADBAND_M_S': 1.25,
+                   'ACTIVATION_WIDTH_M_S': .35, 'OLD_DIM': 118}, source=source)
+    ages = np.array([0., .05, .10, .15, .20, .30, .40, .50], dtype=np.float32)
+    prefix = np.zeros((100, 112), dtype=np.float32)
+    positions = prefix[:, 72:96].reshape(100, 8, 3)
+    positions[:, :, 0] = np.linspace(-4., 4., 100)[:, None] * ages**2
+    positions[:, :, 2] = .6 * ages - .5 * 9.81 * ages**2
+    prefix[:, 96:104] = ages / .6
+    prefix[:, 104:112] = 1
+    prefix[-1, 104:112] = 0
+    phase = np.ones((100, 2), dtype=np.float32)
+    phase[::2] = 0
+    with np.errstate(invalid='ignore'):
+        force = r6['observed_force_features_r6'](prefix, xp=np)
+    expected = r6['encode_r6'](np.concatenate([prefix, phase, force], axis=-1), xp=np)
+    actual = encode_single5(prefix, phase, max_wind_m_s=4.5)
+    np.testing.assert_array_equal(actual, expected)
+    assert np.max(abs(actual[:, 114])) == pytest.approx(1.)
+    assert np.any((abs(actual[:, 114]) * 4.5 > 1.6) & (abs(actual[:, 114]) < .99))
+    assert not actual[::2, 118:].any()
+    np.testing.assert_array_equal(actual[-1, 114:118], [0., 0., 1., 0.])
+
+
+def test_u7832_live_observation_uses_profile_wind_scale_and_fixed_pose(snapshot, monkeypatch):
+    controller = FPLCPolicyController(observation_profile=R6_PROFILE)
+    row = next(obs for obs in snapshot['.obs'] if .7 < np.linalg.norm(obs[114:116]) < .95)
+    monkeypatch.setattr(controller.wind_history, 'advance', lambda *args: np.r_[row[72:112], [0., 0.]])
+    _predict(controller)
+    obs = controller.last_obs
+    np.testing.assert_array_equal(obs, encode_single5(obs[:112], obs[112:114], max_wind_m_s=4.5))
+    assert np.linalg.norm(obs[114:116]) < np.linalg.norm(row[114:116])
+    for confirmed in (0, 4, 5, 9):
+        controller.wind_startup.confirmed_hits = confirmed
+        controller.wind_startup.started_tick = 0 if confirmed >= 5 else None
+        outer, inner = np.rad2deg(controller._active_pose_limits())
+        np.testing.assert_allclose(outer, [15., 15.], atol=2e-6)
+        np.testing.assert_allclose(inner, [14.9, 14.9], atol=2e-6)
+
+
+def test_u7832_recording_labels_follow_real_and_mirror_profiles(tmp_path):
+    def sample(profile):
+        return {'runtime': {'policyProfile': profile}, 'policyObs': [0.] * 120,
+                'sim': {'policyProfile': profile, 'policyObs': [0.] * 120}}
+
+    r6 = sample(R6_PROFILE)
+    for rows, expected in (([r6], '4.5'), ([sample(SIM2REAL_PROFILE)], '1.6'),
+                           ([r6, sample(SIM2REAL_PROFILE)], 'profile_wind_max')):
+        data = runtime._make_analysis_data(tmp_path, [], rows, {}, {}, {})
+        assert data['obsNames'][114] == f'estimated_wind_x/{expected}'
+        assert data['simObsNames'][114] == f'estimated_wind_x/{expected}'
 
 
 def test_fixed_pose_does_not_ramp_or_gate_actions(controller):
@@ -198,7 +316,9 @@ def test_history_reset_dropout_and_rate_contract(controller):
 
 def test_runtime_recording_schema_and_switch_back(probe):
     for profile, width, degrees in [('fplc_gpu0_v325', 114, 20), (PROFILE, 120, 7),
-                                    ('fplc_gpu0_v224', 117, 4), (PROFILE, 120, 7),
+                                    (SIM2REAL_PROFILE, 120, 7), ('fplc_gpu0_v224', 117, 4),
+                                    (R6_PROFILE, 120, 17), (SIM2REAL_PROFILE, 120, 7),
+                                    (WIND_EARLY_PROFILE, 120, 7), (PROFILE, 120, 7),
                                     ('fplc_gpu1_v172', 72, 4)]:
         probe._select_policy_profile(profile)
         options = _policy_options(probe, profile)
@@ -215,14 +335,30 @@ def test_runtime_recording_schema_and_switch_back(probe):
             assert c['fplc']['windTraining']['final1200s99accepted'] is False
             assert runtime._policy_observation_feature(list(range(width)), 'RacketPositionObs') == [52, 53, 54]
             assert runtime._policy_observation_feature(list(range(width)), 'BallObservationObs') == [28, 29, 30]
+            expected_scale = 4.5 if profile == R6_PROFILE else 1.6
+            assert c['fplc']['obsWindMaxMS'] == expected_scale
+            names = probe.browser_config()['policy']['observationNames']
+            assert names[114] == f'estimated_wind_x/{expected_scale:g}'
+            wind_segment = next(s for s in c['observationSegments'] if s['start'] == 114)
+            assert wind_segment['unit'] == f'm/s/{expected_scale:g}'
+        if profile in (WIND_EARLY_PROFILE, SIM2REAL_PROFILE):
+            selected = probe.controller
+            assert c['checkpointSha256'] == FPLC_CONTRACTS[profile]['sha256']
+            assert c['fplc']['physicalMetadataSha256'] == selected.contract['physical_metadata_sha256']
+            assert c['fplc']['actorBallAgeMode'] == 'native_refresh_clock'
+            assert c['fplc']['windTraining']['strict_60s_successes'] == 1280
+        if profile == SIM2REAL_PROFILE:
+            assert c['fplc']['windTraining']['s2r_curriculum_stage']['id'] == 9
+            assert c['fplc']['windTraining']['real_twin_strict_60s_successes'] == 640
 
 
 @pytest.mark.parametrize('axis', [0, 1])
 @pytest.mark.parametrize('fault', ['measured', 'target'])
-def test_u416_publish_checks_measured_and_target_at_7deg(probe, monkeypatch, axis, fault):
+@pytest.mark.parametrize(('profile', 'limit'), [(PROFILE, 7.), (SIM2REAL_PROFILE, 7.), (R6_PROFILE, 17.)])
+def test_single5_publish_checks_measured_and_target(probe, monkeypatch, axis, fault, profile, limit):
     p = probe
-    p._select_policy_profile(PROFILE)
-    options = dataclasses.replace(_policy_options(p, PROFILE), publish_commands=True)
+    p._select_policy_profile(profile)
+    options = dataclasses.replace(_policy_options(p, profile), publish_commands=True)
     measured = p.controller.native_reset_arm_q.copy()
     target = measured.copy()
     target[0] += .0001
@@ -234,7 +370,7 @@ def test_u416_publish_checks_measured_and_target_at_7deg(probe, monkeypatch, axi
         publish_right_arm_command=lambda q: issued.append(np.array(q)))
     p.publish_rearm_required = False
     p.command_stream_active = True
-    angle = [6.99]
+    angle = [limit - .01]
     original_pose = p.controller._pose
     def selected_pose(q, **kwargs):
         parts = list(original_pose(q, **kwargs))
@@ -246,12 +382,12 @@ def test_u416_publish_checks_measured_and_target_at_7deg(probe, monkeypatch, axi
     monkeypatch.setattr(p.controller, '_pose', selected_pose)
     assert p._publish_control_command(target, options)
     np.testing.assert_array_equal(issued[-1], target)
-    angle[0] = 7.01
+    angle[0] = limit + .01
     assert not p._publish_control_command(target, options)
     assert p._hard_workspace_stop_active() and p.publish_rearm_required
     expected_fault = 'measured_pose_outside_envelope' if fault == 'measured' else 'target_pose_outside_envelope'
     assert expected_fault in p.publish_rearm_details['faults']
-    np.testing.assert_allclose(p.publish_rearm_details['relativeRollPitchLimitDeg'], [7., 7.], atol=2e-6)
+    np.testing.assert_allclose(p.publish_rearm_details['relativeRollPitchLimitDeg'], [limit, limit], atol=2e-6)
 
 
 
